@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "district"
+version = "0.1.0"
+description = "Fleet manager for agent-factory installs on one host: registry, ports, host config, upgrades, failure cap, status."
+requires-python = ">=3.11"
+dependencies = ["tomli_w>=1.0"]
+
+[project.scripts]
+district = "district.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["district"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
