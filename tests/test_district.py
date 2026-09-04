@@ -638,6 +638,39 @@ class DoctorTest(DistrictCase):
         self.assertIn("FAIL  dashboard port 8765: held by python (pid 99), not factory-widgets-dashboard.service", out)
         self.assertIn("WARN  district-apply.timer: inactive: district dashboard --install", out)
 
+    def test_doctor_rejects_foreign_listener_after_expected_dashboard(self) -> None:
+        repo = self.repo()
+        host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}}}})
+        self.doctor_tools(ss=(
+            'LISTEN 0 4096 127.0.0.1:8765 0.0.0.0:* users:(("factory",pid=42,fd=3))\n'
+            'LISTEN 0 4096 0.0.0.0:8765 0.0.0.0:* users:(("python",pid=99,fd=4))\n'
+        ))
+        self.stub(
+            "systemctl",
+            ("is-system-running", "running\n"),
+            ("show -p MainPID --value factory-widgets-dashboard.service", "42\n"),
+            ("show -p LoadState --value *", "not-found\n"),
+        )
+        with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
+            code, out = self.district("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL  dashboard port 8765: held by python (pid 99), not factory-widgets-dashboard.service", out)
+
+    def test_doctor_warns_for_broken_existing_unit(self) -> None:
+        host.save({})
+        self.doctor_tools()
+        self.stub(
+            "systemctl",
+            ("is-system-running", "running\n"),
+            ("show -p LoadState --value district-health.timer", "bad-setting\n"),
+            ("show -p LoadState --value *", "not-found\n"),
+            ("is-active district-health.timer", "failed\n", 3),
+        )
+        with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
+            code, out = self.district("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("WARN  district-health.timer: failed: district dashboard --install", out)
+
     def test_doctor_reports_malformed_host_and_missing_factory(self) -> None:
         host.path().parent.mkdir(parents=True)
         host.path().write_text("[broken")

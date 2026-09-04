@@ -90,16 +90,17 @@ def port_rows(data: dict) -> list[dict[str, str]]:
         if proc.returncode:
             rows.append(row("FAIL", f"dashboard port {port}", f"ss -ltnp exited {proc.returncode}"))
             continue
-        match = re.search(r'users:\(\("([^"\n]+)",pid=(\d+)', proc.stdout)
-        if not match:
+        listeners = re.findall(r'users:\(\("([^"\n]+)",pid=(\d+)', proc.stdout)
+        if not listeners:
             rows.append(row("PASS", f"dashboard port {port}", "free"))
             continue
-        process, pid = match.groups()
         main_pid = systemctl("show", "-p", "MainPID", "--value", unit).stdout.strip()
-        if pid == main_pid:
-            rows.append(row("PASS", f"dashboard port {port}", f"held by {unit}"))
-        else:
+        foreign = next(((process, pid) for process, pid in listeners if pid != main_pid), None)
+        if foreign:
+            process, pid = foreign
             rows.append(row("FAIL", f"dashboard port {port}", f"held by {process} (pid {pid}), not {unit}"))
+        else:
+            rows.append(row("PASS", f"dashboard port {port}", f"held by {unit}"))
     return rows
 
 
@@ -120,7 +121,7 @@ def unit_rows() -> list[dict[str, str]]:
     rows = []
     for unit in UNITS:
         loaded = systemctl("show", "-p", "LoadState", "--value", unit).stdout.strip()
-        if loaded not in ("loaded", "masked"):
+        if loaded in ("", "not-found"):
             continue
         active = systemctl("is-active", unit)
         state = active.stdout.strip()
