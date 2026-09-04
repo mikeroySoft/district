@@ -17,16 +17,13 @@ import subprocess
 import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import urlparse
 
-from district import host, status
+from district import atlas, host, status
 
 DEFAULT_PORT = 8760
 ACTIONS = ("add", "apply", "rm")
 DISTRICT = [sys.executable, "-m", "district"]
-# ponytail: static cut until atlas.py renders the page from the live fleet (deliverable 4)
-ATLAS_HTML = Path(__file__).resolve().parents[1] / "atlas" / "district-atlas.html"
 
 
 def is_loopback(addr: str) -> bool:
@@ -42,10 +39,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         if path == "/":
-            self._send(200, "text/html; charset=utf-8", ATLAS_HTML.read_bytes())
+            self._send(200, "text/html; charset=utf-8", atlas.page(status.fleet(host.load())).encode())
         elif path == "/api/fleet":
             fleet = status.fleet(host.load())
-            self._send(200, "application/json", json.dumps({"fleet": fleet}).encode())
+            self._send(200, "application/json", json.dumps({"fleet": fleet, "data": atlas.data(fleet)}).encode())
         else:
             self.send_error(404)
 
