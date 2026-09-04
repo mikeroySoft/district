@@ -716,6 +716,59 @@ class DashboardTest(DistrictCase):
         self.assertIn("nope is not registered", out)
         self.assertTrue(out.endswith("[exit 1]\n"), out)
 
+    def test_explicit_host_requires_bearer_for_actions_and_detect(self) -> None:
+        import threading
+        import urllib.error
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+
+        class ExplicitHandler(dash.Handler):
+            explicit_host = True
+            token = "secret"
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ExplicitHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        action = lambda token=None: urllib.request.Request(
+            base + "/api/act", data=b'{"args":["apply","--reset","nope"]}', method="POST",
+            headers={"X-District-Act": "1", **({"Authorization": f"Bearer {token}"} if token else {})},
+        )
+        detect = lambda token=None: urllib.request.Request(
+            base + "/api/detect?target=.", headers={"Authorization": f"Bearer {token}"} if token else {},
+        )
+        for request in (action(), action("wrong"), detect(), detect("wrong")):
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(request)
+            self.assertEqual(ctx.exception.code, 401)
+            self.assertEqual(ctx.exception.headers["WWW-Authenticate"], "Bearer")
+
+        out = urllib.request.urlopen(action("secret")).read().decode()
+        self.assertIn("$ district apply --reset nope", out)
+        response = json.loads(urllib.request.urlopen(detect("secret")).read())
+        self.assertIn("repo: acme/widgets", response["output"])
+
+    def test_loopback_server_does_not_require_bearer(self) -> None:
+        import threading
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+
+        class LoopbackHandler(dash.Handler):
+            explicit_host = False
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), LoopbackHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        req = urllib.request.Request(
+            base + "/api/act", data=b'{"args":["apply","--reset","nope"]}', method="POST",
+            headers={"X-District-Act": "1"},
+        )
+        self.assertIn("$ district apply --reset nope", urllib.request.urlopen(req).read().decode())
+        response = json.loads(urllib.request.urlopen(base + "/api/detect?target=.").read())
+        self.assertIn("repo: acme/widgets", response["output"])
+
+
     def test_install_writes_units(self) -> None:
         code, out = self.district("dashboard", "--install", "--port", "8761")
         self.assertEqual(code, 0, out)
@@ -730,6 +783,19 @@ class DashboardTest(DistrictCase):
         self.assertIn("enable --now district-dashboard.service", calls)
         self.assertIn("enable --now district-metrics.timer", calls)
         self.assertLess(calls.index("daemon-reload"), calls.index("enable --now district-metrics.timer"))
+
+    def test_install_creates_stable_private_token(self) -> None:
+        token_path = self.tmp / "xdg" / "district" / "token"
+        code, out = self.district("dashboard", "--install")
+        self.assertEqual(code, 0, out)
+        token = token_path.read_text()
+        self.assertEqual(token_path.stat().st_mode & 0o777, 0o600)
+        self.assertIn(f"actions from other hosts need the token in {token_path}", out)
+
+        code, second_out = self.district("dashboard", "--install")
+        self.assertEqual(code, 0, second_out)
+        self.assertEqual(token_path.read_text(), token)
+        self.assertNotIn("actions from other hosts need the token", second_out)
 
 
 class DryRunTest(DistrictCase):

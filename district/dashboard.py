@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hmac
 import ipaddress
 import json
 import os
+import secrets
 import subprocess
 import sys
 import webbrowser
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -38,10 +41,41 @@ def act_allowed(client: str, explicit_host: bool, header: str | None) -> bool:
     and only with the custom header (forces a CORS preflight a stray page cannot pass)."""
     return (is_loopback(client) or explicit_host) and header == "1"
 
+def token_path() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "district" / "token"
+
+
+def ensure_token() -> str:
+    path = token_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, "w") as token_file:
+            token_file.write(secrets.token_urlsafe(32))
+    path.chmod(0o600)
+    return path.read_text()
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # chunked streaming for /api/act
     explicit_host = False  # main() sets True when --host was given and is not loopback
+    token = ""
+
+    def _require_bearer(self) -> bool:
+        if not self.explicit_host or hmac.compare_digest(self.headers.get("Authorization") or "", f"Bearer {self.token}"):
+            return True
+        body = b"bearer token required\n"
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", "Bearer")
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+        return False
 
     def do_GET(self) -> None:
         url = urlparse(self.path)
@@ -51,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
             fleet = status.fleet(host.load())
             self._send(200, "application/json", json.dumps({"fleet": fleet, "data": atlas.data(fleet)}).encode())
         elif url.path == "/api/detect":
+            if not self._require_bearer():
+                return
             # `add --dry-run` runs gh repo view (fork parent) and the check proposal; it writes nothing
             target = parse_qs(url.query).get("target", [""])[0].strip()
             if not target:
@@ -65,6 +101,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if urlparse(self.path).path != "/api/act":
             self.send_error(404)
+            return
+        if not self._require_bearer():
             return
         if not act_allowed(self.client_address[0], self.explicit_host, self.headers.get("X-District-Act")):
             self.send_error(403)
@@ -135,6 +173,9 @@ def units(host_arg: str | None, port: int) -> dict[str, str]:
 
 
 def install(host_arg: str | None, port: int) -> int:
+    auth_path = token_path()
+    created_token = not auth_path.exists()
+    ensure_token()
     udir = host.unit_dir()
     udir.mkdir(parents=True, exist_ok=True)
     wanted = units(host_arg, port)
@@ -143,6 +184,8 @@ def install(host_arg: str | None, port: int) -> int:
         if not path.exists() or path.read_text() != body:
             path.write_text(body)
             print(f"wrote {path}")
+    if created_token:
+        print(f"actions from other hosts need the token in {auth_path}")
     host.systemctl("daemon-reload")
     for unit in ("district-dashboard.service", "district-metrics.timer"):
         host.systemctl("enable", "--now", unit)
@@ -154,7 +197,7 @@ def install(host_arg: str | None, port: int) -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district dashboard", description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--host", default=None, help="bind address (default 127.0.0.1); anything else also opens /api/act")
+    parser.add_argument("--host", default=None, help="bind address (default 127.0.0.1); remote actions require the dashboard token")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
     parser.add_argument("--install", action="store_true", help="write and enable district-dashboard.service and district-metrics.timer")
@@ -163,6 +206,8 @@ def main(argv: list[str]) -> int:
         return install(args.host, args.port)
     bind = args.host or "127.0.0.1"
     Handler.explicit_host = args.host is not None and not is_loopback(args.host)
+    if Handler.explicit_host:
+        Handler.token = ensure_token()
     server = ThreadingHTTPServer((bind, args.port), Handler)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"district dashboard: listening on {bind}:{args.port}", flush=True)
