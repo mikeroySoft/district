@@ -556,6 +556,102 @@ class HealthTest(unittest.TestCase):
         self.assertEqual(self.level(), ("healthy", []))
 
 
+class DoctorTest(DistrictCase):
+    def doctor_tools(self, factory=("factory 0.2.0 (abc1234)\n", 0), gh=("", 0), system="running\n", linger="yes\n",
+                     ss=""):
+        self.stub("factory", ("--version", *factory))
+        self.stub("gh", ("auth status", *gh))
+        self.stub(
+            "systemctl",
+            ("is-system-running", system),
+            ("show -p LoadState --value *", "not-found\n"),
+            ("show -p MainPID --value *", "0\n"),
+            ("is-active *", "inactive\n", 3),
+        )
+        self.stub("loginctl", ("show-user * -p Linger --value", linger))
+        self.stub("ss", ("-ltnp sport = :*", ss))
+
+    def test_doctor_json_passes_host_prerequisites(self) -> None:
+        repo = self.repo()
+        clone_dir = self.tmp / "clones"
+        clone_dir.mkdir()
+        host.save({
+            "defaults": {
+                "clone_dir": str(clone_dir),
+                "engine": {"sha": "abc1234"},
+                "install": {"env": {"UV_EXCLUDE_NEWER": "2026-09-03T00:00:00Z", "NPM_CONFIG_MIN_RELEASE_AGE": "1"}},
+            },
+            "repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}}},
+        })
+        self.doctor_tools()
+        with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name != "cargo" else None):
+            code, out = self.district("doctor", "--json")
+        report = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(set(report), {"ok", "rows"})
+        self.assertTrue(report["ok"])
+        self.assertTrue(all(row["status"] == "PASS" for row in report["rows"]), report["rows"])
+        self.assertIn({"status": "PASS", "label": "host file", "detail": str(host.path())}, report["rows"])
+        self.assertIn({"status": "PASS", "label": "repo acme/widgets", "detail": f"{repo}: origin resolves to acme/widgets"}, report["rows"])
+
+    def test_doctor_reports_prerequisite_warnings_and_failures(self) -> None:
+        missing = self.tmp / "missing"
+        host.save({
+            "defaults": {"clone_dir": str(missing), "engine": {"sha": "abc1234"}, "install": {"env": {}}},
+            "repo": {
+                "acme/widgets": {"path": str(missing), "dashboard": {"port": 8765}},
+                "acme/gadgets": {"path": str(missing), "dashboard": {"port": 8765}},
+            },
+        })
+        self.doctor_tools(factory=("factory 0.2.0 (abc9999)\n", 0), gh=("not logged in\n", 1), system="offline\n", linger="no\n")
+        with mock.patch("district.doctor.shutil.which", return_value="/bin/tool"):
+            code, out = self.district("doctor", "--json")
+        rows = json.loads(out)["rows"]
+        rendered = "\n".join(f"{r['status']} {r['label']}: {r['detail']}" for r in rows)
+        self.assertEqual(code, 1)
+        self.assertIn("WARN factory: installed abc9999, expected abc1234", rendered)
+        self.assertIn("FAIL gh auth: gh auth status exited 1", rendered)
+        self.assertIn("FAIL systemd user manager: offline", rendered)
+        self.assertIn("WARN linger: timers stop at logout: loginctl enable-linger", rendered)
+        self.assertIn(f"FAIL repo acme/widgets: {missing} does not exist", rendered)
+        self.assertIn("FAIL dashboard port 8765: shared by acme/gadgets, acme/widgets", rendered)
+        self.assertIn(f"WARN clone_dir: {missing} is not a directory", rendered)
+        self.assertIn("WARN policy uv: UV_EXCLUDE_NEWER missing: district apply writes it", rendered)
+        self.assertIn("WARN policy npm: NPM_CONFIG_MIN_RELEASE_AGE missing: district apply writes it", rendered)
+        self.assertIn("WARN policy cargo: cargo has no minimum-release-age control; crates.io installs are unguarded", rendered)
+
+    def test_doctor_detects_foreign_port_holder_and_inactive_existing_unit(self) -> None:
+        repo = self.repo()
+        host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}}}})
+        self.doctor_tools(ss='LISTEN 0 4096 127.0.0.1:8765 0.0.0.0:* users:(("python",pid=99,fd=3))\n')
+        self.stub(
+            "systemctl",
+            ("is-system-running", "degraded\n"),
+            ("show -p MainPID --value factory-widgets-dashboard.service", "42\n"),
+            ("show -p LoadState --value district-apply.timer", "loaded\n"),
+            ("show -p LoadState --value *", "not-found\n"),
+            ("is-active district-apply.timer", "inactive\n", 3),
+        )
+        with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name in {"factory"} else None):
+            code, out = self.district("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL  dashboard port 8765: held by python (pid 99), not factory-widgets-dashboard.service", out)
+        self.assertIn("WARN  district-apply.timer: inactive: district dashboard --install", out)
+
+    def test_doctor_reports_malformed_host_and_missing_factory(self) -> None:
+        host.path().parent.mkdir(parents=True)
+        host.path().write_text("[broken")
+        self.doctor_tools()
+        with mock.patch("district.doctor.shutil.which", return_value=None):
+            code, out = self.district("doctor", "--json")
+        rows = json.loads(out)["rows"]
+        self.assertEqual(code, 1)
+        self.assertEqual(rows[0]["status"], "FAIL")
+        self.assertEqual(rows[0]["label"], "host file")
+        self.assertIn(str(host.path()), rows[0]["detail"])
+        self.assertIn({"status": "FAIL", "label": "factory", "detail": "not found on PATH"}, rows)
+
+
 GH_METRICS = [
     ("repo view *", json.dumps({"stargazerCount": 3, "forkCount": 1, "watchers": {"totalCount": 2}})),
     ("issue list * --state open *", json.dumps([
