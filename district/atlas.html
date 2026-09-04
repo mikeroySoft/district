@@ -583,9 +583,11 @@ function nodeLabel(x, y, b) {
     const nm = document.createElementNS(SVGNS, 'tspan'); nm.textContent = b.name; t.appendChild(nm);
   } else t.textContent = b.name;
 }
-function finishScene(svg, key) {
-  const bb = svg.getBBox();
-  let box = [bb.x - 16, bb.y - 16, bb.width + 32, bb.height + 32];
+function finishScene(svg, key, ground) {
+  const bb = svg.getBBox(), xs = ground.map(p => p[0]), ys = ground.map(p => p[1]);
+  const x0 = Math.min(bb.x, ...xs), y0 = Math.min(bb.y, ...ys);
+  const x1 = Math.max(bb.x + bb.width, ...xs), y1 = Math.max(bb.y + bb.height, ...ys);
+  let box = [x0 - 16, y0 - 16, x1 - x0 + 32, y1 - y0 + 32];
   if (key && ISO_BOX[key]) {
     const o = ISO_BOX[key];
     const x0 = Math.min(box[0], o[0]), y0 = Math.min(box[1], o[1]);
@@ -848,7 +850,6 @@ function drawBuilding(svg, b) {
   return g;
 }
 function buildIso(svg) {
-  const G = { x0: -1.8, y0: -1.8, x1: 36.5, y1: 24.0 };
   const corners = [[G.x0, G.y0], [G.x1, G.y0], [G.x1, G.y1], [G.x0, G.y1]];
   el('polygon', { points: pts(corners.map(q => isoP(q[0], q[1], 0))),
                   fill: '#0E1219', stroke: '#202836', 'stroke-width': 1 }, svg);
@@ -888,12 +889,11 @@ function buildIso(svg) {
   svg.appendChild(labelLayer);
   svg.appendChild(BLDG_LABELS);
   drawPayloads(svg);
-  finishScene(svg, 'iso');
+  finishScene(svg, 'iso', corners.map(q => isoP(q[0], q[1], 0)));
 }
 
 /* ================= Theme 2: flat map (dark chart) ================= */
 function buildMap(svg) {
-  const G = { x0: -1.8, y0: -1.8, x1: 36.5, y1: 24.0 };
   el('rect', { x: G.x0 * FS, y: G.y0 * FS, width: (G.x1 - G.x0) * FS, height: (G.y1 - G.y0) * FS,
                fill: '#0A141E', stroke: '#202836', 'stroke-width': 1 }, svg);
   const grat = el('g', { stroke: '#FFFFFF', 'stroke-opacity': 0.04, 'stroke-width': 1 }, svg);
@@ -933,12 +933,11 @@ function buildMap(svg) {
   svg.appendChild(labelLayer);
   svg.appendChild(BLDG_LABELS);
   drawPayloads(svg);
-  finishScene(svg, null);
+  finishScene(svg, null, [[G.x0, G.y0], [G.x1, G.y0], [G.x1, G.y1], [G.x0, G.y1]].map(q => flat(q[0], q[1])));
 }
 
 /* ================= Theme 3: deep space ================= */
 function buildSpace(svg) {
-  const G = { x0: -1.8, y0: -1.8, x1: 36.5, y1: 24.0 };
   const corners = [[G.x0, G.y0], [G.x1, G.y0], [G.x1, G.y1], [G.x0, G.y1]];
   el('polygon', { points: pts(corners.map(q => isoP(q[0], q[1], 0))),
                   fill: '#05070D', stroke: '#1A2334', 'stroke-width': 1 }, svg);
@@ -1010,7 +1009,7 @@ function buildSpace(svg) {
   svg.appendChild(labelLayer);
   svg.appendChild(BLDG_LABELS);
   drawPayloads(svg);
-  finishScene(svg, 'space');
+  finishScene(svg, 'space', corners.map(q => isoP(q[0], q[1], 0)));
 }
 
 /* ================= Theme switching + view widget ================= */
