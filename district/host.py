@@ -1,4 +1,4 @@
-"""The host file `$XDG_CONFIG_HOME/agent-factory/config.toml` is the registry.
+"""The host file `$XDG_CONFIG_HOME/factory/config.toml` is the registry.
 
 agent-factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
@@ -32,7 +32,7 @@ class DistrictError(SystemExit):
 
 def path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
-    return Path(base) / "agent-factory" / "config.toml"
+    return Path(base) / "factory" / "config.toml"
 
 
 def unit_dir() -> Path:
@@ -41,6 +41,13 @@ def unit_dir() -> Path:
 
 def load() -> dict:
     p = path()
+    old = p.parents[1] / "agent-factory" / "config.toml"
+    if old.exists():
+        if p.exists():
+            raise DistrictError(f"both {old} and {p} exist; merge them before continuing")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        old.rename(p)
+        print(f"district: migrated host config {old} -> {p}")
     if not p.exists():
         return {}
     try:

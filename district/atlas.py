@@ -122,7 +122,7 @@ STATIC_BLOCKS = r"""  // GitHub (back row)
     files:[ ['mikeroySoft/district@f413e8c/district/add.py',299,'add: onboard / adopt'], ['mikeroySoft/district@f413e8c/district/apply.py',92,'upgrade(): stop → wait → reinstall'], ['mikeroySoft/district@f413e8c/district/apply.py',181,'failure cap → timer disabled'], ['mikeroySoft/district@f413e8c/district/status.py',49,'row(): health per factory'] ],
     conn:'Writes the host file and drives factory; reads dashboard --json.' },
   { id:'hostcfg', name:'Host file (registry + defaults)', cat:'district', gx:0.4, gy:19.2, w:2.6, d:1.4, h:8, kind:'slab',
-    blurb:'~/.config/agent-factory/config.toml — the registry is the config. Per factory only path and dashboard port; everything the fleet agrees on (triage endpoint, install cadence, bind host, policy env) is promoted into [defaults]. Nothing here is ever committed to a repo.',
+    blurb:'~/.config/factory/config.toml — the registry is the config. Per factory only path and dashboard port; everything the fleet agrees on (triage endpoint, install cadence, bind host, policy env) is promoted into [defaults]. Nothing here is ever committed to a repo.',
     files:[ ['mikeroySoft/district@f413e8c/district/host.py',83,'dedupe(): promote agreed values'], ['mikeroySoft/district@f413e8c/district/host.py',75,'next_port()'], ['mikeroySoft/factory@8f9baad/agent_factory/config.py',218,'read by config.load'] ],
     conn:'Written by district; read by every factory command.' },
   { id:'install', name:'Engine install (uv tool, one snapshot)', cat:'district', gx:0.4, gy:21.2, w:2.6, d:1.2, h:12, kind:'depot',

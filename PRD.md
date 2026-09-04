@@ -74,7 +74,7 @@ internals. For that boundary to hold, agent-factory must be able to check and
 render one repo *against host config* on its own. Three changes, all small:
 
 1. **Host config layer.** `config.load()` also reads
-   `~/.config/agent-factory/config.toml` when present. Merge order, lowest to
+   `~/.config/factory/config.toml` when present. Merge order, lowest to
    highest precedence: `[defaults.*]` → `[repo."owner/name".*]` → repo
    `.factory.toml`. Tables have the same shape as `.factory.toml`. Unknown keys
    are ignored, so District may keep its own registry data (e.g. `path`) in the
@@ -199,8 +199,8 @@ registry entry. Repo files are not touched; the factory can be re-added later.
 
 ### 5.5 Registry
 
-The host config file *is* the registry. No second store. A repo is managed iff
-it has a `[repo."owner/name"]` table with a `path`.
+The host config file at `~/.config/factory/config.toml` *is* the registry. No
+second store. A repo is managed iff it has a `[repo."owner/name"]` table with a `path`.
 
 ### 5.6 `district dashboard` — the bird's-eye view
 

@@ -150,6 +150,39 @@ class DistrictCase(unittest.TestCase):
 
 
 class HostTest(DistrictCase):
+    def test_path_uses_factory_config_directory(self) -> None:
+        self.assertEqual(host.path(), self.tmp / "xdg" / "factory" / "config.toml")
+
+    def test_load_migrates_old_host_file(self) -> None:
+        old = self.tmp / "xdg" / "agent-factory" / "config.toml"
+        old.parent.mkdir(parents=True)
+        old.write_text('[repo."acme/widgets"]\npath = "/x"\n')
+        out = io.StringIO()
+
+        with contextlib.redirect_stdout(out):
+            data = host.load()
+
+        self.assertEqual(data["repo"]["acme/widgets"]["path"], "/x")
+        self.assertFalse(old.exists())
+        self.assertTrue(host.path().exists())
+        self.assertIn(f"{old} -> {host.path()}", out.getvalue())
+
+    def test_load_refuses_old_and_new_host_files(self) -> None:
+        old = self.tmp / "xdg" / "agent-factory" / "config.toml"
+        old.parent.mkdir(parents=True)
+        old.write_text("")
+        host.save({})
+
+        with self.assertRaises(host.DistrictError) as raised:
+            host.load()
+
+        self.assertIn(str(old), str(raised.exception))
+        self.assertIn(str(host.path()), str(raised.exception))
+        self.assertIn("merge", str(raised.exception))
+
+    def test_load_without_host_file_is_empty(self) -> None:
+        self.assertEqual(host.load(), {})
+
     def test_round_trip_regex_strings(self) -> None:
         pattern = r'internal|\.corp|say "hi"|c:\path'
         host.save({"defaults": {"leak": {"p": pattern}}, "repo": {"acme/widgets": {"path": "/x", "dashboard": {"port": 8765}}}})
