@@ -10,6 +10,7 @@ COMMANDS = {
     "apply": ("apply", "main", "reconcile the host to the registry; --upgrade reinstalls agent-factory"),
     "status": ("status", "main", "one-screen fleet table; nonzero if any factory is unhealthy"),
     "rm": ("rm", "main", "remove a repository's units and registry entry; repo files untouched"),
+    "metrics": ("metrics", "main", "per-factory git/gh metrics (cached hourly); --refresh recollects"),
 }
 
 

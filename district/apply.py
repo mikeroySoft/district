@@ -38,10 +38,10 @@ def iso(dt: datetime) -> str:
 # ---------------------------------------------------------------- supply-chain policy
 
 
-def hours(age: str) -> float:
+def hours(age: str, what: str = "[defaults].min_package_age") -> float:
     m = DURATION.match(str(age).strip())
     if not m:
-        raise DistrictError(f"[defaults].min_package_age {age!r}: use e.g. \"24h\", \"2d\", \"90min\", or \"0\"")
+        raise DistrictError(f"{what} {age!r}: use e.g. \"24h\", \"2d\", \"90min\", or \"0\"")
     n, unit = float(m.group(1)), m.group(2) or "h"
     return n * {"h": 1, "d": 24, "m": 1 / 60, "min": 1 / 60, "s": 1 / 3600}[unit]
 
