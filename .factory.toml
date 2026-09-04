@@ -1,0 +1,16 @@
+# agent-factory configuration. Docs: https://github.com/mikeroySoft/factory
+# Gate check from the repository's documented test command.
+
+[[gate.check]]
+name = "test"
+run = [
+    "uv",
+    "run",
+    "python",
+    "-m",
+    "unittest",
+    "discover",
+    "-s",
+    "tests",
+]
+exclusive = false
