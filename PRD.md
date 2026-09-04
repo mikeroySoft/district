@@ -202,15 +202,83 @@ registry entry. Repo files are not touched; the factory can be re-added later.
 The host config file *is* the registry. No second store. A repo is managed iff
 it has a `[repo."owner/name"]` table with a `path`.
 
+### 5.6 `district dashboard` — the bird's-eye view
+
+One page for the whole district, served by District on its own port and
+installed as `district-dashboard.service`. The hierarchy is District → Factory;
+it never descends into a factory's tickets. Each factory tile links to that
+factory's own dashboard for detail.
+
+The primary surface is the **District Atlas**: an isometric city in which every
+managed repository is a building whose height is proportional to its tracked
+lines of code, standing on a plate with the shared engine, the District control
+tower, host runtime, and GitHub. Roads are the real control/data paths, cited
+to `file:line`. Built from the codebase-atlas engine; `atlas/build_atlas.py`
+is the renderer seam and `atlas/district-atlas.html` the first static cut
+(snapshot 2026-09-04). The live page regenerates the DATA blocks from the
+registry, a LOC scan, and each factory's `dashboard --json`.
+
+Above the map, an exec KPI strip: factory count, health tally, code under
+management, engine version spread, velocity, open work, defects, traffic.
+Clicking a factory shows its health signals and the metrics in §5.7.
+
+### 5.7 Health and metrics model
+
+A factory's notifications stay with the factory. District derives one
+**health** level per factory from `factory dashboard --json` alone:
+
+| Level | Any of |
+|---|---|
+| failing | timer inactive or District-disabled · last pass failed · snapshot `errors` non-empty · `consecutive_failures ≥ 1` · dashboard unreachable |
+| attention | open `ready-for-human` · upstream sync parked · bounce rate > 33% · doctor WARN |
+| healthy | none of the above |
+
+Exec metrics per factory, all sourced from `git`, `gh`, or the snapshot — never
+estimated:
+
+- **Size**: tracked LOC (by language), files, test LOC/files.
+- **People**: contributor count, top-3 author share, commits (all / 30d / 7d).
+- **Velocity**: merged PRs 30d (and how many from `agent/` branches), commits 30d.
+- **Work**: open issues by factory label, open PRs, tickets tracked.
+- **Quality**: first-gate pass %, bounce rate, escalations, open bug-labelled issues.
+- **Resolution**: issues closed 30d, bug-labelled closed 30d, median days-to-close.
+- **Traffic**: 14-day clones/views (count, unique), stars, forks, watchers.
+- **Engine**: version, timer state, last pass, consecutive failures.
+
+`district status --json` gains these fields so the terminal, the dashboard, and
+the atlas share one source. Metrics that need `git`/`gh` are collected on a
+timer (hourly is enough), not on page load.
+
+### 5.8 Per-factory engine version
+
+A factory may pin an engine version: `[repo."owner/name".engine] version =
+"0.2.0"` (git ref or release tag). District keeps one venv per distinct pinned
+version under `~/.local/share/district/engines/<version>/` and `factory
+install` renders `ExecStart` from `[install].python` so each factory's units
+point at the venv for its version. Unpinned factories track
+`[defaults.engine].version`. `district apply --upgrade` upgrades the default;
+`district apply --upgrade <slug>` moves one pin. `district status` shows the
+version spread; a factory more than one release behind the default is an
+`attention` signal. Requires: `[install].python` in agent-factory (S).
+
+### 5.9 Management surfaces
+
+The dashboard exposes the same operations as the CLI, with confirmation:
+onboard a repository (the `add` questionnaire as a form: path/URL, detected
+fork parent, proposed gate checks, exclusive flags), adopt, upgrade (fleet or
+one factory), reset a capped timer, remove. Every action shells out to the
+`district` CLI; the page never mutates state itself, so the CLI stays the
+audited path and the page stays a thin client.
+
 ## 6. Non-goals
 
 Deliberate, with the condition under which each would be reconsidered.
 
-- **Combined web dashboard.** `status` covers the terminal; per-repo dashboards
-  stay in browser tabs. Revisit when tab-switching is the measured bottleneck.
-- **Per-repo version pinning.** One host install → one version. Rollback is
-  `git revert` in agent-factory then `apply --upgrade`. Revisit if a second
-  operator needs to lag a release.
+- ~~Combined web dashboard~~ — **reversed 2026-09-04**, see §5.6. Three
+  factories was enough to make "is the fleet healthy?" a question the terminal
+  table answers but an exec view does not.
+- ~~Per-repo version pinning~~ — **reversed 2026-09-04**, see §5.8. A factory
+  with outside contributors may need to lag an engine release.
 - **Cross-repo ticket routing, shared lessons, any plugin system.** No evidence
   of need.
 - **Multi-host or multi-user.** New PRD.
