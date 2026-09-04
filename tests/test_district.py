@@ -657,6 +657,16 @@ class AtlasTest(unittest.TestCase):
         self.assertIn("2 unavailable", data)
         self.assertEqual(atlas.data({}).count('"id": "f_'), 0)
 
+    def test_ground_bounds_follow_factory_plate(self) -> None:
+        for count, expected_x1 in ((3, 36.5), (10, None)):
+            fleet = {f"acme/factory-{i}": fleet_entry(100) for i in range(count)}
+            script = atlas.data(fleet) + "\nconsole.log(JSON.stringify([G.x1, PLATES.find(p => p.name === 'FACTORIES').x1]));"
+            proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            ground_x1, plate_x1 = json.loads(proc.stdout)
+            self.assertEqual(ground_x1, expected_x1) if expected_x1 is not None else self.assertGreater(ground_x1, plate_x1)
+
+
     def test_data_is_valid_javascript(self) -> None:
         node = __import__("shutil").which("node")
         if not node:

@@ -402,7 +402,6 @@ def data(fleet: dict) -> str:
     blocks = [factory_block(i, slug, e, max_loc) for i, (slug, e) in enumerate(fleet.items())]
     paths = [p for b in blocks for p in factory_paths(b)]
     x1 = max(24.5, round(max((b["gx"] + b["w"] for b in blocks), default=0) + 1.4, 2))
-    # ponytail: the engine's ground bounds (G in atlas.html) fit ~4 factories; widen G with x1 when the fleet outgrows them
     plates = [
         {"name": "GITHUB", "cat": "ext", "x0": 6, "y0": -0.8, "x1": 25, "y1": 3.4},
         {"name": "HOST RUNTIME", "cat": "runtime", "x0": 26.5, "y0": 12, "x1": 35.5, "y1": 21.5},
@@ -411,8 +410,10 @@ def data(fleet: dict) -> str:
         {"name": "DISTRICT", "cat": "district", "x0": -0.8, "y0": 11.6, "x1": 4.6, "y1": 23},
         {"name": "FACTORIES", "cat": "factory", "x0": 7, "y0": 15, "x1": x1, "y1": 22.4},
     ]
+    ground = {"x0": -1.8, "y0": -1.8, "x1": max(36.5, x1 + 1.2), "y1": 24.0}
     return (
         HEAD
+        + f"\nconst G = {js(ground)};\n"
         + "\n/* ---- Buildings ---- */\nconst B = [\n" + STATIC_BLOCKS
         + "\n  // Factories (front, LOC-scaled)\n" + "".join(f"  {js(b)},\n" for b in blocks) + "];\n"
         + "\n/* ---- Districts (ground plates) ---- */\nconst PLATES = [\n" + "".join(f"  {js(p)},\n" for p in plates) + "];\n"
