@@ -7,6 +7,7 @@ never modifies a committed file. Exit nonzero when any repo is not converged.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
@@ -209,38 +210,49 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--upgrade", action="store_true", help="reinstall agent-factory from [defaults].factory_source first")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
     args = parser.parse_args(argv)
+    from district import metrics
 
-    data = host.load()
-    targets = host.select(data, args.reset or args.slug)
-    if not targets:
-        print("no repositories registered (district add)")
-        return 0
-    status, warnings = policy(data)
-    host.save(data)
 
-    all_timers = [f"{host.unit_name(s)}.timer" for s in host.repos(data)]
-    active = [t for t in all_timers if host.is_active(t) == "active"]
-    rows = []
-    code = 0
-    try:
-        if args.upgrade:
-            upgrade(data, active)
-        for slug, table in targets.items():
-            if args.reset and not reset(slug, table, data):
-                code = 1
-            rows.append(repo_pass(slug, table, data))
-    finally:
-        if args.upgrade:
-            restore(active, data)
+    lock_path = metrics.cache_dir().parent / "apply.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"district apply: another apply is running ({lock_path})", file=sys.stderr)
+            return 1
 
-    for row in rows:
-        print(line(row, status))
-    for w in warnings:
-        print(w)
-    versions = {r["version"] for r in rows}
-    if any(r["fail"] or r["disabled"] or r["timer"] != "active" for r in rows):
-        code = 1
-    if len(versions) > 1:
-        print(f"versions differ across the fleet: {', '.join(str(v) for v in sorted(versions, key=str))}")
-        code = 1
-    return code
+        data = host.load()
+        targets = host.select(data, args.reset or args.slug)
+        if not targets:
+            print("no repositories registered (district add)")
+            return 0
+        status, warnings = policy(data)
+        host.save(data)
+
+        all_timers = [f"{host.unit_name(s)}.timer" for s in host.repos(data)]
+        active = [t for t in all_timers if host.is_active(t) == "active"]
+        rows = []
+        code = 0
+        try:
+            if args.upgrade:
+                upgrade(data, active)
+            for slug, table in targets.items():
+                if args.reset and not reset(slug, table, data):
+                    code = 1
+                rows.append(repo_pass(slug, table, data))
+        finally:
+            if args.upgrade:
+                restore(active, data)
+
+        for row in rows:
+            print(line(row, status))
+        for w in warnings:
+            print(w)
+        versions = {r["version"] for r in rows}
+        if any(r["fail"] or r["disabled"] or r["timer"] != "active" for r in rows):
+            code = 1
+        if len(versions) > 1:
+            print(f"versions differ across the fleet: {', '.join(str(v) for v in sorted(versions, key=str))}")
+            code = 1
+        return code
