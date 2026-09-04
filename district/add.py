@@ -175,9 +175,78 @@ def fork_parent(slug: str) -> str | None:
     return parent.get("nameWithOwner") or (f"{parent['owner']['login']}/{parent['name']}" if parent.get("owner") else None)
 
 
+WORKFLOW_COMMANDS = {
+    "cargo", "npm", "pnpm", "yarn", "bun", "pytest", "ruff", "uv", "python",
+    "python3", "make", "go", "mvn", "gradle", "./gradlew", "dotnet", "ctest",
+    "cmake", "tox", "nox", "mypy", "pyright", "eslint", "prettier", "tsc",
+    "black", "flake8", "pylint",
+}
+
+
+def workflow_runs(root: Path) -> list[tuple[Path, int, str, str]]:
+    """Allowed commands from GitHub Actions run steps."""
+    runs = []
+    workflows = root / ".github" / "workflows"
+    paths = sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml"))) if workflows.is_dir() else []
+    for path in paths:
+        lines = path.read_text().splitlines()
+        step_name = ""
+        step_indent = -1
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            indent = len(line) - len(line.lstrip())
+            if re.match(r"\s*-\s+", line) and indent <= step_indent:
+                step_name = ""
+                step_indent = indent
+            if match := re.match(r"\s*-\s*name:\s*(.+?)\s*$", line):
+                step_name = match.group(1).strip("\"'")
+                step_indent = indent
+            run_match = re.match(r"(\s*)(?:-\s*)?run:\s*(.*?)\s*$", line)
+            if not run_match:
+                i += 1
+                continue
+            run_indent = line.index("run:")
+            command = run_match.group(2)
+            commands = [(i + 1, command)] if command not in {"|", ">"} else []
+            if command in {"|", ">"}:
+                i += 1
+                while i < len(lines):
+                    block_line = lines[i]
+                    block_indent = len(block_line) - len(block_line.lstrip())
+                    if block_line.strip() and block_indent <= run_indent:
+                        break
+                    if block_line.strip():
+                        commands.append((i + 1, block_line.strip()))
+                    i += 1
+            else:
+                i += 1
+            for line_number, command in commands:
+                if "${{" in command or any(joiner in command for joiner in ("&&", "||", ";")):
+                    continue
+                try:
+                    argv = shlex.split(command)
+                except ValueError:
+                    continue
+                if not argv or argv[0] not in WORKFLOW_COMMANDS:
+                    continue
+                raw_name = step_name or "-".join(argv[:2])
+                name = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
+                runs.append((path.relative_to(root), line_number, name, command))
+    return runs
+
+
 def propose_checks(root: Path) -> list[dict]:
-    """Gate checks derivable from marker files; each names its source. Nothing is invented."""
+    """Gate checks derivable from CI and marker files; each names its source."""
     checks = []
+    seen_runs: set[tuple[str, ...]] = set()
+    for path, line, name, command in workflow_runs(root):
+        argv = shlex.split(command)
+        key = tuple(argv)
+        if key not in seen_runs:
+            checks.append({"name": name, "run": argv, "source": f"{path}:{line}"})
+            seen_runs.add(key)
+    workflow_count = len(checks)
     if (root / "Cargo.toml").exists():
         checks += [
             {"name": "fmt", "run": ["cargo", "fmt", "--check"], "source": "Cargo.toml"},
@@ -210,8 +279,12 @@ def propose_checks(root: Path) -> list[dict]:
     if (root / "Makefile").exists():
         if re.search(r"^test\s*:", (root / "Makefile").read_text(), re.M):
             checks.append({"name": "tests", "run": ["make", "test"], "source": "Makefile target `test`"})
-    seen: set[str] = set()
-    return [c for c in checks if not (c["name"] in seen or seen.add(c["name"]))]
+    seen_names = {c["name"] for c in checks[:workflow_count]}
+    marker_checks = [
+        c for c in checks[workflow_count:]
+        if not (c["name"] in seen_names or seen_names.add(c["name"]))
+    ]
+    return checks[:workflow_count] + marker_checks
 
 
 def parse_check(spec: str) -> dict:
