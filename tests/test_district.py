@@ -784,7 +784,7 @@ class DashboardTest(DistrictCase):
         self.assertIn("enable --now district-metrics.timer", calls)
         self.assertLess(calls.index("daemon-reload"), calls.index("enable --now district-metrics.timer"))
 
-    def test_install_creates_stable_private_token(self) -> None:
+    def test_install_creates_stable_private_credential(self) -> None:
         token_path = self.tmp / "xdg" / "district" / "token"
         code, out = self.district("dashboard", "--install")
         self.assertEqual(code, 0, out)
