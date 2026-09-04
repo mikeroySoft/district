@@ -65,8 +65,10 @@ class Handler(BaseHTTPRequestHandler):
     token = ""
 
     def _require_bearer(self) -> bool:
-        if not self.explicit_host or hmac.compare_digest(self.headers.get("Authorization") or "", f"Bearer {self.token}"):
+        if is_loopback(self.client_address[0]) or not self.explicit_host or hmac.compare_digest(self.headers.get("Authorization") or "", f"Bearer {self.token}"):
             return True
+        if self.command == "POST":
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
         body = b"bearer token required\n"
         self.send_response(401)
         self.send_header("WWW-Authenticate", "Bearer")

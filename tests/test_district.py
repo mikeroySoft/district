@@ -721,6 +721,7 @@ class DashboardTest(DistrictCase):
         import urllib.error
         import urllib.request
         from http.server import ThreadingHTTPServer
+        from unittest import mock
 
         class ExplicitHandler(dash.Handler):
             explicit_host = True
@@ -737,16 +738,44 @@ class DashboardTest(DistrictCase):
         detect = lambda token=None: urllib.request.Request(
             base + "/api/detect?target=.", headers={"Authorization": f"Bearer {token}"} if token else {},
         )
-        for request in (action(), action("wrong"), detect(), detect("wrong")):
-            with self.assertRaises(urllib.error.HTTPError) as ctx:
-                urllib.request.urlopen(request)
-            self.assertEqual(ctx.exception.code, 401)
-            self.assertEqual(ctx.exception.headers["WWW-Authenticate"], "Bearer")
+        with mock.patch.object(dash, "is_loopback", return_value=False):
+            for request in (action(), action("wrong"), detect(), detect("wrong")):
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(request)
+                self.assertEqual(ctx.exception.code, 401)
+                self.assertEqual(ctx.exception.headers["WWW-Authenticate"], "Bearer")
 
-        out = urllib.request.urlopen(action("secret")).read().decode()
-        self.assertIn("$ district apply --reset nope", out)
-        response = json.loads(urllib.request.urlopen(detect("secret")).read())
-        self.assertIn("repo: acme/widgets", response["output"])
+            out = urllib.request.urlopen(action("secret")).read().decode()
+            self.assertIn("$ district apply --reset nope", out)
+            response = json.loads(urllib.request.urlopen(detect("secret")).read())
+            self.assertIn("repo: acme/widgets", response["output"])
+
+    def test_bearer_retry_reuses_post_connection(self) -> None:
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        from unittest import mock
+
+        class ExplicitHandler(dash.Handler):
+            explicit_host = True
+            token = "secret"
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ExplicitHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        connection = http.client.HTTPConnection(*server.server_address)
+        self.addCleanup(connection.close)
+        body = '{"args":["apply","--reset","nope"]}'
+        headers = {"X-District-Act": "1", "Content-Type": "application/json"}
+        with mock.patch.object(dash, "is_loopback", return_value=False):
+            connection.request("POST", "/api/act", body, headers)
+            unauthorized = connection.getresponse()
+            self.assertEqual(unauthorized.status, 401)
+            unauthorized.read()
+            connection.request("POST", "/api/act", body, {**headers, "Authorization": "Bearer secret"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertIn("$ district apply --reset nope", response.read().decode())
 
     def test_loopback_server_does_not_require_bearer(self) -> None:
         import threading
@@ -754,7 +783,8 @@ class DashboardTest(DistrictCase):
         from http.server import ThreadingHTTPServer
 
         class LoopbackHandler(dash.Handler):
-            explicit_host = False
+            explicit_host = True
+            token = "secret"
 
         server = ThreadingHTTPServer(("127.0.0.1", 0), LoopbackHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
