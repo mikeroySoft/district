@@ -3,7 +3,7 @@
 Companion to `PRD.md`. Rev 2, 2026-09-03, after adversarial review by
 `gpt-5.6-sol` (24 findings; all accepted, disposition in §Review log).
 
-Ground truth: agent-factory at `~/dev/mikeroysoft/agent-factory`, commit
+Ground truth: agent-factory at `~/dev/mikeroysoft/factory`, commit
 `96ce8f0` **plus an uncommitted working tree** (adds `[dashboard].theme`,
 `Environment=PATH` in units). Line references below are against that working
 tree and will shift; treat them as pointers, not anchors. Installed as a `uv
@@ -119,7 +119,7 @@ Ensures the six labels, touches no files, exits nonzero on any `gh` failure.
 1. Tests green; commit; version `0.2.0`.
 2. `systemctl --user disable --now factory-rocm-cli.timer factory-gpuflo.timer`.
 3. Wait until both `factory-*.service` are inactive (`systemctl --user is-active`).
-4. `uv tool install --reinstall --from ~/dev/mikeroysoft/agent-factory agent-factory`.
+4. `uv tool install --reinstall --from ~/dev/mikeroysoft/factory agent-factory`.
 5. `factory --version` → `0.2.0`; `factory install --host 0.0.0.0` in each
    repo (**explicit `0.0.0.0`** — matches the running units; a silent switch to
    loopback would drop LAN access).

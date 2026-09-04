@@ -121,7 +121,7 @@
   <header class="hero">
     <div>
       <h1>One host.<br>Many factories.<br><em>Shared infrastructure.</em></h1>
-      <p><a href="https://github.com/mikeroySoft/agent-factory">agent-factory</a> runs an autonomous ticket pipeline for one repository. District runs the fleet: the registry, ports, host config, engine upgrades, failure caps, and a single bird's-eye view — so no factory has to manage the roads and power itself.</p>
+      <p><a href="https://github.com/mikeroySoft/factory">agent-factory</a> runs an autonomous ticket pipeline for one repository. District runs the fleet: the registry, ports, host config, engine upgrades, failure caps, and a single bird's-eye view — so no factory has to manage the roads and power itself.</p>
       <div class="actions">
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
@@ -293,10 +293,11 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
   <section id="install">
     <div class="kicker">Install</div>
     <h2>Python 3.11+, one dependency, a stdlib HTTP server.</h2>
-    <p class="lede">Requires <a href="https://github.com/mikeroySoft/agent-factory">agent-factory</a> on the host and the <code>gh</code> CLI authenticated.</p>
+    <p class="lede">Requires <a href="https://github.com/mikeroySoft/factory">agent-factory</a> on the host and the <code>gh</code> CLI authenticated.</p>
     <div class="term">
       <div class="bar"><span>shell</span><span></span></div>
-<pre><span class="p">$</span> uv tool install git+https://github.com/mikeroySoft/district
+<pre><span class="p">$</span> npx skills add mikeroysoft/district
+<span class="p">$</span> uv tool install git+https://github.com/mikeroySoft/district
 <span class="p">$</span> district add ~/dev/owner/repo        <span class="c"># or a GitHub URL; adopts an existing .factory.toml</span>
 <span class="p">$</span> district apply                        <span class="c"># reconcile units, labels, doctor, caps, policy</span>
 <span class="p">$</span> district dashboard --install          <span class="c"># district-dashboard.service + hourly metrics timer</span>

@@ -65,7 +65,7 @@ def dashboard(failures: int = 0, last: str = "done", version: str = "0.2.0", err
     }
 
 
-GPUFLO_SHAPE = '''# agent-factory configuration. Docs: https://github.com/mikeroySoft/agent-factory
+GPUFLO_SHAPE = '''# agent-factory configuration. Docs: https://github.com/mikeroySoft/factory
 
 [repo]
 # Not a fork: no upstream sync.
@@ -165,6 +165,10 @@ class HostTest(DistrictCase):
         host.save({"defaults": {"dashboard": {"port": 9000}}})
         with self.assertRaises(SystemExit):
             host.load()
+
+
+    def test_factory_source_uses_renamed_checkout(self) -> None:
+        self.assertEqual(host.DEFAULTS["factory_source"], "~/dev/mikeroysoft/factory")
 
 
 class AddTest(DistrictCase):
@@ -668,6 +672,7 @@ class AtlasTest(unittest.TestCase):
         self.assertIn("3 factories", page)
         self.assertIn('id="manage"', page)
         self.assertIn("LOC/400", page)
+        self.assertIn("mikeroySoft/factory@8f9baad", page)
 
 
 class DashboardTest(DistrictCase):

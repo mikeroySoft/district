@@ -5,7 +5,7 @@ section says otherwise.
 
 ## 1. Problem
 
-[agent-factory](https://github.com/mikeroySoft/agent-factory) runs an
+[agent-factory](https://github.com/mikeroySoft/factory) runs an
 autonomous ticket pipeline for **one** GitHub repository: `.factory.toml` at the
 repo root, a systemd user timer per repo, a dashboard per repo. It is deliberately
 repo-scoped and stateless.

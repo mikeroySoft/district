@@ -19,7 +19,7 @@ import tomli_w
 BASE_PORT = 8764  # first allocation is 8765, agent-factory's default
 DEFAULTS = {
     "clone_dir": "~/dev/mikeroysoft",
-    "factory_source": "~/dev/mikeroysoft/agent-factory",
+    "factory_source": "~/dev/mikeroysoft/factory",
     "min_package_age": "24h",
     "max_failed_passes": 10,
 }

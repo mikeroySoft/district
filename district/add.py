@@ -258,7 +258,7 @@ def write_repo_file(path: Path, checks: list[dict], upstream: str | None) -> Non
     if upstream:
         doc["repo"] = {"upstream": upstream}
     doc["gate"] = {"check": [{"name": c["name"], "run": c["run"], "exclusive": c.get("exclusive", False)} for c in checks]}
-    header = "# agent-factory configuration. Docs: https://github.com/mikeroySoft/agent-factory\n"
+    header = "# agent-factory configuration. Docs: https://github.com/mikeroySoft/factory\n"
     header += "# Gate checks proposed by District from: " + ", ".join(sorted({c["source"] for c in checks})) + "\n\n"
     path.write_text(header + tomli_w.dumps(doc))
 
