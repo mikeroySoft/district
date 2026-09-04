@@ -1,7 +1,7 @@
 """`district status`: one table for the fleet, from `factory dashboard --json` per repo.
 
-Exit 1 when any repo is unhealthy, its last pass failed, or its timer is
-inactive or District-disabled, so a prompt or cron can use it as one exit code.
+Exit 1 when any repo is failing (health.py), so a prompt or cron can use it as
+one exit code. `--json` adds health, reasons, and the cached metrics per slug.
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from district import host
+from district import health, host, metrics
 from district.host import run
 
-COLUMNS = ("repo", "version", "next", "last", "pass", "active", "esc", "gate1", "bounce", "fails", "upstream")
+COLUMNS = ("repo", "health", "version", "next", "last", "pass", "active", "esc", "gate1", "bounce", "fails", "upstream")
 
 
 def snapshot(slug: str, table: dict) -> dict:
@@ -46,37 +46,53 @@ def pct(x: float | None) -> str:
     return "-" if x is None else f"{round(100 * x)}%"
 
 
-def row(result: dict, table: dict) -> tuple[dict, bool]:
-    """(cells, healthy)."""
-    slug = result["slug"]
-    disabled = bool(table.get("disabled_at"))
-    if "error" in result:
-        return {"repo": slug, "version": "?", "pass": "UNHEALTHY", "upstream": result["error"][:60]}, False
-    snap = result["snap"]
+def entry(result: dict, table: dict) -> dict:
+    """One `status --json` record: registry table, snapshot (or error), health, reasons, cached metrics."""
+    snap = result.get("snap")
+    lvl, reasons = health.level(snap, table)
+    if snap is None:
+        reasons = [f"dashboard unreachable ({result['error']})" if r == "dashboard unreachable" else r for r in reasons]
+    return {
+        "table": table, "snap": snap, "error": result.get("error"),
+        "health": lvl, "reasons": reasons, "metrics": metrics.read(result["slug"]),
+    }
+
+
+def fleet(data: dict) -> dict[str, dict]:
+    """{slug: entry} for every registered repo; snapshots are taken in parallel."""
+    repos = host.repos(data)
+    if not repos:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(repos))) as pool:
+        results = list(pool.map(lambda kv: snapshot(*kv), repos.items()))
+    return {r["slug"]: entry(r, repos[r["slug"]]) for r in results}
+
+
+def row(slug: str, e: dict) -> dict:
+    cells = {"repo": slug, "health": e["health"]}
+    if e["error"]:
+        return {**cells, "version": "?", "pass": "UNHEALTHY", "upstream": e["error"][:60]}
+    snap = e["snap"]
     d = snap["dispatcher"]
     finished = [r for r in d["runs"] if r["result"] != "running"]
-    last = finished[-1]["result"] if finished else "-"
     up = snap.get("upstream") or {}
     if snap["config"].get("upstream"):
         upstream = f"behind {up.get('behind', '?')}" + (f", parked #{up['blocker']['number']}" if up.get("blocker") else "")
     else:
         upstream = "-"
-    active = "DISABLED" if disabled else ("yes" if d["timer"]["active"] else "NO")
-    cells = {
-        "repo": slug,
+    return {
+        **cells,
         "version": snap.get("version", "?"),
         "next": rel(d["timer"].get("next")),
         "last": rel(d["timer"].get("last")),
-        "pass": last,
-        "active": active,
+        "pass": finished[-1]["result"] if finished else "-",
+        "active": "DISABLED" if e["table"].get("disabled_at") else ("yes" if d["timer"]["active"] else "NO"),
         "esc": str(sum(1 for t in snap["tickets"] if t["stage"] == "escalated")),
         "gate1": pct(snap["metrics"]["first_pass"]),
         "bounce": pct(snap["metrics"]["bounce_rate"]),
         "fails": str(d["consecutive_failures"]),
         "upstream": upstream,
     }
-    healthy = last != "failed" and active == "yes"
-    return cells, healthy
 
 
 def table(rows: list[dict]) -> str:
@@ -87,22 +103,14 @@ def table(rows: list[dict]) -> str:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district status", description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--json", action="store_true", help="dump the snapshots keyed by slug")
+    parser.add_argument("--json", action="store_true", help="dump snapshot, health, reasons, and metrics keyed by slug")
     args = parser.parse_args(argv)
-    data = host.load()
-    repos = host.repos(data)
-    if not repos:
+    entries = fleet(host.load())
+    if not entries:
         print("no repositories registered (district add)")
         return 0
-    with ThreadPoolExecutor(max_workers=min(8, len(repos))) as pool:
-        results = list(pool.map(lambda kv: snapshot(*kv), repos.items()))
     if args.json:
-        print(json.dumps({r["slug"]: r.get("snap") or {"error": r["error"]} for r in results}, indent=2))
-    rows, ok = [], True
-    for result in results:
-        cells, healthy = row(result, repos[result["slug"]])
-        rows.append(cells)
-        ok &= healthy
-    if not args.json:
-        print(table(rows))
-    return 0 if ok else 1
+        print(json.dumps(entries, indent=2))
+    else:
+        print(table([row(slug, e) for slug, e in entries.items()]))
+    return 0 if all(e["health"] != "failing" for e in entries.values()) else 1
