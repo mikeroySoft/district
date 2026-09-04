@@ -133,6 +133,31 @@
   #inspector ol li { margin: 6px 0; }
   #inspector ol code, #inspector .files code { background: none; border: 0; padding: 0; color: var(--ctrl); }
 
+  /* management panel (PRD §5.9): forms post to /api/act; the CLI does the work */
+  #manage h3 { font-family: var(--mono); font-size: 12px; margin: 14px 0 6px; color: var(--ink); }
+  #manage h3:first-of-type { margin-top: 0; }
+  #manage label { display: block; font-size: 12px; color: var(--muted); margin: 6px 0; }
+  #manage input, #manage select {
+    display: block; width: 100%; margin-top: 3px; padding: 6px 8px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px;
+    color: var(--ink); font-family: var(--mono); font-size: 12px;
+  }
+  #manage .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  #manage button {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; cursor: pointer;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; color: var(--ink); padding: 5px 10px;
+  }
+  #manage button:hover { border-color: var(--muted); }
+  #manage button.danger { color: var(--cli); }
+  #manage button:disabled { opacity: 0.5; cursor: wait; }
+  #manage pre {
+    font-family: var(--mono); font-size: 11px; line-height: 1.45; color: var(--muted); white-space: pre-wrap;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; margin: 8px 0 0;
+    max-height: 260px; overflow: auto;
+  }
+  #manage pre:empty { display: none; }
+  #manage .note { font-size: 11px; color: var(--faint); margin: 8px 0 0; }
+
   section.deep { margin-top: 48px; }
   section.deep > h2 {
     font-family: var(--mono); font-size: 13px; letter-spacing: 0.14em;
@@ -291,6 +316,33 @@
     </div>
     <aside>
       <div class="box" id="inspector" aria-live="polite"></div>
+      <div class="box" id="manage">
+        <h2>Manage</h2>
+        <form id="f-add">
+          <h3>Add a repository</h3>
+          <label>Path or GitHub URL <input name="target" required placeholder="~/dev/org/repo or https://github.com/org/repo"></label>
+          <div class="row"><button type="button" id="detect">Detect</button></div>
+          <pre id="detect-out"></pre>
+          <label>Checks needing single-tenant hardware (comma-separated names) <input name="exclusive" placeholder="tests,clippy"></label>
+          <div class="row"><button type="submit">Add / adopt</button></div>
+        </form>
+        <h3>Fleet</h3>
+        <div class="row">
+          <button type="button" data-act='["apply"]'>Apply</button>
+          <button type="button" data-act='["apply","--upgrade"]'>Upgrade engine</button>
+        </div>
+        <form id="f-one">
+          <h3>One factory</h3>
+          <label>Factory <select name="slug"></select></label>
+          <div class="row">
+            <button type="button" data-op="apply">Apply</button>
+            <button type="button" data-op="reset">Reset capped timer</button>
+            <button type="button" data-op="rm" class="danger">Remove</button>
+          </div>
+        </form>
+        <pre id="act-out" aria-live="polite"></pre>
+        <p class="note">Every action runs the <code>district</code> CLI on the host and streams its output; this page never changes state itself.</p>
+      </div>
     </aside>
   </div>
 
@@ -1157,4 +1209,55 @@ function buildKpis() {
     '<div class="kpi"><div class="k">' + t[0] + '</div><div class="v">' + t[1] + '</div><div class="s">' + t[2] + '</div></div>').join('');
 }
 buildKpis();
+
+/* ================= Management panel ================= */
+(function initManage() {
+  const sel = document.querySelector('#f-one select[name=slug]');
+  for (const b of B.filter(b => b.cat === 'factory')) {
+    const o = document.createElement('option'); o.value = b.slug; o.textContent = b.slug; sel.appendChild(o);
+  }
+  const out = document.getElementById('act-out');
+  const buttons = () => document.querySelectorAll('#manage button');
+  async function act(args) {
+    if (!confirm('Run on this host:\n\n  district ' + args.join(' ') + '\n\nContinue?')) return;
+    buttons().forEach(b => b.disabled = true);
+    out.textContent = '';
+    try {
+      const r = await fetch('/api/act', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-District-Act': '1' },
+                                          body: JSON.stringify({ args }) });
+      if (!r.ok) { out.textContent = 'refused: HTTP ' + r.status + ' ' + (await r.text()); return; }
+      const reader = r.body.getReader(); const dec = new TextDecoder();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        out.textContent += dec.decode(value, { stream: true }); out.scrollTop = out.scrollHeight;
+      }
+      out.textContent += '\nreload the page to see the new fleet state.';
+    } catch (e) { out.textContent += '\nerror: ' + e.message; }
+    finally { buttons().forEach(b => b.disabled = false); }
+  }
+  document.getElementById('detect').addEventListener('click', async () => {
+    const target = document.querySelector('#f-add input[name=target]').value.trim();
+    const det = document.getElementById('detect-out');
+    if (!target) { det.textContent = 'enter a path or URL first'; return; }
+    det.textContent = 'detecting…';
+    const r = await fetch('/api/detect?target=' + encodeURIComponent(target));
+    const j = await r.json();
+    det.textContent = j.output;
+  });
+  document.getElementById('f-add').addEventListener('submit', ev => {
+    ev.preventDefault();
+    const f = ev.target;
+    const args = ['add', f.target.value.trim(), '--no-edit'];
+    const ex = f.exclusive.value.trim();
+    if (ex) args.push('--exclusive', ex);
+    act(args);
+  });
+  document.querySelectorAll('#manage button[data-act]').forEach(b => b.addEventListener('click', () => act(JSON.parse(b.dataset.act))));
+  document.querySelectorAll('#f-one button[data-op]').forEach(b => b.addEventListener('click', () => {
+    const slug = sel.value;
+    if (!slug) return;
+    act(b.dataset.op === 'rm' ? ['rm', slug] : b.dataset.op === 'reset' ? ['apply', '--reset', slug] : ['apply', slug]);
+  }));
+})();
 </script>

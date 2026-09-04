@@ -17,7 +17,7 @@ import subprocess
 import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from district import atlas, host, status
 
@@ -34,15 +34,25 @@ def is_loopback(addr: str) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"  # chunked streaming for /api/act
     explicit_host = False  # main() sets True when --host was given and is not loopback
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
-        if path == "/":
+        url = urlparse(self.path)
+        if url.path == "/":
             self._send(200, "text/html; charset=utf-8", atlas.page(status.fleet(host.load())).encode())
-        elif path == "/api/fleet":
+        elif url.path == "/api/fleet":
             fleet = status.fleet(host.load())
             self._send(200, "application/json", json.dumps({"fleet": fleet, "data": atlas.data(fleet)}).encode())
+        elif url.path == "/api/detect":
+            # `add --dry-run` runs gh repo view (fork parent) and the check proposal; it writes nothing
+            target = parse_qs(url.query).get("target", [""])[0].strip()
+            if not target:
+                self._send(400, "text/plain; charset=utf-8", b"target required\n")
+                return
+            proc = subprocess.run([*DISTRICT, "add", "--dry-run", target], capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            body = {"ok": proc.returncode == 0, "output": proc.stdout + proc.stderr}
+            self._send(200, "application/json", json.dumps(body).encode())
         else:
             self.send_error(404)
 

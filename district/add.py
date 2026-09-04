@@ -170,7 +170,9 @@ def ensure_upstream(root: Path, parent: str) -> str:
 
 def fork_parent(slug: str) -> str | None:
     info = gh_json("repo", "view", slug, "--json", "isFork,parent")
-    return (info.get("parent") or {}).get("nameWithOwner") if info.get("isFork") else None
+    parent = (info.get("parent") or {}) if info.get("isFork") else {}
+    # gh 2.x returns {name, owner:{login}}; older builds returned nameWithOwner
+    return parent.get("nameWithOwner") or (f"{parent['owner']['login']}/{parent['name']}" if parent.get("owner") else None)
 
 
 def propose_checks(root: Path) -> list[dict]:
@@ -296,15 +298,62 @@ def onboard(root: Path, repo_file: Path, args: argparse.Namespace, upstream: str
         raise
 
 
+def dry_run(target: str, args: argparse.Namespace, data: dict) -> int:
+    """Print what `add` would do — slug, port, fork parent, checks or lifted keys — and write nothing."""
+    print("dry run: nothing written")
+    if "://" in target or target.startswith("git@"):
+        dest = Path(os.path.expanduser(host.default(data, "clone_dir"))) / target.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        if not dest.exists():
+            slug = remote_slug(target)
+            if not slug:
+                raise DistrictError(f"{target} is not a GitHub URL")
+            print(f"repo: {slug} (clone)\nwould clone {target} -> {dest}")
+            parent = fork_parent(slug)
+            print(f"fork of: {parent}" if parent else "not a fork")
+            print("checks: detected after the clone")
+            return 0
+        target = str(dest)
+    root = resolve_target(target, data)
+    slug = doctor(root)["repo"]
+    repo_file = root / CONFIG_NAME
+    adopt = repo_file.exists()
+    existing = tomllib.loads(repo_file.read_text()) if adopt else {}
+    table = host.repos(data).get(slug, {})
+    used = {t.get("dashboard", {}).get("port") for s, t in host.repos(data).items() if s != slug}
+    port = table.get("dashboard", {}).get("port") or existing.get("dashboard", {}).get("port")
+    print(f"repo: {slug} ({'adopt' if adopt else 'onboard'})\npath: {root}\ndashboard port: {port if port and port not in used else host.next_port(data)}")
+    parent = fork_parent(slug)
+    print(f"fork of: {parent}" if parent else "not a fork")
+    if adopt:
+        try:
+            _, lifted = lift(repo_file.read_text())
+            print("host keys to lift: " + (", ".join(lifted) or "none"))
+        except Refuse as exc:
+            print(f"cannot adopt: {exc}")
+        checks = existing.get("gate", {}).get("check", [])
+        print("checks (committed):" if checks else "checks: none committed")
+        for c in checks:
+            print(f"  {c.get('name', '?')}: {' '.join(c.get('run', []))}{'   # exclusive' if c.get('exclusive') else ''}")
+    else:
+        checks = [parse_check(s) for s in args.check] or propose_checks(root)
+        print("checks (proposed):" if checks else "checks: none detected; pass --check name=cmd")
+        for c in checks:
+            print(f"  {c['name']}: {' '.join(c['run'])}   # from {c['source']}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district add", description=__doc__.split("\n", 1)[0])
     parser.add_argument("target", help="path to a checkout, or a GitHub URL to clone")
     parser.add_argument("--check", action="append", default=[], metavar="NAME=CMD", help="gate check (repeatable); replaces detection")
     parser.add_argument("--exclusive", default=None, metavar="A,B", help="check names that need single-tenant hardware")
     parser.add_argument("--no-edit", action="store_true", help="do not ask or open $EDITOR")
+    parser.add_argument("--dry-run", action="store_true", help="print the proposal (slug, port, fork parent, checks) and write nothing")
     args = parser.parse_args(argv)
 
     data = host.load()
+    if args.dry_run:
+        return dry_run(args.target, args, data)
     root = resolve_target(args.target, data)
     report = doctor(root)
     slug = report["repo"]
