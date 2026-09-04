@@ -108,12 +108,55 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def units(host_arg: str | None, port: int) -> dict[str, str]:
+    """district-dashboard.service + district-metrics.{service,timer}; PATH carried like the factory units."""
+    exe = f"{sys.executable} -m district"
+    env = f"Environment=PATH={os.environ['PATH']}\n"
+    bind = f" --host {host_arg}" if host_arg else ""
+    return {
+        "district-dashboard.service": (
+            "[Unit]\nDescription=District dashboard (fleet atlas + management)\nAfter=network.target\n\n"
+            f"[Service]\n{env}ExecStart={exe} dashboard{bind} --port {port} --no-open\n"
+            "Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
+        ),
+        "district-metrics.service": (
+            "[Unit]\nDescription=District metrics refresh (git + gh per factory)\n\n"
+            f"[Service]\nType=oneshot\n{env}ExecStart={exe} metrics --refresh\n"
+        ),
+        "district-metrics.timer": (
+            "[Unit]\nDescription=Refresh District metrics hourly\n\n"
+            "[Timer]\nOnBootSec=5min\nOnUnitActiveSec=1h\n\n[Install]\nWantedBy=timers.target\n"
+        ),
+    }
+
+
+def install(host_arg: str | None, port: int) -> int:
+    udir = host.unit_dir()
+    udir.mkdir(parents=True, exist_ok=True)
+    wanted = units(host_arg, port)
+    for name, body in wanted.items():
+        path = udir / name
+        if not path.exists() or path.read_text() != body:
+            path.write_text(body)
+            print(f"wrote {path}")
+    host.systemctl("daemon-reload")
+    for unit in ("district-dashboard.service", "district-metrics.timer"):
+        host.systemctl("enable", "--now", unit)
+    host.systemctl("restart", "district-dashboard.service")
+    print("started district-dashboard.service and district-metrics.timer (hourly district metrics --refresh)")
+    print("stop with: systemctl --user disable --now district-dashboard.service district-metrics.timer")
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district dashboard", description=__doc__.split("\n", 1)[0])
     parser.add_argument("--host", default=None, help="bind address (default 127.0.0.1); anything else also opens /api/act")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
+    parser.add_argument("--install", action="store_true", help="write and enable district-dashboard.service and district-metrics.timer")
     args = parser.parse_args(argv)
+    if args.install:
+        return install(args.host, args.port)
     bind = args.host or "127.0.0.1"
     Handler.explicit_host = args.host is not None and not is_loopback(args.host)
     server = ThreadingHTTPServer((bind, args.port), Handler)
