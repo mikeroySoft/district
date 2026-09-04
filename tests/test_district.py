@@ -157,15 +157,17 @@ class HostTest(DistrictCase):
         old = self.tmp / "xdg" / "agent-factory" / "config.toml"
         old.parent.mkdir(parents=True)
         old.write_text('[repo."acme/widgets"]\npath = "/x"\n')
-        out = io.StringIO()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
 
-        with contextlib.redirect_stdout(out):
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             data = host.load()
 
         self.assertEqual(data["repo"]["acme/widgets"]["path"], "/x")
         self.assertFalse(old.exists())
         self.assertTrue(host.path().exists())
-        self.assertIn(f"{old} -> {host.path()}", out.getvalue())
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn(f"{old} -> {host.path()}", stderr.getvalue())
 
     def test_load_refuses_old_and_new_host_files(self) -> None:
         old = self.tmp / "xdg" / "agent-factory" / "config.toml"

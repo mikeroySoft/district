@@ -47,7 +47,7 @@ def load() -> dict:
             raise DistrictError(f"both {old} and {p} exist; merge them before continuing")
         p.parent.mkdir(parents=True, exist_ok=True)
         old.rename(p)
-        print(f"district: migrated host config {old} -> {p}")
+        print(f"district: migrated host config {old} -> {p}", file=sys.stderr)
     if not p.exists():
         return {}
     try:
