@@ -172,12 +172,17 @@ class AddTest(DistrictCase):
         self.units("acme/widgets")
         code, out = self.district("add", str(repo))
         self.assertEqual(code, 0, out)
-        table = host.load()["repo"]["acme/widgets"]
+        data = host.load()
+        table = data["repo"]["acme/widgets"]
         self.assertEqual(table["path"], str(repo))
         self.assertEqual(table["dashboard"], {"port": 8766})  # adopted port persisted, not re-allocated
-        self.assertEqual(table["triage"]["model"], "ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M")
-        self.assertEqual(table["gate"], {"lock": "/tmp/gpu.lock"})
-        self.assertEqual(table["install"], {"every": "10min", "dashboard": True, "host": "0.0.0.0"})
+        # a lone repo agrees with itself: host values promote to [defaults], nothing left per-repo
+        self.assertEqual(data["defaults"]["triage"]["model"], "ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M")
+        self.assertEqual(data["defaults"]["gate"], {"lock": "/tmp/gpu.lock"})
+        self.assertEqual(data["defaults"]["install"], {"every": "10min", "dashboard": True, "host": "0.0.0.0"})
+        for name in ("triage", "gate", "install"):
+            self.assertNotIn(name, table)
+        self.assertIn("now in [defaults]: triage.model, triage.url, install.dashboard, install.every, install.host, gate.lock", out)
         text = (repo / ".factory.toml").read_text()
         kept = tomllib.loads(text)
         self.assertEqual(kept["dashboard"], {"theme": ".factory-dashboard.css"})
@@ -198,6 +203,22 @@ class AddTest(DistrictCase):
         self.assertEqual(code, 0, out)
         self.assertEqual((repo / ".factory.toml").read_text().strip(), "")
         self.assertEqual(host.load()["repo"]["acme/widgets"]["dashboard"]["port"], 8765)
+
+    def test_dedupe_promotes_agreed_values_and_keeps_disagreements(self) -> None:
+        data = {"repo": {
+            "a/x": {"path": "/x", "dashboard": {"port": 8765}, "triage": {"url": "u", "model": "m"}, "install": {"host": "0.0.0.0"}},
+            "b/y": {"path": "/y", "dashboard": {"port": 8766}, "triage": {"url": "u", "model": "other"}},
+        }}
+        self.assertEqual(host.dedupe(data), ["triage.url"])
+        self.assertEqual(data["defaults"], {"triage": {"url": "u"}})
+        self.assertEqual(data["repo"]["a/x"]["triage"], {"model": "m"})
+        self.assertEqual(data["repo"]["a/x"]["install"], {"host": "0.0.0.0"})  # b/y lacks it: not shared
+        self.assertEqual(data["repo"]["b/y"]["triage"], {"model": "other"})
+        self.assertEqual(data["repo"]["a/x"]["dashboard"], {"port": 8765})  # ports never move
+        # second pass: a value now equal to an existing default is dropped, nothing new promoted
+        data["repo"]["b/y"]["triage"]["url"] = "u"
+        self.assertEqual(host.dedupe(data), [])
+        self.assertNotIn("url", data["repo"]["b/y"]["triage"])
 
     def test_adopt_refuses_inline_tables_and_writes_nothing(self) -> None:
         toml = 'dashboard = { port = 8765, theme = "t" }\n[triage]\nurl = "u"\n'

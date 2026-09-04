@@ -77,6 +77,38 @@ def next_port(data: dict) -> int:
     return max([BASE_PORT, *ports]) + 1
 
 
+SHARED_TABLES = ("triage", "workers", "review", "install", "gate")  # never dashboard: port is per-repo
+
+
+def dedupe(data: dict) -> list[str]:
+    """Promote host values every registered repo agrees on into `[defaults]`; drop per-repo copies
+    that equal the default. Returns `table.key` names promoted."""
+    tables = list(repos(data).values())
+    defaults = data.setdefault("defaults", {})
+    promoted = []
+    for name in SHARED_TABLES:
+        keys = {k for t in tables for k in t.get(name, {})}
+        for key in sorted(keys):
+            vals = [t.get(name, {}).get(key, _MISSING) for t in tables]
+            if key not in defaults.get(name, {}) and all(v == vals[0] for v in vals) and vals[0] is not _MISSING:
+                defaults.setdefault(name, {})[key] = vals[0]
+                promoted.append(f"{name}.{key}")
+            default = defaults.get(name, {}).get(key, _MISSING)
+            if default is _MISSING:
+                continue
+            for t in tables:
+                if t.get(name, {}).get(key, _MISSING) == default:
+                    del t[name][key]
+                    if not t[name]:
+                        del t[name]
+    if not defaults:
+        del data["defaults"]
+    return promoted
+
+
+_MISSING = object()
+
+
 def unit_name(slug: str) -> str:
     """agent-factory's unit stem: `factory-<repo basename>`."""
     return f"factory-{slug.rsplit('/', 1)[-1]}"

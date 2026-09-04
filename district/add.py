@@ -345,6 +345,8 @@ def main(argv: list[str]) -> int:
                 table[name] = val
         if units := installed_units(host.unit_name(slug)):
             table["install"] = {**table.get("install", {}), **units}
+        if promoted := host.dedupe(data):
+            print(f"shared by every repo, now in [defaults]: {', '.join(promoted)}")
         host.save(data)
         if new_text != old_text:
             diff = difflib.unified_diff(
