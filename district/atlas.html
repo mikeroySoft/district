@@ -318,6 +318,10 @@
       <div class="box" id="inspector" aria-live="polite"></div>
       <div class="box" id="manage">
         <h2>Manage</h2>
+        <form id="token-form" hidden>
+          <label>Dashboard token <input id="token" type="password" autocomplete="off"></label>
+          <div class="row"><button type="submit" id="token-submit">Use token</button></div>
+        </form>
         <form id="f-add">
           <h3>Add a repository</h3>
           <label>Path or GitHub URL <input name="target" required placeholder="~/dev/org/repo or https://github.com/org/repo"></label>
@@ -1217,14 +1221,32 @@ buildKpis();
     const o = document.createElement('option'); o.value = b.slug; o.textContent = b.slug; sel.appendChild(o);
   }
   const out = document.getElementById('act-out');
-  const buttons = () => document.querySelectorAll('#manage button');
+  const buttons = () => document.querySelectorAll('#manage button:not(#token-submit)');
+  async function authedFetch(url, options = {}) {
+    const headers = { ...options.headers };
+    const saved = sessionStorage.getItem('district-token');
+    if (saved) headers.Authorization = 'Bearer ' + saved;
+    let response = await fetch(url, { ...options, headers });
+    if (response.status !== 401) return response;
+    const form = document.getElementById('token-form');
+    const input = document.getElementById('token');
+    form.hidden = false;
+    input.focus();
+    const token = await new Promise(resolve => form.addEventListener('submit', event => {
+      event.preventDefault();
+      resolve(input.value);
+    }, { once: true }));
+    sessionStorage.setItem('district-token', token);
+    headers.Authorization = 'Bearer ' + token;
+    return fetch(url, { ...options, headers });
+  }
   async function act(args) {
     if (!confirm('Run on this host:\n\n  district ' + args.join(' ') + '\n\nContinue?')) return;
     buttons().forEach(b => b.disabled = true);
     out.textContent = '';
     try {
-      const r = await fetch('/api/act', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-District-Act': '1' },
-                                          body: JSON.stringify({ args }) });
+      const r = await authedFetch('/api/act', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-District-Act': '1' },
+                                                body: JSON.stringify({ args }) });
       if (!r.ok) { out.textContent = 'refused: HTTP ' + r.status + ' ' + (await r.text()); return; }
       const reader = r.body.getReader(); const dec = new TextDecoder();
       for (;;) {
@@ -1241,7 +1263,7 @@ buildKpis();
     const det = document.getElementById('detect-out');
     if (!target) { det.textContent = 'enter a path or URL first'; return; }
     det.textContent = 'detecting…';
-    const r = await fetch('/api/detect?target=' + encodeURIComponent(target));
+    const r = await authedFetch('/api/detect?target=' + encodeURIComponent(target));
     const j = await r.json();
     det.textContent = j.output;
   });
