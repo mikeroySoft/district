@@ -315,6 +315,52 @@ class AddTest(DistrictCase):
         doc = tomllib.loads((repo / ".factory.toml").read_text())
         self.assertEqual(doc["gate"]["check"][0]["run"], ["sh", "-c", "make check"])
 
+    def test_workflow_checks_precede_and_suppress_marker_checks(self) -> None:
+        repo = self.repo()
+        workflows = repo / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (repo / "Cargo.toml").write_text("[package]\nname='w'\n")
+        (workflows / "ci.yml").write_text(
+            "jobs:\n"
+            "  check:\n"
+            "    steps:\n"
+            "      - name: Tests\n"
+            "        run: cargo test\n"
+            "      - name: ignored action\n"
+            "        uses: actions/checkout@v4\n"
+            "      - run: |\n"
+            "          cargo build --workspace\n"
+            "          python scripts/check.py --self-test\n"
+            "          echo nope\n"
+            "          cargo test ${{ matrix.os }}\n"
+            "          cargo fmt && cargo test\n"
+        )
+        (workflows / "lint.yaml").write_text(
+            "steps:\n"
+            "  - name: Lint Check!\n"
+            "    run: ruff check .\n"
+        )
+
+        self.assertEqual(
+            add.propose_checks(repo),
+            [
+                {"name": "tests", "run": ["cargo", "test"], "source": ".github/workflows/ci.yml:5"},
+                {"name": "cargo-build", "run": ["cargo", "build", "--workspace"], "source": ".github/workflows/ci.yml:9"},
+                {
+                    "name": "python-scripts-check-py",
+                    "run": ["python", "scripts/check.py", "--self-test"],
+                    "source": ".github/workflows/ci.yml:10",
+                },
+                {"name": "lint-check", "run": ["ruff", "check", "."], "source": ".github/workflows/lint.yaml:3"},
+                {"name": "fmt", "run": ["cargo", "fmt", "--check"], "source": "Cargo.toml"},
+                {
+                    "name": "clippy",
+                    "run": ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+                    "source": "Cargo.toml",
+                },
+            ],
+        )
+
     def test_factory_failure_keeps_registry_for_resume(self) -> None:
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("install", "boom\n", 1))
         repo = self.repo(toml="")
