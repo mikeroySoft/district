@@ -33,6 +33,12 @@ def is_loopback(addr: str) -> bool:
         return addr == "localhost"
 
 
+def act_allowed(client: str, explicit_host: bool, header: str | None) -> bool:
+    """Same rule as agent-factory: actions only from loopback unless --host opened the port on purpose,
+    and only with the custom header (forces a CORS preflight a stray page cannot pass)."""
+    return (is_loopback(client) or explicit_host) and header == "1"
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # chunked streaming for /api/act
     explicit_host = False  # main() sets True when --host was given and is not loopback
@@ -60,9 +66,7 @@ class Handler(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/api/act":
             self.send_error(404)
             return
-        # Same rule as agent-factory: actions only from loopback unless --host opened the port on purpose,
-        # and only with a custom header (forces a CORS preflight a stray page cannot pass).
-        if not (is_loopback(self.client_address[0]) or self.explicit_host) or self.headers.get("X-District-Act") != "1":
+        if not act_allowed(self.client_address[0], self.explicit_host, self.headers.get("X-District-Act")):
             self.send_error(403)
             return
         try:
