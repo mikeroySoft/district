@@ -324,7 +324,8 @@ class AddTest(DistrictCase):
             "jobs:\n"
             "  check:\n"
             "    steps:\n"
-            "      - name: Tests\n"
+            "      - id: test\n"
+            "        name: Tests\n"
             "        run: cargo test\n"
             "      - name: ignored action\n"
             "        uses: actions/checkout@v4\n"
@@ -344,12 +345,12 @@ class AddTest(DistrictCase):
         self.assertEqual(
             add.propose_checks(repo),
             [
-                {"name": "tests", "run": ["cargo", "test"], "source": ".github/workflows/ci.yml:5"},
-                {"name": "cargo-build", "run": ["cargo", "build", "--workspace"], "source": ".github/workflows/ci.yml:9"},
+                {"name": "tests", "run": ["cargo", "test"], "source": ".github/workflows/ci.yml:6"},
+                {"name": "cargo-build", "run": ["cargo", "build", "--workspace"], "source": ".github/workflows/ci.yml:10"},
                 {
                     "name": "python-scripts-check-py",
                     "run": ["python", "scripts/check.py", "--self-test"],
-                    "source": ".github/workflows/ci.yml:10",
+                    "source": ".github/workflows/ci.yml:11",
                 },
                 {"name": "lint-check", "run": ["ruff", "check", "."], "source": ".github/workflows/lint.yaml:3"},
                 {"name": "fmt", "run": ["cargo", "fmt", "--check"], "source": "Cargo.toml"},

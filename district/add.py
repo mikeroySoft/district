@@ -196,12 +196,12 @@ def workflow_runs(root: Path) -> list[tuple[Path, int, str, str]]:
         while i < len(lines):
             line = lines[i]
             indent = len(line) - len(line.lstrip())
-            if re.match(r"\s*-\s+", line) and indent <= step_indent:
+            if re.match(r"\s*-\s+", line) and (step_indent < 0 or indent <= step_indent):
                 step_name = ""
                 step_indent = indent
-            if match := re.match(r"\s*-\s*name:\s*(.+?)\s*$", line):
-                step_name = match.group(1).strip("\"'")
-                step_indent = indent
+            name_match = re.match(r"\s*(?:-\s*)?name:\s*(.+?)\s*$", line)
+            if name_match and step_indent >= 0 and indent >= step_indent:
+                step_name = name_match.group(1).strip("\"'")
             run_match = re.match(r"(\s*)(?:-\s*)?run:\s*(.*?)\s*$", line)
             if not run_match:
                 i += 1
