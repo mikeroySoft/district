@@ -341,6 +341,14 @@ class ApplyTest(DistrictCase):
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard(failures))))
         return repo
 
+    def test_registry_uses_current_factory_configuration(self) -> None:
+        base = Path(os.environ["XDG_CONFIG_HOME"])
+        for name in ("factory", "agent-factory"):
+            registry = base / name / "config.toml"
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            registry.write_text(f'[repo."acme/{name}"]\npath = "/tmp/{name}"\n')
+        self.assertEqual(set(host.repos(host.load())), {"acme/factory"})
+
     def test_npm_day_conversion_and_policy_env(self) -> None:
         self.assertEqual((apply.npm_days("24h"), apply.npm_days("36h"), apply.npm_days("1h"), apply.npm_days("3d")), (1, 2, 1, 3))
         self.assertEqual(apply.hours("90min"), 1.5)
