@@ -11,30 +11,48 @@ are deliberately withheld. CLI/status consumers keep their existing full data.
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import os
 import re
 import stat
 import subprocess
+import tempfile
 import tomllib
 from datetime import datetime
+from itertools import islice
 from pathlib import Path
 
-from district import add, metrics
+from district import add, health, host, metrics
 
 SLUG = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_.-]{1,100}")
 LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 SECRET = re.compile(r"gh[pousr]_|github_pat_|sk-[A-Za-z0-9]|AKIA[0-9A-Z]{16}")
-STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|\+00:00)")
+STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|[+-]\d\d:\d\d)")
 HEAD = re.compile(r"[0-9a-fA-F]{7,64}")
 VERSION = re.compile(r"\d{1,5}(?:\.\d{1,5}){1,3}(?:[-+][A-Za-z0-9.-]{1,32})?")
 LANGUAGES = frozenset((*metrics.LANGUAGES.values(), "other"))
+MAX_FACTORIES = 64
+MAX_RECORDS = 32
+MAX_EVIDENCE = 8
+IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,191}")
+PRIVATE_TEXT = re.compile(
+    r"(?i)(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]+|AKIA[0-9A-Z]{16}|"
+    r"(?:bearer|basic)\s+\S+|"
+    r"\b(?:[\w.-]*(?:token|password|passwd|secret|api.?key|credential)[\w.-]*|authorization)"
+    r"\s*[=:]\s*(?:\"[^\"]*\"|'[^']*'|\S+)|"
+    r"\b[A-Za-z_][\w.-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|\S+)|"
+    r"[a-z][a-z0-9+.-]*://[^\s<>\"']+|"
+    r"(?<![\w])(?:~/|/)[^\s<>\"']+|[A-Za-z]:\\[^\s<>\"']+"
+)
 
 
 def _stamp(value: object) -> str | None:
     if not isinstance(value, str) or not STAMP.fullmatch(value):
         return None
     try:
-        return datetime.fromisoformat(value).isoformat(timespec="seconds").replace("+00:00", "Z")
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return value
     except ValueError:
         return None
 
@@ -69,30 +87,118 @@ def _count(value: object) -> int:
 
 
 def _number(value: object, maximum: float = 2**53 - 1) -> int | float | None:
-    return value if type(value) in (int, float) and 0 <= value <= maximum else None
+    return value if type(value) in (int, float) and math.isfinite(value) and 0 <= value <= maximum else None
 
 
 def _labels(value: object) -> list[str]:
-    return [label for item in _list(value) if (label := _match(item, LABEL))]
+    return [label for item in _list(value)[:64] if (label := _match(item, LABEL))]
 
 
-def _reason(value: object) -> str:
+def safe_text(value: object, limit: int = 512) -> str | None:
+    """One bounded evidence sentence, never a raw log/configuration document."""
     if not isinstance(value, str):
-        return "health details withheld"
-    for prefix, text in (
-        ("timer disabled by District:", "timer disabled by District"),
-        ("dashboard unreachable", "dashboard unreachable"),
-        ("snapshot errors:", "snapshot unavailable or incomplete"),
-        ("doctor WARN:", "doctor warnings reported"),
-    ):
-        if value.startswith(prefix):
-            return text
-    if value in ("timer inactive", "last pass failed") or re.fullmatch(
-        r"\d{1,10} consecutive failed pass\(es\)|\d{1,10} open ready-for-human \(#[\d, #]{1,256}\)|"
-        r"upstream sync parked on #\d{1,10}|bounce rate \d{1,3}%", value
-    ):
+        return None
+    if len(value) > 8192 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return "[details withheld]"
+    if "PRIVATE KEY" in value or re.search(r"(?i)(?:set-cookie|cookie)\s*:", value):
+        return "[details withheld]"
+    clean = PRIVATE_TEXT.sub("[redacted]", value)
+    return clean if len(clean) <= limit else clean[:limit - 12] + " [truncated]"
+
+
+def _identity(value: object) -> str | None:
+    """Keep safe public identities; opaque hashes preserve equality without exposing configuration."""
+    if not isinstance(value, str):
+        return None
+    if _match(value, IDENTITY) and safe_text(value) == value:
         return value
-    return "health details withheld"
+    return "opaque:" + hashlib.sha256(value.encode()).hexdigest()
+
+
+def _choice(value: object, choices: tuple, default: str = "unknown") -> str:
+    return value if isinstance(value, str) and value in choices else default
+
+
+def _classification(raw: dict) -> dict:
+    """Project the classifier's verdict; never infer a verdict from evidence or legacy health."""
+    omitted = {}
+
+    def records(value, name, limit=MAX_RECORDS):
+        items = _list(value)
+        omitted[name] = omitted.get(name, 0) + max(0, len(items) - limit)
+        return [_dict(item) for item in items[:limit] if isinstance(item, dict)]
+
+    findings = []
+    for item in records(raw.get("findings"), "findings"):
+        scope = _dict(item.get("scope"))
+        scope = {"kind": _choice(scope.get("kind"), ("factory", "shared")),
+                 "id": _identity(scope.get("id"))}
+        condition = _choice(item.get("condition_code"), tuple(health.CHECKS))
+        resource = _identity(item.get("resource"))
+        finding = {
+            "id": json.dumps([scope["kind"], scope["id"], condition, resource], separators=(",", ":")),
+            "factory": _slug(item.get("factory")), "scope": scope,
+            "condition_code": condition, "resource": resource,
+            "severity": _choice(item.get("severity"), ("warning", "error")),
+            "observed_at": _stamp(item.get("observed_at")),
+            "impact": safe_text(item.get("impact")), "cause": safe_text(item.get("cause")),
+            "evidence": [{
+                "source_id": _identity(ev.get("source_id")), "factory": _slug(ev.get("factory")),
+                "observed_at": _stamp(ev.get("observed_at")),
+                "observation": _choice(ev.get("observation"), ("fresh", "stale", "partial", "unavailable"), "unavailable"),
+                "reference": _identity(ev.get("reference")), "detail": safe_text(ev.get("detail")),
+            } for ev in records(item.get("evidence"), "evidence", MAX_EVIDENCE)],
+        }
+        evidence_omitted = max(0, len(_list(item.get("evidence"))) - MAX_EVIDENCE)
+        finding["projection"] = {"truncated": bool(evidence_omitted), "omitted": {"evidence": evidence_omitted}}
+        history = _dict(item.get("history"))
+        if history:
+            finding["history"] = {key: _stamp(history.get(key)) for key in ("start", "end")}
+            finding["history"].update({key: history.get(key) if type(history.get(key)) is bool else None
+                                       for key in ("complete", "truncated")})
+            finding.update({key: _stamp(item[key]) for key in ("first_observed_at", "last_observed_at") if key in item})
+        findings.append(finding)
+    sources = [{
+        "id": _identity(item.get("id")), "observed_at": _stamp(item.get("observed_at")),
+        "cadence_seconds": _number(item.get("cadence_seconds")),
+        "age_seconds": item.get("age_seconds") if type(item.get("age_seconds")) in (int, float)
+                       and math.isfinite(item["age_seconds"]) and abs(item["age_seconds"]) <= 2**53 - 1 else None,
+        "observation": _choice(item.get("observation"), ("fresh", "stale", "partial", "unavailable"), "unavailable"),
+        "error": safe_text(item.get("error")),
+    } for item in records(raw.get("sources"), "sources")]
+    executions = [{
+        "id": _identity(item.get("id")), "source_id": _identity(item.get("source_id")),
+        "state": _choice(item.get("state"), health.EXECUTION_STATES),
+        "observation": _choice(item.get("observation"), ("fresh", "stale", "partial", "unavailable"), "unavailable"),
+        "observed_at": _stamp(item.get("observed_at")),
+        **{key: _stamp(item[key]) for key in ("entered_at",) if key in item},
+        **{key: _identity(item[key]) for key in ("stage", "reference") if key in item},
+        **{key: safe_text(item[key]) for key in ("reason",) if key in item},
+        **{key: _choice(item[key], ("product", "mechanism", "unknown")) for key in ("outcome_kind",) if key in item},
+    } for item in records(raw.get("executions"), "executions")]
+    resources = [{
+        "id": _identity(item.get("id")), "source_id": _identity(item.get("source_id")),
+        "observed_at": _stamp(item.get("observed_at")),
+        "observation": _choice(item.get("observation"), ("fresh", "stale", "partial", "unavailable"), "unavailable"),
+        "held": item.get("held") if type(item.get("held")) is bool else None,
+        "ownership": _choice(item.get("ownership"), ("known", "unknown", "none")),
+        "owner": {"factory": _slug(item["owner"].get("factory")),
+                  "execution_id": _identity(item["owner"].get("execution_id"))}
+                 if isinstance(item.get("owner"), dict) else None,
+    } for item in records(raw.get("resources"), "resources")]
+    unknowns = _list(raw.get("unknowns"))
+    omitted["unknowns"] = max(0, len(unknowns) - MAX_RECORDS)
+    return {
+        "schema_version": 1 if type(raw.get("schema_version")) is int and raw["schema_version"] == 1 else None,
+        "assessment": _choice(raw.get("assessment"), ("normal", "attention", "unknown")),
+        "operating_state": _choice(raw.get("operating_state"), (
+            "running", "scheduled waiting", "deliberately paused", "capped", "unexpectedly stopped", "unknown")),
+        "execution_state": _choice(raw.get("execution_state"), health.EXECUTION_STATES),
+        "observation": _choice(raw.get("observation"), ("fresh", "stale", "partial", "unavailable"), "unavailable"),
+        "findings": findings, "sources": sources, "executions": executions, "resources": resources,
+        "unknowns": [safe_text(item) for item in unknowns[:MAX_RECORDS] if isinstance(item, str)],
+        "projection": {"truncated": any(omitted.values()), "omitted": omitted},
+    }
 
 
 def _metrics(raw: object) -> dict | None:
@@ -100,16 +206,15 @@ def _metrics(raw: object) -> dict | None:
         return None
     traffic = _dict(raw.get("traffic"))
     return {
-        **{key: _count(raw.get(key)) for key in COUNTS},
+        **{key: _number(raw.get(key)) for key in COUNTS},
         "head": _match(raw.get("head"), HEAD),
         "collected_at": _stamp(raw.get("collected_at")) or "unknown",
-        "languages": {key: _count(value) for key, value in _dict(raw.get("languages")).items()
-                      if key in LANGUAGES},
-        "open_by_label": {key: _count(value) for key, value in _dict(raw.get("open_by_label")).items()
-                          if key in metrics.FACTORY_LABELS},
+        "languages": {key: _number(raw["languages"][key]) for key in LANGUAGES if key in _dict(raw.get("languages"))},
+        "open_by_label": {key: _number(raw["open_by_label"][key]) for key in metrics.FACTORY_LABELS
+                          if key in _dict(raw.get("open_by_label"))},
         "top3_share": _number(raw.get("top3_share"), 1),
         "median_days_to_close": _number(raw.get("median_days_to_close")),
-        "traffic": {kind: {key: _count(traffic[kind].get(key)) for key in ("count", "uniques")}
+        "traffic": {kind: {key: _number(traffic[kind].get(key)) for key in ("count", "uniques")}
                     if isinstance(traffic.get(kind), dict) else "unavailable" for kind in ("clones", "views")},
     }
 
@@ -123,39 +228,40 @@ def _snapshot(raw: object) -> dict | None:
     blocker = _dict(upstream.get("blocker"))
     return {
         "version": _match(raw.get("version"), VERSION) or "?",
+        "generated_at": _stamp(raw.get("generated_at")),
         "config": {
-            "upstream": _match(config.get("upstream"), LABEL),
+            **({"upstream": _match(config["upstream"], LABEL)} if "upstream" in config else {}),
             "gate_checks": _labels(config.get("gate_checks")),
             "exclusive_checks": _labels(config.get("exclusive_checks")),
         },
         "dispatcher": {
-            "timer": {"active": timer.get("active") is True,
+            "timer": {"active": timer.get("active") if type(timer.get("active")) is bool else None,
                       "next": _stamp(timer.get("next")), "last": _stamp(timer.get("last"))},
-            "service_active": dispatcher.get("service_active") is True,
-            "consecutive_failures": _count(dispatcher.get("consecutive_failures")),
-            "runs": [{"result": run.get("result") if run.get("result") in ("running", "done", "failed") else "unknown",
-                      **{key: _stamp(run.get(key)) for key in ("started_at", "finished_at") if key in run}}
-                     for run in _list(dispatcher.get("runs")) if isinstance(run, dict)],
+            "service_active": dispatcher.get("service_active") if type(dispatcher.get("service_active")) is bool else None,
+            "consecutive_failures": _number(dispatcher.get("consecutive_failures")),
+            "runs": [{"result": _choice(run.get("result"), ("running", "done", "failed")),
+                      **{key: _stamp(run.get(key)) for key in ("started", "finished", "started_at", "finished_at") if key in run}}
+                     for run in _list(dispatcher.get("runs"))[-32:] if isinstance(run, dict)],
         },
-        "tickets": [{"number": _count(ticket.get("number")),
+        "tickets": [{"number": _number(ticket.get("number")),
                      "state": ticket.get("state") if ticket.get("state") in ("OPEN", "CLOSED") else "UNKNOWN",
                      "stage": _match(ticket.get("stage"), LABEL) or "unknown",
                      "labels": [label for label in _labels(ticket.get("labels")) if label in metrics.FACTORY_LABELS]}
-                    for ticket in _list(raw.get("tickets")) if isinstance(ticket, dict)],
+                    for ticket in _list(raw.get("tickets"))[:128] if isinstance(ticket, dict)],
         "metrics": {"first_pass": _number(quality.get("first_pass"), 1),
                     "bounce_rate": _number(quality.get("bounce_rate"), 1),
-                    "escalations": _count(quality.get("escalations"))},
-        "upstream": {"repo": _slug(upstream.get("repo")), "ahead": _count(upstream.get("ahead")),
-                     "behind": _count(upstream.get("behind")),
-                     "blocker": {"number": _count(blocker.get("number"))} if blocker else None},
+                    "escalations": _number(quality.get("escalations"))},
+        "upstream": {"repo": _slug(upstream.get("repo")), "ahead": _number(upstream.get("ahead")),
+                     "behind": _number(upstream.get("behind")),
+                     "blocker": {"number": _number(blocker.get("number"))} if blocker else None},
         "errors": ["snapshot unavailable or incomplete"] if raw.get("errors") else [],
     }
 
 
 def safe_fleet(fleet: dict) -> dict:
-    """Fresh allowlisted Atlas-compatible data; strings are identifiers, not HTML or diagnostics."""
+    """Bounded, allowlisted D01 semantics and project context; not another classifier."""
     result = {}
-    for slug, raw in _dict(fleet).items():
+    for slug, raw in islice(_dict(fleet).items(), MAX_FACTORIES):
         if not _slug(slug) or not isinstance(raw, dict):
             continue
         table = _dict(raw.get("table"))
@@ -166,16 +272,30 @@ def safe_fleet(fleet: dict) -> dict:
                       "dashboard": {"port": port if 1 <= port <= 65535 else None}},
             "snap": _snapshot(raw.get("snap")), "metrics": _metrics(raw.get("metrics")),
             "error": "dashboard unavailable or incomplete" if raw.get("error") else None,
-            "health": raw.get("health") if raw.get("health") in ("healthy", "attention", "failing") else "failing",
-            "reasons": list(dict.fromkeys(_reason(reason) for reason in _list(raw.get("reasons")))),
+            **_classification(raw),
         }
+        omitted = result[slug]["projection"]["omitted"]
+        snap = _dict(raw.get("snap"))
+        omitted.update(
+            tickets=max(0, len(_list(snap.get("tickets"))) - 128),
+            runs=max(0, len(_list(_dict(snap.get("dispatcher")).get("runs"))) - 32),
+            gate_checks=max(0, len(_list(_dict(snap.get("config")).get("gate_checks"))) - 64),
+            exclusive_checks=max(0, len(_list(_dict(snap.get("config")).get("exclusive_checks"))) - 64),
+            ticket_labels=sum(max(0, len(_list(_dict(ticket).get("labels"))) - 64)
+                              for ticket in _list(snap.get("tickets"))[:128]),
+        )
+    for entry in result.values():
+        omitted = entry["projection"]["omitted"]
+        omitted["factories"] = max(0, len(fleet) - len(result))
+        entry["projection"]["truncated"] = any(omitted.values())
     return result
 
 
 def _github_url(target: str) -> str | None:
     for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/"):
         if target.startswith(prefix):
-            return _slug(target[len(prefix):].removesuffix("/").removesuffix(".git"))
+            slug = _slug(target[len(prefix):].removesuffix("/").removesuffix(".git"))
+            return add.remote_slug(target.rstrip("/")) if slug else None
     return None
 
 
@@ -206,28 +326,12 @@ def _marker(path: Path) -> str | None:
     return data.decode("utf-8")
 
 
-class _Markers:
-    """Bounded in-memory marker view for add.propose_checks's read-only Path operations."""
-
-    def __init__(self, files: dict[str, str | None], name: str = "") -> None:
-        self.files, self.name = files, name
-
-    def __truediv__(self, name: str) -> _Markers:
-        return _Markers(self.files, name)
-
-    def exists(self) -> bool:
-        return self.files[self.name] is not None
-
-    def read_text(self) -> str:
-        return self.files[self.name] or ""
-
-
 def detect(target: str) -> tuple[int, dict]:
     """Return (HTTP status, {ok, output}); bounded, read-only, authorized-local preview.
 
-    Accept a checkout root or an exact HTTPS/SSH github.com owner/repo URL. URL
-    previews query identity/fork metadata only, leaving checks until a clone exists.
-    No host configuration is loaded. Errors never include inputs or CLI output.
+    Accept a checkout root or an exact HTTPS/SSH github.com owner/repo URL.
+    Existing clones use the CLI's destination and port selection. Host settings
+    are read only for these decisions, never returned. Doctor is not invoked.
     """
     if (not isinstance(target, str) or not target or len(target) > 4096
             or any(ord(char) < 32 or ord(char) == 127 for char in target) or target.startswith("-")):
@@ -236,11 +340,13 @@ def detect(target: str) -> tuple[int, dict]:
         remote = _github_url(target)
         if not remote and ("://" in target or target.startswith("git@")):
             return 400, {"ok": False, "output": "Only exact github.com owner/repo URLs are supported.\n"}
+        data, existing = host.load(), {}
         checks, lifted = [], []
-        if remote:
+        root = add.clone_destination(target, data) if remote else Path(target).expanduser()
+        if remote and not root.exists():
             slug, mode = remote, "clone"
         else:
-            root = Path(target).expanduser().resolve(strict=True)
+            root = root.resolve(strict=True)
             if not root.is_dir() or not (root / ".git").exists():
                 raise ValueError("not a checkout")
             if _probe(["git", "-c", "core.fsmonitor=false", "rev-parse", "--is-inside-work-tree"], root) != "true":
@@ -256,10 +362,16 @@ def detect(target: str) -> tuple[int, dict]:
                 lifted = [name for name in (*add.HOST_TABLES, *add.HOST_KEYS) if name in host_keys]
                 checks = _list(_dict(existing.get("gate")).get("check"))
             else:
-                markers = _Markers({name: _marker(root / name)
-                                    for name in ("Cargo.toml", "package.json", "pyproject.toml", "Makefile")})
-                checks = add.propose_checks(markers)
+                with tempfile.TemporaryDirectory(prefix="district-detect-") as directory:
+                    markers = Path(directory)
+                    for name in ("Cargo.toml", "package.json", "pyproject.toml", "Makefile"):
+                        content = _marker(root / name)
+                        if content is not None:
+                            (markers / name).write_text(content)
+                    checks = add.propose_checks(markers)
         lines = ["read-only preview: nothing written", f"repo: {slug} ({mode})"]
+        port = add.dashboard_port(slug, existing, data)
+        lines.append(f"dashboard port: {port}" if type(port) is int and 0 < port < 65536 else "dashboard port: unavailable")
         try:
             info = _dict(json.loads(_probe(["gh", "repo", "view", slug, "--json", "isFork,parent"])))
             parent = _dict(info.get("parent"))
@@ -287,5 +399,5 @@ def detect(target: str) -> tuple[int, dict]:
                 lines.append("  additional checks omitted")
         lines.append("Commands, paths and configuration values withheld; doctor is not run.")
         return 200, {"ok": True, "output": "\n".join(lines)[:8191] + "\n"}
-    except (OSError, ValueError, TypeError, AttributeError, add.Refuse, subprocess.SubprocessError):
+    except (OSError, ValueError, TypeError, AttributeError, add.Refuse, host.DistrictError, subprocess.SubprocessError):
         return 400, {"ok": False, "output": "Cannot inspect target: use a GitHub checkout with readable, small regular configuration files.\n"}

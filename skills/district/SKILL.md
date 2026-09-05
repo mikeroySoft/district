@@ -72,6 +72,7 @@ Done when District reports the slug removed and a fresh status no longer contain
 - `district dashboard --install` writes and enables the District dashboard service plus the hourly metrics timer.
 - `district dashboard --no-open` serves once in the foreground; default address is `127.0.0.1:8760`.
 - `--host 0.0.0.0` enables read-only LAN viewing, not remote management. A LAN URL is read-only even on the host. For manage/detect, open direct HTTP to numeric loopback or `localhost` with the actual server port (default `http://127.0.0.1:8760`); reverse proxies and forwarded headers are unsupported. The page reports capability and keeps unavailable controls disabled.
+- For LAN viewing, use the listener's numeric IP and actual port. DNS aliases other than `localhost` are unsupported. `/api/fleet` is the bounded sanitized projection in `OPERATIONS-CONSOLE-SPEC.md` §6.2, not raw `status --json`; inspect omission metadata alongside unchanged assessments.
 
 ## Ownership invariants
 

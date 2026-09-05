@@ -289,6 +289,16 @@ def total(records: list[dict], key: str) -> int | float | None:
 # ---------------------------------------------------------------- factory blocks
 
 
+def projection_rows(record: dict, label: str) -> list[list[str]]:
+    projection = mapping(record.get("projection"))
+    counts = mapping(projection.get("omitted"))
+    omitted = [f"{n(count)} {key} omitted" for key, count in counts.items()
+               if key != "factories" and number(count) is not None and count > 0]
+    if not omitted and (not projection.get("truncated") or counts.get("factories")):
+        return []
+    return [[label, "truncated" + (": " + " · ".join(omitted) if omitted else "")]]
+
+
 def factory_kpis(slug: str, e: dict) -> list[list[str]]:
     m, snap, table = mapping(e.get("metrics")), mapping(e.get("snap")), mapping(e["table"])
     rows = [
@@ -297,25 +307,44 @@ def factory_kpis(slug: str, e: dict) -> list[list[str]]:
         ["execution state", e["execution_state"]],
         ["observation", e["observation"]],
     ]
+    rows += projection_rows(e, "projection")
+    omitted = mapping(mapping(e.get("projection")).get("omitted"))
     for finding in e["findings"]:
         rows.append(["finding", f"{finding['condition_code']} · {finding['severity']} · {finding['id']}"])
+        rows.append(["finding factory", text(finding.get("factory"))])
+        rows.append(["finding resource", text(finding.get("resource"))])
         rows.append(["finding scope", json.dumps(finding["scope"], ensure_ascii=False)])
         rows.append(["finding observed", text(finding.get("observed_at"))])
         rows.append(["finding impact", finding["impact"]])
         rows.append(["finding cause", text(finding.get("cause"))])
+        rows += projection_rows(finding, "finding projection")
         for evidence in finding["evidence"]:
             rows.append(["finding evidence", json.dumps(evidence, ensure_ascii=False)])
+            rows += projection_rows(evidence, "evidence projection")
         if finding.get("history"):
             rows.append(["finding history", json.dumps(finding["history"], ensure_ascii=False)])
         for key in ("first_observed_at", "last_observed_at"):
             if key in finding:
                 rows.append([key, text(finding[key])])
     if not e["findings"]:
-        rows.append(["findings", "none reported"])
+        rows.append(["findings", "none retained in this projection" if omitted.get("findings") else "none reported"])
     for source in e["sources"]:
         rows.append(["source", f"{source['id']} · {source['observation']} · observed_at: {text(source.get('observed_at'))} · "
                      f"cadence_seconds: {n(source.get('cadence_seconds'))} · age_seconds: {n(source.get('age_seconds'))}"
                      + (f" · error: {source['error']}" if source.get("error") else "")])
+        rows += projection_rows(source, "source projection")
+    if not e["sources"]:
+        rows.append(["sources", "none retained in this projection" if omitted.get("sources") else "unknown — no sources reported"])
+    for key, label in (("executions", "execution"), ("resources", "resource")):
+        records = sequence(e.get(key))
+        for record in records:
+            rows.append([label, json.dumps({k: v for k, v in record.items() if k != "projection"}, ensure_ascii=False)])
+            rows += projection_rows(record, f"{label} projection")
+        if not records:
+            rows.append([key, "none retained in this projection" if omitted.get(key)
+                         else "none reported" if key in e else "unknown — observation unavailable"])
+    for unknown in sequence(e.get("unknowns")):
+        rows.append(["unknown", text(unknown)])
     if snap:
         d = mapping(snap.get("dispatcher"))
         finished = [r["result"] for r in sequence(d.get("runs"))
@@ -360,7 +389,9 @@ def factory_kpis(slug: str, e: dict) -> list[list[str]]:
     rows[0][1] = dot(e["assessment"]) + rows[0][1]
     port = mapping(table.get("dashboard")).get("port")
     if type(port) is int and 0 < port < 65536:
-        rows.append(["dashboard", f'<a href="http://127.0.0.1:{port}/" target="_blank" rel="noopener">127.0.0.1:{port}</a>'])
+        rows.append(["dashboard", f'<span data-factory-port="{port}">Factory link requires an HTTP browser hostname</span>'])
+    else:
+        rows.append(["dashboard", "Factory link unavailable — no registered dashboard port"])
     return rows
 
 
@@ -390,6 +421,7 @@ def factory_block(i: int, slug: str, e: dict, max_loc: int) -> dict:
         "id": block_id(slug), "slug": slug, "name": slug.rsplit("/", 1)[-1], "cat": "factory",
         "gx": gx, "gy": gy, "w": w, "d": w, "h": h, "kind": "tower3" if h >= 60 else "hall", "ring": fork,
         **{key: e[key] for key in ("schema_version", "assessment", "operating_state", "execution_state", "observation", "findings", "sources")},
+        **{key: e[key] for key in ("executions", "resources", "unknowns", "projection") if key in e},
         "blurb": blurb, "kpis": factory_kpis(slug, e),
         "files": [[ref, 1, f"[[gate.check]] {gate}"]] + ([[ref, 1, f"upstream = \"{config['upstream']}\""]] if fork else []),
         "conn": "Fed by its fork parent; dispatched by its own timer." if fork else "No upstream sync configured." if origin_known else "Upstream configuration unknown.",
@@ -432,8 +464,10 @@ def kpis(fleet: dict) -> list[list[str]]:
     views = [mapping(t.get("views")) for t in traffic]
     unavailable_traffic = sum(not c or not v for c, v in zip(clones, views))
     missing = len(es) - len(ms)
+    omitted = max((number(mapping(mapping(e.get("projection")).get("omitted")).get("factories")) or 0 for e in es), default=0)
     return [
-        ["factories", str(len(es)), esc(" · ".join(s.rsplit("/", 1)[-1] for s in fleet) or "none registered")],
+        ["factories", str(len(es)), esc(" · ".join(s.rsplit("/", 1)[-1] for s in fleet) or "none registered")
+         + (f" · projection truncated: {n(omitted)} factories omitted; counts cover retained factories only" if omitted else "")],
         ["assessment", " · ".join(f"{dot(level)}{tally[level]} {level}" for level in tally),
          "shared operational assessment"],
         ["code under management", n(total(ms, "loc")), f"tracked lines · {n(total(ms, 'files'))} files · {n(total(ms, 'contributors'))} contributors"

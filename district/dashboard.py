@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from district import atlas, host, status
-from district.dashboard_read import detect, safe_fleet
+from district.dashboard_read import detect, safe_fleet, safe_text
 
 DEFAULT_PORT = 8760
 ACTIONS = ("add", "apply", "rm")
@@ -34,8 +34,12 @@ def is_loopback(addr: str) -> bool:
         return False
 
 
-def valid_destination(destination: tuple, headers, *, origin_required: bool = False) -> bool:
-    """Accept only the socket's literal address (or localhost on loopback)."""
+def valid_destination(destination: tuple, headers, *, origin_required: bool = False,
+                      document_navigation: bool = False) -> bool:
+    """Validate the direct numeric destination; DNS names/proxy metadata grant no trust."""
+    if any(k.lower() in ("forwarded", "x-forwarded", "x-real-ip")
+           or k.lower().startswith(("forwarded-", "x-forwarded-")) for k in headers):
+        return False
     hostnames = {destination[0]}
     if is_loopback(destination[0]):
         hostnames.add("localhost")
@@ -50,14 +54,22 @@ def valid_destination(destination: tuple, headers, *, origin_required: bool = Fa
         return False
     if origin_required and not origins:
         return False
-    return headers.get("Sec-Fetch-Site") in (None, "same-origin", "none")
+    sites = headers.get_all("Sec-Fetch-Site", [])
+    modes = headers.get_all("Sec-Fetch-Mode", [])
+    destinations = headers.get_all("Sec-Fetch-Dest", [])
+    if len(sites) > 1 or len(modes) > 1 or len(destinations) > 1:
+        return False
+    # External links may open the viewing document, not fetch its data or embed it.
+    # Management/detect never enable this exception; absent metadata still relies on
+    # actual peer/destination, exact Host/Origin and the independent CSRF header.
+    return (not sites or sites[0] in ("same-origin", "none")
+            or (document_navigation and sites == ["cross-site"]
+                and modes == ["navigate"] and destinations == ["document"]))
 
 
 def act_allowed(client: str, destination: tuple, headers, *, csrf: bool = True, origin_required: bool = True) -> bool:
     """Direct loopback only; headers prove request intent, never client identity."""
     if not is_loopback(client) or not is_loopback(destination[0]):
-        return False
-    if any(k.lower() == "forwarded" or k.lower().startswith("x-forwarded-") or k.lower() == "x-real-ip" for k in headers):
         return False
     return (valid_destination(destination, headers, origin_required=origin_required)
             and (not csrf or headers.get_all("X-District-Act", []) == ["1"]))
@@ -77,19 +89,24 @@ class Handler(BaseHTTPRequestHandler):
     def parse_request(self) -> bool:
         if not super().parse_request():
             return False
-        if not self.path.startswith("/") or self.path.startswith("//"):
+        # BaseHTTPRequestHandler normalizes // before returning; validate the wire
+        # target as well so absolute/authority forms cannot reach any route.
+        target = self.requestline.split()[1]
+        if not target.startswith("/") or target.startswith("//"):
             self._forbidden()
             return False
         # Authorize before method/route dispatch, including future mutation handlers.
         if self.command not in ("GET", "HEAD", "OPTIONS") and not self._allowed():
             self._forbidden()
             return False
+        if self.command in ("GET", "HEAD", "OPTIONS") and not valid_destination(
+                self.connection.getsockname(), self.headers,
+                document_navigation=self.command in ("GET", "HEAD") and urlparse(self.path).path == "/"):
+            self._forbidden()
+            return False
         return True
 
     def do_GET(self) -> None:
-        if not valid_destination(self.connection.getsockname(), self.headers):
-            self._forbidden()
-            return
         url = urlparse(self.path)
         if url.path == "/api/capabilities":
             allowed = self._allowed(csrf=False, origin_required=False)
@@ -101,8 +118,12 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/":
             self._send(200, "text/html; charset=utf-8", atlas.page(safe_fleet(status.fleet(host.load()))).encode())
         elif url.path == "/api/fleet":
-            fleet = safe_fleet(status.fleet(host.load()))
-            self._send(200, "application/json", json.dumps({"fleet": fleet, "data": atlas.data(fleet)}).encode())
+            raw = status.fleet(host.load())
+            fleet = safe_fleet(raw)
+            self._send(200, "application/json", json.dumps({
+                "fleet": fleet, "data": atlas.data(fleet),
+                "projection": {"omitted_factories": max(0, len(raw) - len(fleet))},
+            }).encode())
         elif url.path == "/api/detect":
             if not self._allowed(origin_required=False):
                 self._forbidden()
@@ -122,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             lengths = self.headers.get_all("Content-Length", [])
-            if len(lengths) != 1 or self.headers.get("Transfer-Encoding"):
+            if len(lengths) != 1 or self.headers.get_all("Transfer-Encoding", []):
                 raise ValueError("one Content-Length required")
             length = int(lengths[0])
             if not 0 < length <= 16384:
@@ -138,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
         self._stream([*DISTRICT, *args])
 
     def _stream(self, argv: list[str]) -> None:
-        """Run argv and relay its stdout+stderr line by line (chunked), ending with `[exit N]`."""
+        """Stream bounded sanitized diagnostics, then the child's actual `[exit N]`."""
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Transfer-Encoding", "chunked")
@@ -149,14 +170,41 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
             self.wfile.flush()
 
-        chunk(f"$ district {' '.join(argv[len(DISTRICT):])}\n".encode())
+        preview = safe_text(" ".join(argv[len(DISTRICT):])) or "[details withheld]"
+        chunk(f"$ district {preview}\n".encode())
         proc = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
+        # Bound retained input as well as output. Never split an oversized logical
+        # line into public fragments: a credential could straddle the read boundary.
+        # Drain excess output rather than terminating an in-flight host operation.
         with proc.stdout:
-            for line in proc.stdout:
-                chunk(line)
+            count = 0
+            private_key = False
+            while line := proc.stdout.readline(8193):
+                if count == 128:
+                    chunk(b"[diagnostics truncated]\n")
+                    while proc.stdout.read(8192):
+                        pass
+                    break
+                count += 1
+                if len(line) > 8192:
+                    # The hidden remainder may open a private-key block. Fail closed
+                    # for subsequent diagnostics until an explicit closing marker.
+                    private_key = True
+                    while line and not line.endswith(b"\n"):
+                        line = proc.stdout.readline(8193)
+                    text = "[oversized diagnostic withheld]"
+                else:
+                    decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if "BEGIN " in decoded and "PRIVATE KEY" in decoded:
+                        private_key = True
+                    text = "[details withheld]" if private_key else safe_text(decoded) or "[details withheld]"
+                    if "END " in decoded and "PRIVATE KEY" in decoded:
+                        private_key = False
+                # Only the server emits unprefixed exit framing, never child text.
+                chunk(f"> {text}\n".encode())
         chunk(f"[exit {proc.wait()}]\n".encode())
         self.wfile.write(b"0\r\n\r\n")
 
