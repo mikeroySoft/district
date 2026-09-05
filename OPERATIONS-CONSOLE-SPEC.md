@@ -225,7 +225,7 @@ No F03 support, local log parsing, runtime collector or pause-recording mechanis
 is introduced by D01.
 
 `status.entry` returns the classification alongside existing `table`, `snap`,
-`error`, and cached project `metrics`. Its optional internal `result["sources"]`
+`error`, and cached project `metrics`. Its optional `result["sources"]`
 accepts normalized D02 observations instead of applying the legacy adapter.
 `district status --json` remains an object keyed by repository slug; `health`
 and `reasons` are removed. Empty fleets serialize as `{}`. Text status includes
