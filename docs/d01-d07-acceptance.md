@@ -12,10 +12,14 @@ permission to release held tickets.
    second. D07 owns the reconciliation, starting from
    `f670220803622b32a12f53f1561a9c7afa715202` and incorporating that exact D01
    commit in merge commit `b1ec64552511e5899a153c56fa23f53c297ef599`.
-3. Tested reconciliation source commit:
-   `614141684e7dadc3fcdc727999fa8f4c89e75adf`. The following acceptance-document
-   commit changes only these receipts and this document; use the actual PR head
-   for independent review, not D07's original worker result.
+3. Initial tested reconciliation source:
+   `614141684e7dadc3fcdc727999fa8f4c89e75adf`. Independent security review of
+   candidate `fe8833b96ea6b64f7ea2cb86690e802d7df096f1` then identified the
+   quoted/multiline diagnostic issue recorded below.
+4. Final tested security correction:
+   `3d199b9df73391e7aa325f640ccc35f0a90ebfbd`. The following evidence commit
+   changes only this document and receipts. Review the actual final PR head,
+   not an earlier worker result or the superseded initial candidate.
 
 Both heads started from remote main
 `d2606020374df127e4b672434c3b2a445d1ae000`. They had a semantic conflict even
@@ -62,7 +66,7 @@ In the integrated worktree:
 
 ```text
 uv run python -m unittest discover -s tests
-Ran 92 tests in 11.551s
+Ran 93 tests in 11.198s
 OK
 ```
 
@@ -71,9 +75,9 @@ identities/source timestamps, explicit truncation, credential/config/log
 redaction, Inspector projection, valid/invalid detection and authorization of
 actual HTTP requests. The gate uses local disposable fixtures. It neither
 substitutes for the network/browser evidence below nor upgrades an installed
-engine. The environment's global UV release-age option was disabled for the
-run; the existing dependency lock and its release-age setting were preserved,
-with no dependency/version change in this reconciliation.
+engine. The final run set `UV_NO_CONFIG=1` and
+`UV_EXCLUDE_NEWER=2026-09-04T16:56:15Z`, preserving the existing dependency lock's
+release-age setting. No dependency or version changed in this reconciliation.
 
 ## CLI → API → browser semantics
 
@@ -197,6 +201,47 @@ injected image nodes and published no canary in the DOM or API. See
 exercise oversized output, private-key blocks and output-record truncation.
 Pattern redaction is defense in depth, not a claim that arbitrary unmarked
 secret prose can be recognized perfectly.
+
+### Independent-review diagnostic correction
+
+Independent security review found that quoted JSON/TOML keys could bypass
+assignment redaction, escaped quotes could end masking early, and the following
+lines of a TOML multiline value could leak from the actual adopt diff producer
+(`add.main` → `_stream`). These are marked configuration/credential fields,
+not the arbitrary-unmarked-prose limitation. Three regression tests produced
+four failures before the correction (including both TOML multiline delimiters)
+and passed afterward:
+
+```text
+PYTHONPATH=tests .venv/bin/python -m unittest \
+  test_projection.ProjectionTest.test_private_evidence_is_redacted_without_losing_identity_or_assessment \
+  test_dashboard_policy.DashboardPolicyTest.test_stream_bounds_sanitizes_and_preserves_real_exit \
+  test_dashboard_policy.DashboardPolicyTest.test_stream_withholds_multiline_configuration_until_exit
+Ran 3 tests in 1.050s
+OK
+```
+
+The shared sanitizer now masks the full assignment tail, recognizing quoted
+keys without trying to parse escaped values. Only quoted generic keys accept
+colon assignment, so ordinary identities such as `stage:gate` are unchanged.
+After an oversized line or triple-quoted configuration marker, streaming drains
+but withholds all remaining diagnostics and still reports the actual child exit.
+This deliberately sacrifices trailing diagnostic detail rather than guessing
+where private data ends. Source timestamp handling is untouched.
+
+The final actual HTTP/browser smoke supplied a quoted password containing an
+escaped quote in a source error: no canary reached API or DOM
+([receipt](evidence/d01-d07/quoted-error-browser.json),
+[Inspector image](evidence/d01-d07/quoted-error-browser.png)).
+An authorized **real `district add --no-edit` adoption** of the disposable repo
+then lifted quoted and multiline configuration to the temporary host registry.
+The private values survived in the registry, disappeared from the repo config,
+were absent from streamed diagnostics, and the actual command exited 0
+([adopt receipt](evidence/d01-d07/quoted-adopt.json)). External commands still
+used recording executables, not production services or GitHub writes.
+The genuine two-namespace refusal run was repeated on this source revision and
+passed unchanged; the restored original ten-scenario API matrix still matched
+the CLI receipt ([final matrix check](evidence/d01-d07/final-matrix-reread.json)).
 
 ## Readiness and holds
 
