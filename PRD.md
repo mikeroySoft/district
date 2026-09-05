@@ -263,12 +263,16 @@ version spread; a factory more than one release behind the default is an
 
 ### 5.9 Management surfaces
 
-The dashboard exposes the same operations as the CLI, with confirmation:
+For a trusted-local operator, the dashboard exposes the same operations as the CLI, with confirmation:
 onboard a repository (the `add` questionnaire as a form: path/URL, detected
 fork parent, proposed gate checks, exclusive flags), adopt, upgrade (fleet or
 one factory), reset a capped timer, remove. Every action shells out to the
 `district` CLI; the page never mutates state itself, so the CLI stays the
 audited path and the page stays a thin client.
+
+LAN viewing is read-only, including a LAN URL opened on the host; `--host`
+never grants management authority. Manage/detect require the direct-loopback
+HTTP topology and CSRF policy in `OPERATIONS-CONSOLE-SPEC.md` §9.
 
 ## 6. Non-goals
 

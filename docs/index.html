@@ -190,7 +190,7 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
       <div class="k">district apply</div><div class="v">Reconcile the host to the registry. Re-renders units, ensures labels, runs <code>doctor</code>, enforces the failure cap and supply-chain policy. <code>--upgrade</code> reinstalls the engine so every timer picks it up on the next tick.</div>
       <div class="k">district status</div><div class="v">One table, one screen, one exit code. Version, timer, last pass, tickets in flight, escalations, first-gate pass %, bounce rate, upstream drift.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
-      <div class="k">district dashboard</div><div class="v">Serve the District Atlas and the management page. Every action on the page runs the CLI as a subprocess; the page never mutates state itself.</div>
+      <div class="k">district dashboard</div><div class="v">Serve the District Atlas. <code>--host 0.0.0.0</code> enables read-only LAN viewing, never remote management; a LAN URL stays read-only even on the host. Manage and detect require direct HTTP to numeric loopback or <code>localhost</code> with the actual server port (default <code>http://127.0.0.1:8760</code>), without reverse proxies or forwarded headers. Authorized actions run the CLI as a subprocess.</div>
       <div class="k">district rm</div><div class="v">Disable and delete the units, drop the registry entry. Repo files untouched; the factory can be re-added later.</div>
     </div>
   </section>
