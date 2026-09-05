@@ -118,7 +118,9 @@ class OperationsTest(unittest.TestCase):
         self.assertIsNone(finding["cause"])
         execution.pop("outcome_kind")
         result = self.classify(data)
-        self.assertEqual((result["assessment"], result["findings"]), ("unknown", []))
+        self.assertEqual((result["execution_state"], result["observation"], result["assessment"], result["findings"]),
+                         ("failed", "fresh", "unknown", []))
+        self.assertEqual((result["sources"][0]["observed_at"], result["sources"][0]["age_seconds"]), (STAMP, 0))
 
     def test_source_age_and_staleness_do_not_reset_on_reread(self):
         sources = [source(scheduled())]
@@ -141,6 +143,28 @@ class OperationsTest(unittest.TestCase):
         result = health.classify(SLUG, sources, {}, AT)
         self.assertEqual((result["operating_state"], result["execution_state"], result["observation"], result["assessment"]), ("running", "stage-active", "partial", "unknown"))
         self.assertEqual(result["sources"][0]["observation"], "fresh")
+
+    def test_empty_or_malformed_present_data_is_partial_not_unavailable(self):
+        for data in ({}, []):
+            with self.subTest(data=data):
+                result = self.classify(data)
+                self.assertEqual((result["observation"], result["assessment"]), ("partial", "unknown"))
+                self.assertEqual((result["sources"][0]["observation"], result["sources"][0]["observed_at"]), ("partial", STAMP))
+
+    def test_malformed_records_remain_partial_with_valid_execution_telemetry(self):
+        for extra in ({"resources": {}}, {"resources": [None]}, {"executions": [None]},
+                      {"checks": {}}, {"dispatcher": []},
+                      {"executions": [{"id": "x", "state": "invalid"}]}):
+            with self.subTest(extra=extra):
+                result = self.classify({**scheduled(), **extra})
+                self.assertEqual((result["observation"], result["assessment"]), ("partial", "unknown"))
+                self.assertEqual(result["sources"][0]["observation"], "partial")
+
+    def test_reported_unknown_check_is_fresh_but_assessment_unknown(self):
+        result = self.classify({**scheduled(), "checks": [check(status="unknown")]})
+        self.assertEqual((result["observation"], result["assessment"], result["findings"]), ("fresh", "unknown", []))
+        result = self.classify({**scheduled(), "executions": [{"id": "x", "state": "unknown"}]})
+        self.assertEqual((result["observation"], result["execution_state"], result["assessment"]), ("fresh", "unknown", "unknown"))
 
     def test_legacy_github_errors_preserve_local_facts_without_fabricating_execution(self):
         snap = {"generated_at": STAMP, "errors": ["github: unavailable"],
@@ -251,7 +275,7 @@ class OperationsTest(unittest.TestCase):
                 data = scheduled()
                 data["checks"] = checks
                 result = self.classify(data)
-                self.assertEqual((result["assessment"], result["findings"]), ("unknown", []))
+                self.assertEqual((result["observation"], result["assessment"], result["findings"]), ("partial", "unknown", []))
 
 
 if __name__ == "__main__":

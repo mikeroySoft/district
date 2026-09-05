@@ -643,9 +643,35 @@ class AtlasTest(unittest.TestCase):
         self.assertEqual((blocks["f_big"]["h"], blocks["f_big"]["ring"], blocks["f_big"]["assessment"]), (120.0, True, "attention"))
         self.assertEqual((blocks["f_small"]["h"], blocks["f_small"]["ring"]), (66.0, False))
         self.assertEqual(blocks["f_new"]["h"], 12.0)
+        self.assertIn("not collected", dict(blocks["f_new"]["kpis"])["metrics"])
         roads = [l for l in data.splitlines() if l.startswith('  {"id": "p')]
         self.assertEqual(len(roads), 4)  # one dispatch road per factory + one upstream road for the fork
         self.assertEqual(atlas.data({}).count('"id": "f_'), 0)
+
+    def test_partial_fleet_metrics_keep_known_totals(self) -> None:
+        rows = {label: (value, detail) for label, value, detail in atlas.kpis(self.FLEET)}
+        self.assertEqual(rows["factories"], ("3", "big · small · new"))
+        self.assertEqual(rows["code under management"][0], "500")
+        self.assertIn("20 files", rows["code under management"][1])
+        self.assertIn("4 contributors", rows["code under management"][1])
+        self.assertIn("1 not collected", rows["code under management"][1])
+        self.assertEqual(rows["velocity 30d"][0], "10")
+        self.assertIn("2 PRs merged", rows["velocity 30d"][1])
+        self.assertIn("2 by agents", rows["velocity 30d"][1])
+        self.assertEqual(rows["project work"][0], "2 / 0")
+        self.assertIn("2 waiting on a human", rows["project work"][1])
+        self.assertEqual(rows["defects"][0], "0")
+        self.assertIn("0 closed 30d", rows["defects"][1])
+        self.assertIn("0 issues closed 30d", rows["defects"][1])
+        self.assertEqual(rows["traffic 14d"][0], "8")
+        self.assertIn("4 unique", rows["traffic 14d"][1])
+        self.assertIn("? views", rows["traffic 14d"][1])
+        self.assertIn("2 unavailable", rows["traffic 14d"][1])
+        self.assertIn("0 stars", rows["traffic 14d"][1])
+        self.assertIn("0 forks", rows["traffic 14d"][1])
+        unknown = {label: value for label, value, _ in atlas.kpis({"acme/new": self.FLEET["acme/new"]})}
+        self.assertEqual(unknown["code under management"], "?")
+        self.assertEqual(unknown["traffic 14d"], "?")
 
     def test_ground_bounds_follow_factory_plate(self) -> None:
         for count, expected_x1 in ((3, 36.5), (10, None)):
@@ -661,10 +687,46 @@ class AtlasTest(unittest.TestCase):
         node = __import__("shutil").which("node")
         if not node:
             self.skipTest("node not on PATH")
-        script = atlas.data(self.FLEET) + "\nconsole.log(JSON.stringify(B.filter(b => b.cat === 'factory').map(b => [b.id, b.h])));"
+        script = atlas.data(self.FLEET) + "\nconsole.log(JSON.stringify({B, PLATES, P, KPIS}));"
         proc = subprocess.run([node, "-e", script], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(json.loads(proc.stdout), [["f_big", 120], ["f_small", 66], ["f_new", 12]])
+        generated = json.loads(proc.stdout)
+        blocks = generated["B"]
+        self.assertEqual([[b["id"], b["h"]] for b in blocks if b["cat"] == "factory"],
+                         [["f_big", 120], ["f_small", 66], ["f_new", 12]])
+        self.assertEqual({p["cat"] for p in generated["PLATES"]}, {b["cat"] for b in blocks})
+        routes = {(p["from"], p["to"]) for p in generated["P"]}
+        self.assertTrue({("systemd", "dispatch"), ("dashboard", "district"),
+                         ("dispatch", "f_big"), ("dispatch", "f_small"), ("dispatch", "f_new"),
+                         ("upstream", "f_big")} <= routes)
+        self.assertFalse({("upstream", "f_small"), ("upstream", "f_new")} & routes)
+        block_ids = {b["id"] for b in blocks}
+        self.assertTrue(all(start in block_ids and end in block_ids for start, end in routes))
+        kpis = {label: (value, detail) for label, value, detail in generated["KPIS"]}
+        self.assertEqual(set(kpis), {"factories", "assessment", "code under management", "engine",
+                                    "velocity 30d", "project work", "defects", "traffic 14d"})
+        self.assertEqual(kpis["factories"], ("3", "big · small · new"))
+        self.assertEqual(kpis["code under management"][0], "500")
+
+    def test_page_splices_every_marker(self) -> None:
+        at = datetime(2026, 9, 5, 12, 34, tzinfo=timezone.utc)
+        page = atlas.page(self.FLEET, at)
+        for marker in ("@@DATA@@", "@@EYEBROW@@", "@@FOOTER@@"):
+            self.assertNotIn(marker, page)
+        self.assertIn(atlas.data(self.FLEET), page.split("<script>", 1)[1])
+        eyebrow = page.split('<div class="eyebrow">', 1)[1].split("</div>", 1)[0]
+        self.assertIn("acme", eyebrow)
+        self.assertIn("3 factories", eyebrow)
+        self.assertIn("2026-09-05 12:34Z", eyebrow)
+        footer = page.split('<footer class="site">', 1)[1].split("</footer>", 1)[0]
+        self.assertIn("big @ abc1234", footer)
+        self.assertIn("small @ abc1234", footer)
+        self.assertIn("2026-09-05 12:34Z", footer)
+
+        entry = fleet_entry(None)
+        entry["error"] = r"@@EYEBROW@@ </script> \1"
+        page = atlas.page({"acme/new": entry}, at)
+        self.assertIn(r"@@EYEBROW@@ &lt;/script&gt; \\1", page)
 
 
 

@@ -1107,16 +1107,13 @@ function buildLegend() {
 }
 
 /* ================= Inspector ================= */
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-}
 function ghLink(f) {
   // f[0] = 'owner/repo@sha/path' → github.com/owner/repo/blob/sha/path; display = repo/path
   const m = /^([^@]+)@([0-9a-f]+)\/(.+)$/.exec(f[0]);
   const href = m ? GH + m[1] + '/blob/' + m[2] + '/' + m[3] + '#L' + f[1] : GH + f[0] + '#L' + f[1];
   const shown = m ? m[1].split('/')[1] + '/' + m[3] : f[0];
-  return '<a href="' + escapeHtml(href) + '" target="_blank" rel="noopener">' + escapeHtml(shown) + ':' + escapeHtml(f[1]) + '</a>' +
-         (f[2] ? ' <span style="color:var(--faint)">— ' + escapeHtml(f[2]) + '</span>' : '');
+  return '<a href="' + href + '" target="_blank" rel="noopener">' + shown + ':' + f[1] + '</a>' +
+         (f[2] ? ' <span style="color:var(--faint)">— ' + f[2] + '</span>' : '');
 }
 function select(id) {
   selectedId = id;
@@ -1131,16 +1128,16 @@ function select(id) {
   let conn = '';
   if (outbound.length || inbound.length) {
     conn = '<div class="conn">' +
-      (outbound.length ? '<div>→ out: ' + escapeHtml(outbound.join(' · ')) + '</div>' : '') +
-      (inbound.length ? '<div>← in: ' + escapeHtml(inbound.join(' · ')) + '</div>' : '') + '</div>';
+      (outbound.length ? '<div>→ out: ' + outbound.join(' · ') + '</div>' : '') +
+      (inbound.length ? '<div>← in: ' + inbound.join(' · ') + '</div>' : '') + '</div>';
   }
   insp.innerHTML =
     '<h2>Inspector</h2>' +
     '<span class="cat-chip" style="background:' + c.color + '">' + c.name + '</span>' +
-    '<h3>' + escapeHtml(b.name) + '</h3>' +
-    '<p>' + escapeHtml(b.blurb) + '</p>' +
+    '<h3>' + b.name + '</h3>' +
+    '<p>' + b.blurb + '</p>' +
     (b.kpis ? '<table class="kv">' + b.kpis.map(k => '<tr><td>' + k[0] + '</td><td>' + k[1] + '</td></tr>').join('') + '</table>' : '') +
-    (b.conn ? '<p style="color:var(--muted)">' + escapeHtml(b.conn) + '</p>' : '') +
+    (b.conn ? '<p style="color:var(--muted)">' + b.conn + '</p>' : '') +
     '<ul class="files">' + b.files.map(f => '<li>' + ghLink(f) + '</li>').join('') + '</ul>' +
     conn;
 }
@@ -1176,7 +1173,7 @@ function buildDistricts() {
     const members = B.filter(b => b.cat === catKey);
     html += '<p class="d-sub">' + members.length + ' building' + (members.length > 1 ? 's' : '') + '</p>';
     for (const b of members) {
-      html += '<div class="bldg"><h4>' + escapeHtml(b.name) + '</h4><p>' + escapeHtml(b.blurb) + '</p>' +
+      html += '<div class="bldg"><h4>' + b.name + '</h4><p>' + b.blurb + '</p>' +
               '<div class="cites">' + b.files.map(f => ghLink(f)).join('<br>') + '</div></div>';
     }
     card.innerHTML = html;
@@ -1194,8 +1191,8 @@ function buildPathTable() {
     const [kl, kc] = kindLabel[p.kind];
     tr.innerHTML =
       '<td class="kind ' + kc + '">' + kl + '</td>' +
-      '<td class="route">' + escapeHtml(nameOf(p.from)) + ' → ' + escapeHtml(nameOf(p.to)) + '</td>' +
-      '<td>' + escapeHtml(p.what) + '</td>' +
+      '<td class="route">' + nameOf(p.from) + ' → ' + nameOf(p.to) + '</td>' +
+      '<td>' + p.what + '</td>' +
       '<td class="cite">' + p.cite.map(f => ghLink(f)).join('<br>') + '</td>';
     tbody.appendChild(tr);
   }

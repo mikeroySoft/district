@@ -281,9 +281,9 @@ def traffic_pair(t: dict | str | None) -> str:
 
 
 def total(records: list[dict], key: str) -> int | float | None:
-    """Only report a fleet total when every factory supplies the value."""
-    values = [number(record.get(key)) for record in records]
-    return sum(values) if values and all(value is not None for value in values) else None
+    """Sum known values without presenting an entirely missing metric as zero."""
+    values = [value for record in records if (value := number(record.get(key))) is not None]
+    return sum(values) if values else None
 
 
 # ---------------------------------------------------------------- factory blocks
@@ -420,7 +420,7 @@ def factory_paths(b: dict) -> list[dict]:
 
 def kpis(fleet: dict) -> list[list[str]]:
     es = list(fleet.values())
-    ms = [mapping(e.get("metrics")) for e in es]
+    ms = [m for e in es if (m := mapping(e.get("metrics")))]
     snaps = [mapping(e.get("snap")) for e in es]
     tally = {level: sum(e["assessment"] == level for e in es) for level in ("normal", "attention", "unknown")}
     versions = sorted({text(s.get("version")) for s in snaps}) or ["unknown"]
@@ -430,8 +430,8 @@ def kpis(fleet: dict) -> list[list[str]]:
     traffic = [mapping(m.get("traffic")) for m in ms]
     clones = [mapping(t.get("clones")) for t in traffic]
     views = [mapping(t.get("views")) for t in traffic]
-    na = sum(not c or not v for c, v in zip(clones, views))
-    missing = sum(not m for m in ms)
+    unavailable_traffic = sum(not c or not v for c, v in zip(clones, views))
+    missing = len(es) - len(ms)
     return [
         ["factories", str(len(es)), esc(" · ".join(s.rsplit("/", 1)[-1] for s in fleet) or "none registered")],
         ["assessment", " · ".join(f"{dot(level)}{tally[level]} {level}" for level in tally),
@@ -444,7 +444,8 @@ def kpis(fleet: dict) -> list[list[str]]:
         ["defects", n(total(ms, "open_bugs")), f"open bug-labelled · {n(total(ms, 'closed_bugs_30d'))} closed 30d · {n(total(ms, 'closed_issues_30d'))} issues closed 30d"],
         ["traffic 14d", n(total(clones, "count")),
          f"clones ({n(total(clones, 'uniques'))} unique) · {n(total(views, 'count'))} views · "
-         f"{n(total(ms, 'stars'))} stars · {n(total(ms, 'forks'))} forks" + (f" · {na} unavailable" if na else "")],
+         f"{n(total(ms, 'stars'))} stars · {n(total(ms, 'forks'))} forks"
+         + (f" · {unavailable_traffic} unavailable" if unavailable_traffic else "")],
     ]
 
 

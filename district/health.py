@@ -57,9 +57,10 @@ under observations; it neither diagnoses common causes nor reclassifies health.
 Freshness: age is computed from source time on every read. Fresh is at most TWO
 collection cadences old (one missed interval tolerated); greater age is stale.
 Missing/invalid/future time or missing cadence is partial, never renewed by a
-fetch. Missing data is unavailable. Mixed fresh/stale/missing observations are
-partial; all usable observations stale is stale. Absent execution telemetry makes
-otherwise fresh observations partial. Last known states survive observation loss.
+fetch. Missing data is unavailable; an empty object is partial. Mixed qualities
+and malformed observations are partial; all usable observations stale is stale.
+Absent execution telemetry makes otherwise fresh observations partial. Unresolved
+operational meaning does not change freshness. Last known states survive observation loss.
 Assessment is attention for supported findings, otherwise unknown for non-fresh
 observation, unknown operating/execution state, or unresolved operational meaning;
 otherwise normal. Missing runtime therefore is NOT silently normal, even at idle.
@@ -218,9 +219,11 @@ def classify(slug: str, sources: list[dict], table: dict, at: datetime | None = 
         scope = scope if isinstance(scope, dict) else {"kind": "factory", "id": slug}
         if scope.get("kind") not in ("factory", "shared") or not isinstance(scope.get("id"), str) or not scope["id"].strip():
             unknowns.append("invalid finding scope")
+            source["observation"] = "partial"
             return
         if scope["kind"] == "factory" and scope["id"] != slug:
             unknowns.append("finding scope does not match factory")
+            source["observation"] = "partial"
             return
         scope = {"kind": scope["kind"], "id": scope["id"]}
         identity = json.dumps([scope["kind"], scope["id"], condition, resource], separators=(",", ":"))
@@ -244,29 +247,39 @@ def classify(slug: str, sources: list[dict], table: dict, at: datetime | None = 
         data = raw.get("data") if isinstance(raw, dict) else None
         raw = raw if isinstance(raw, dict) else {}
         quality, age = _quality(raw.get("observed_at"), raw.get("cadence_seconds"), at,
-                                isinstance(data, dict) and bool(data), raw.get("error"))
+                                data is not None, raw.get("error"))
         source = {"id": raw.get("id"), "observed_at": raw.get("observed_at"),
                   "cadence_seconds": raw.get("cadence_seconds"), "age_seconds": age,
                   "observation": quality, "error": raw.get("error")}
         metadata.append(source)
         if not isinstance(source["id"], str) or not source["id"]:
             unknowns.append("source identity unavailable")
-            source["observation"] = "partial" if isinstance(data, dict) and data else "unavailable"
+            source["observation"] = "partial" if data is not None else "unavailable"
             continue
         if not isinstance(data, dict):
+            if data is not None:
+                unknowns.append("source data malformed")
+                source["observation"] = "partial"
             continue
+        if not data:
+            source["observation"] = "partial"
         if isinstance(data.get("dispatcher"), dict):
             dispatchers.append((source, data["dispatcher"]))
+        elif "dispatcher" in data:
+            unknowns.append("dispatcher observation malformed")
+            source["observation"] = "partial"
         if isinstance(data.get("executions"), list):
             execution_telemetry = True
         for key, target in (("executions", executions), ("resources", resources)):
             records = data.get(key, [])
             if not isinstance(records, list):
                 unknowns.append(f"{key} observation malformed")
+                source["observation"] = "partial"
                 continue
             for record in records:
                 if not isinstance(record, dict) or not isinstance(record.get("id"), str) or not record["id"]:
                     unknowns.append(f"{key} identity unavailable")
+                    source["observation"] = "partial"
                     continue
                 timestamp = record.get("observed_at", source["observed_at"])
                 record_quality, _ = _quality(timestamp, source["cadence_seconds"], at, error=source["error"])
@@ -284,8 +297,10 @@ def classify(slug: str, sources: list[dict], table: dict, at: datetime | None = 
                     checks.append((record, source, data.get("history")))
                 else:
                     unknowns.append("check observation malformed")
+                    source["observation"] = "partial"
         else:
             unknowns.append("check observations malformed")
+            source["observation"] = "partial"
 
     latest_checks = {}
     for record, source, history in checks:
@@ -297,6 +312,7 @@ def classify(slug: str, sources: list[dict], table: dict, at: datetime | None = 
                 or not isinstance(scope.get("id"), str) or not scope["id"].strip()
                 or (scope["kind"] == "factory" and scope["id"] != slug)):
             unknowns.append("operational check identity unsupported or invalid")
+            source["observation"] = "partial"
             continue
         key = (source["id"], scope["kind"], scope["id"], condition, resource)
         timestamp = _time(record.get("observed_at", source["observed_at"])) or datetime.min.replace(tzinfo=timezone.utc)
@@ -309,11 +325,14 @@ def classify(slug: str, sources: list[dict], table: dict, at: datetime | None = 
             continue
         if condition not in CHECKS or record.get("status") not in ("passed", "failed"):
             unknowns.append("operational check unsupported or unknown")
+            if record.get("status") != "unknown":
+                source["observation"] = "partial"
             continue
         if record["status"] == "passed":
             continue
         if not all(isinstance(record.get(k), str) and record[k].strip() for k in ("resource", "detail", "impact")):
             unknowns.append("failed check lacks supported evidence or impact")
+            source["observation"] = "partial"
             continue
         finding(source, condition, record["resource"], record["detail"], record["impact"],
                 timestamp=record.get("observed_at"), scope=record.get("scope"), cause=record.get("cause"),
@@ -346,8 +365,10 @@ def classify(slug: str, sources: list[dict], table: dict, at: datetime | None = 
     for item, source in executions.values():
         if item.get("state") not in EXECUTION_STATES or (item.get("state") == "stage-active" and not item.get("stage")):
             item["state"] = "unknown"
+            source["observation"] = "partial"
         if item["state"] == "known wait" and not item.get("reason"):
             item["state"] = "unknown"
+            source["observation"] = "partial"
         if item["state"] in ("failed", "blocked"):
             if item.get("outcome_kind") == "mechanism":
                 finding(source, "runtime.mechanism_unavailable", item.get("stage") or item["id"],
@@ -381,7 +402,7 @@ def classify(slug: str, sources: list[dict], table: dict, at: datetime | None = 
         observation = "unavailable"
     elif all(q == "stale" for q in usable):
         observation = "stale"
-    elif all(q == "fresh" for q in qualities) and execution_telemetry and not unknowns and all(item["observation"] == "fresh" for item, _ in [*executions.values(), *resources.values()]):
+    elif all(q == "fresh" for q in qualities) and execution_telemetry and all(item["observation"] == "fresh" for item, _ in [*executions.values(), *resources.values()]):
         observation = "fresh"
     else:
         observation = "partial"
