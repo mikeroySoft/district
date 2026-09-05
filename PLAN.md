@@ -224,6 +224,8 @@ Non-interactive: `--exclusive a,b --no-edit --check …`.
 
 ### 2.4 `district status`
 
+> Historical implementation record below, superseded by D01 in `OPERATIONS-CONSOLE-SPEC.md` §6. CLI and Atlas now consume one operational classification. Snapshot failures mean unavailable/partial observation, not stopped machinery; status exits 0 normal/empty, 1 attention, 2 unknown without attention.
+
 `factory dashboard --json` per repo in a thread pool. A nonzero subprocess,
 malformed JSON, or non-empty `errors` in a snapshot marks that repo
 **unhealthy** (never shown as zero escalations). Columns: repo · version ·

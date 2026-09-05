@@ -224,6 +224,8 @@ Clicking a factory shows its health signals and the metrics in §5.7.
 
 ### 5.7 Health and metrics model
 
+> Historical mixed-health requirement below, superseded by `OPERATIONS-CONSOLE-SPEC.md` §6 (D01 shared semantic/JSON contract). Current status exits: 0 normal/empty, 1 operational attention, 2 unknown without attention. Project metrics remain context; `health`/`reasons` are removed.
+
 A factory's notifications stay with the factory. District derives one
 **health** level per factory from `factory dashboard --json` alone:
 

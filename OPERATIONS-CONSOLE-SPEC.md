@@ -136,6 +136,116 @@ Every finding carries stable identity, factory/shared scope, condition code, sev
 
 Snapshot fetch failure is an observation failure, not proof the dispatcher stopped. Missing GitHub data does not erase locally observed runtime facts. Freshness thresholds derive from documented collection cadences and source timestamps. Re-fetching old data does not renew its source freshness. Existing documented CLI JSON/exit semantics affected by this change must be migrated and documented deliberately; consumers are not silently left on old health logic.
 
+### 6.1 D01 shared semantic and CLI contract
+
+`district.health.classify(slug, sources, table, at=None)` is the sole classifier.
+`at` is a timezone-aware evaluation time, defaulting to current UTC. It performs
+no I/O and retains no state. D02 supplies evidence, not a second classification.
+The JSON-compatible normalized input is **District's semantic seam, not F03's
+wire schema**. The complete field contract and runnable-shaped examples live in
+the module docstring in `district/health.py`.
+
+Each source has `id`, `observed_at` (timezone-aware source timestamp or null),
+`cadence_seconds` (documented positive collection interval or null), `data`
+(object or null), and `error` (string or null). Data can independently contain:
+
+- `dispatcher`: authoritative `service_active`/`timer_active` booleans or null,
+  optional `expected_enabled`, `next_dispatch_at`, recorded
+  `pause: {recorded_at, reason}`, and `capped`/`cap_reason`/`cap_recorded_at`.
+  Inactive service **and** timer plus enabled intent establish unexpected stop.
+  An inactive timer alone establishes neither a deliberate pause nor a stop.
+- `executions`: records with stable `id`, reported `state`, optional reported
+  `stage`, `observed_at`, `entered_at`, `reason`, `outcome_kind`, and `reference`.
+  `outcome_kind: product` is a legitimate verdict; `mechanism` means inability to
+  execute the configured mechanism. Unspecified significance stays unknown.
+  Missing `executions` means unsupported observation; `[]` means observed empty.
+- `resources`: opaque `id`, `held`, optional source time and explicitly confirmed
+  `owner: {factory, execution_id}`. Output ownership is `known`, `unknown`, or
+  `none`; a held lock does not establish its owner or create an incident.
+- `checks`: `condition`, opaque `resource`, `status: passed|failed|unknown`,
+  evidence `detail`, supported `impact`, optional `cause`, `reference`, source
+  time and `scope: {kind: factory|shared, id}`. Default scope is this factory.
+  Shared scope must be established by the producer, not inferred from a URL.
+  Within one source/scope/condition/resource the newest verdict replaces older
+  checks, including recovery. Independent source evidence remains separate.
+- Optional `history: {start, end, complete, truncated}`. Check
+  `first_observed_at`/`last_observed_at` are retained only when ordered within
+  that declared window. They do not claim incident onset or persistent history.
+
+Supported condition codes: `runtime.dispatcher_failed`,
+`runtime.mechanism_unavailable`, `scheduling.unexpected_stop`,
+`scheduling.capped`, `dependency.unavailable`, `host.configuration_drift`,
+`host.configuration_invalid`, and `host.policy_violation`. Cap and configuration
+drift have warning severity; the other supported conditions have error severity.
+Intentional pins are not configuration drift. Unsupported conditions or failed
+checks without evidence/impact remain unknown, not fabricated findings.
+
+The classifier returns `schema_version: 1`, `operating_state`, `execution_state`,
+`observation`, `assessment`, `findings`, `sources`, `executions`, `resources`,
+and `unknowns`. All concurrent executions survive the aggregate execution-state
+projection. Aggregate precedence: stage-active, blocked, known wait, unknown,
+failed, interrupted, completed. Observed empty executions imply known wait only
+with scheduled, deliberately paused, or capped dispatch; absent telemetry does
+not. Operating precedence is capped, recorded pause, running, scheduled waiting,
+unexpectedly stopped, unknown: admission may be stopped while existing work runs.
+
+Each finding includes `id`, `factory`, `scope`, `condition_code`, `resource`,
+`severity`, `observed_at`, `impact`, `cause` (null unless supported), and
+`evidence` records containing `source_id`, `factory`, `observed_at`, `observation`,
+`reference`, and `detail`. Stable identity is the canonical JSON tuple
+`[scope.kind, scope.id, condition_code, resource]`; changing evidence does not
+change identity. `group_findings(entries)` groups only equal identities and
+retains complete per-factory findings under `observations`.
+
+Source output retains `id`, `observed_at`, `cadence_seconds`, `age_seconds`,
+`observation`, and `error`, without recopying source data. Freshness uses source
+time: up to two collection intervals is fresh (one missed interval tolerated);
+older is stale. Missing/invalid/future timestamps or unknown cadence are partial.
+Missing data is unavailable. Mixed qualities are partial; all usable sources
+stale yields stale. Missing execution telemetry prevents fresh overall
+observation. Source age is recomputed on reread without changing source time.
+Reported last-known states remain visible with their observation quality.
+
+`assessment` is derived here, never in a view: any supported finding means
+`attention`; otherwise non-fresh observation, unknown operating/execution state,
+or unresolved operational meaning means `unknown`; otherwise `normal`.
+Unknown lock ownership remains explicit but is not independently an incident.
+
+Current transport remains `factory dashboard --json`, adapted by
+`health.snapshot_sources(snap, error)`. Its `generated_at` is retained as source
+time. It has no documented periodic District collection cadence, so cadence is
+null, and it lacks confirmed execution telemetry: normally partial/unknown,
+even when running or scheduled. Positive service/timer observations are usable;
+legacy false booleans also encode failed probes and cannot prove a stop.
+GitHub failure preserves local runtime evidence. Failed dispatcher-unit runs and
+configured triage probes are scoped findings with unknown cause; ordinary gate
+verdicts, review revisions, escalations, bounce and parked project work are not.
+Existing registry `disabled_at`/`disabled_reason` records a cap, never a pause.
+No F03 support, local log parsing, runtime collector or pause-recording mechanism
+is introduced by D01.
+
+`status.entry` returns the classification alongside existing `table`, `snap`,
+`error`, and cached project `metrics`. Its optional internal `result["sources"]`
+accepts normalized D02 observations instead of applying the legacy adapter.
+`district status --json` remains an object keyed by repository slug; `health`
+and `reasons` are removed. Empty fleets serialize as `{}`. Text status includes
+operating, execution, observation and assessment columns and retains project
+metrics as context. Atlas and `/api/fleet` consume these same entries verbatim.
+
+Exact **status** exit codes, for both text and JSON:
+
+- **0**: every factory is normal, or no repositories are registered.
+- **1**: at least one factory has operational attention, regardless of other
+  unknown observations. Unknowns remain visible in its JSON entries.
+- **2**: no attention, but at least one factory has unknown state/observation.
+  Standard command-usage errors also use exit 2.
+
+Migrated consumers: `status.entry/row/main`, CLI help, Atlas factory blocks,
+inspector and fleet tally, dashboard `/api/fleet` through `status.fleet`, tests,
+website status/JSON documentation and the repository District skill. `apply`
+does not call the former health classifier: its reconciliation failures,
+failure-cap writes and reset behavior retain their separate existing contract.
+
 ## 7. Factory/District contract
 
 ### Current evidence and gaps
