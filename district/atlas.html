@@ -55,10 +55,10 @@
   .kpi .k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); }
   .kpi .v { font-size: 20px; font-weight: 600; color: var(--ink); line-height: 1.2; margin-top: 2px; }
   .kpi .s { font-size: 11px; color: var(--muted); }
-  .health { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
-  .health.healthy { background: #4CBB6C; } .health.attention { background: #E3A83B; } .health.failing { background: #E8493E; }
+  .assessment { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .assessment.normal { background: #4CBB6C; } .assessment.attention { background: #E3A83B; } .assessment.unknown { background: #8A93A5; }
   #inspector table.kv { width: 100%; border-collapse: collapse; font-size: 12px; margin: 10px 0 4px; }
-  #inspector table.kv td { padding: 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  #inspector table.kv td { padding: 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
   #inspector table.kv td:first-child { color: var(--muted); width: 38%; font-family: var(--mono); font-size: 11px; }
   .thesis code, p code, li code, td code {
     font-family: var(--mono); font-size: 0.86em; color: var(--ink);
@@ -271,7 +271,7 @@
       Every tall building is a managed repository — a <em>factory</em> — with height proportional to its
       lines of code. The low-rise blocks are the shared engine (agent-factory) and the District control
       tower that keeps every factory on the same rails. Roads are real control and data paths, cited to
-      the line that implements them. Click a factory for its health rollup and delivery metrics.
+      the line that implements them. Click a factory for its operational assessment, evidence and project metrics.
     </p>
     <div class="kpis" id="kpis"></div>
   </div>
@@ -312,7 +312,7 @@
           <div id="legend-paths"></div>
           <p class="legend-note">Moving dots are payloads: timer ticks, claimed tickets, gate reports, review verdicts, merges, and dashboard snapshots in transit.</p>
         </div>
-        <div class="scene-hint">hover a road or building = isolate its connections · click = inspect · drag = pan · scroll = zoom · factory height ∝ LOC · ● health: green healthy · amber attention · red failing</div>
+        <div class="scene-hint">hover a road or building = isolate its connections · click = inspect · drag = pan · scroll = zoom · factory height ∝ LOC · assessment: green normal · amber attention · gray unknown</div>
       </div>
     </div>
     <aside>
@@ -564,6 +564,7 @@ function drawPayloads(svg) {
   }
 }
 function wireNode(svg, g, b) {
+  if (b.assessment) g.setAttribute('aria-label', b.name + ': ' + b.assessment + '; operating state: ' + b.operating_state + '; execution state: ' + b.execution_state + '; observation: ' + b.observation);
   g.addEventListener('click', () => select(b.id));
   g.addEventListener('keydown', e => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(b.id); }
@@ -577,12 +578,13 @@ function nodeLabel(x, y, b) {
                          fill: shade(c, 1.55),
                          'font-family': 'ui-monospace, SF Mono, Menlo, Consolas, monospace',
                          'paint-order': 'stroke', stroke: '#0E1219' }, BLDG_LABELS);
-  if (b.health) {
+  if (b.assessment) {
     const dot = document.createElementNS(SVGNS, 'tspan');
-    dot.setAttribute('fill', HEALTH_COLOR[b.health]); dot.setAttribute('stroke', 'none');
+    dot.setAttribute('fill', ASSESSMENT_COLOR[b.assessment]); dot.setAttribute('stroke', 'none');
     dot.textContent = '\u25CF ';
     t.appendChild(dot);
     const nm = document.createElementNS(SVGNS, 'tspan'); nm.textContent = b.name; t.appendChild(nm);
+    const title = el('title', {}, t); title.textContent = b.assessment;
   } else t.textContent = b.name;
 }
 function finishScene(svg, key, ground) {
@@ -1153,11 +1155,12 @@ function defaultInspector() {
     '<li>Next pass, the merge stage lands one PR when gate PASS, approval, green CI, and a head containing main all agree — <code>dispatch.py:632</code>. Anything else becomes <code>ready-for-human</code> — <code>:289</code>.</li>' +
     '</ol>' +
     '<h3>What District sees</h3>' +
-    '<p>None of those notifications. District reads one document per factory — <code>factory dashboard --json</code> — and rolls it up: ' +
-    '<span class="health failing"></span><b>failing</b> = timer inactive or District-disabled, last pass failed, snapshot errors, or any consecutive failed passes; ' +
-    '<span class="health attention"></span><b>attention</b> = open <code>ready-for-human</code> tickets, a parked upstream sync, bounce rate over 33%, or doctor warnings; ' +
-    '<span class="health healthy"></span><b>healthy</b> = none of the above.</p>' +
-    '<p style="color:var(--muted)">Click a factory for its health signals, codebase size, velocity, defect resolution, and traffic. The lower panels list every citation.</p>';
+    '<p>Atlas displays the same classification as CLI status: operating state, execution state, observation quality and evidence-backed findings. ' +
+    '<span class="assessment normal" aria-hidden="true"></span><b>normal</b>, ' +
+    '<span class="assessment attention" aria-hidden="true"></span><b>attention</b> and ' +
+    '<span class="assessment unknown" aria-hidden="true"></span><b>unknown</b> are shared classifier assessments, not separate Atlas rules.</p>' +
+    '<p>Missing execution telemetry stays unknown. Fetch failures do not prove dispatch stopped; source times, not page render time, determine freshness. Project work and quality metrics remain context, not operational findings.</p>' +
+    '<p style="color:var(--muted)">Click a factory for operating and execution state, observation sources, finding evidence and impact, then codebase size, velocity, defect resolution and traffic. The lower panels retain the code citations.</p>';
 }
 
 /* ================= Deep sections ================= */

@@ -120,14 +120,15 @@
       </div>
     </div>
     <div class="term">
-      <div class="bar"><span>district status</span><span>exit 0</span></div>
+      <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
 <pre><span class="p">$</span> district status
-<span class="m">repo                  health     version  next   last    pass  active  esc  gate1  bounce  fails  upstream</span>
-mikeroySoft/rocm-cli  <span class="att">attention</span>  0.2.0    -      1m ago  done  yes     4    100%   50%     0      behind 2, parked #31
-mikeroySoft/gpuflo    <span class="ok">healthy</span>    0.2.0    in 8m  1m ago  done  yes     0    -      -       0      -
-mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago  done  yes     1    -      -       0      -
-<span class="c"># nonzero exit if any factory has a failed pass, a dead timer,
-# or a timer District capped — usable from cron or a shell prompt</span></pre>
+<span class="m">repo                  operating          execution  observation  assessment</span>
+mikeroySoft/rocm-cli  scheduled waiting  unknown    partial      unknown
+mikeroySoft/gpuflo    running            unknown    partial      unknown
+mikeroySoft/rocm-app  capped             unknown    partial      attention
+<span class="c"># illustration: this fleet exits 1 because attention takes precedence
+# 0 normal / empty fleet · 1 operational attention · 2 unknown without attention
+# actual output also retains version, schedule, pass and project metrics</span></pre>
     </div>
   </header>
 
@@ -201,7 +202,7 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
         <div class="kicker">District Atlas</div>
         <h2>The fleet as a city.</h2>
         <p class="lede" style="margin-bottom:16px">Every managed repository is a building whose height is proportional to its tracked lines of code, standing on a plate with the shared engine, the control tower, host runtime, and GitHub. Roads are the real control and data paths, cited to <code>file:line</code>.</p>
-        <p style="color:var(--text-muted)">Above the map: factory count, health tally, code under management, engine version spread, velocity, open work, defects, traffic. Click a factory for its health signals; each tile links to that factory's own dashboard for ticket-level detail. The hierarchy is District → Factory; it never descends further.</p>
+        <p style="color:var(--text-muted)">Above the map: factory count, shared operational assessment, code under management, engine version spread, velocity, open work, defects, traffic. Click a factory for operating state, execution state, observation quality and evidence-backed findings; each tile links to that factory's own dashboard for ticket-level detail.</p>
       </div>
       <div class="city">
         <svg viewBox="0 0 420 260" role="img" aria-label="Isometric fleet map: three buildings of different heights on a plate beside an engine block and a control tower">
@@ -251,12 +252,12 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
             <polygon points="0,-45 10,-50 20,-45 10,-40" fill="#38BFAD"/>
             <circle cx="10" cy="-56" r="3" fill="#38BFAD"><animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/></circle>
           </g>
-          <text x="20" y="250" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#55617A">height ∝ √(loc / max loc) · dot = health</text>
+          <text x="20" y="250" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#55617A">illustrative architecture · live status uses shared classification</text>
         </svg>
         <div class="kpis">
           <div class="kpi"><div class="l">factories</div><div class="v">3</div></div>
-          <div class="kpi"><div class="l">healthy</div><div class="v" style="color:var(--status-ok)">1</div></div>
-          <div class="kpi"><div class="l">attention</div><div class="v" style="color:var(--status-warn)">2</div></div>
+          <div class="kpi"><div class="l">unknown</div><div class="v">2</div></div>
+          <div class="kpi"><div class="l">attention</div><div class="v" style="color:var(--status-warn)">1</div></div>
           <div class="kpi"><div class="l">engine</div><div class="v">0.2.0</div></div>
         </div>
       </div>
@@ -264,17 +265,20 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
   </section>
 
   <section id="health">
-    <div class="kicker">Health model</div>
-    <h2>One level per factory, derived from data the factory already publishes.</h2>
-    <p class="lede">Notifications stay with the factory. District reads <code>factory dashboard --json</code> and nothing else.</p>
+    <div class="kicker">Operational model</div>
+    <h2>One classification for the CLI and dashboard.</h2>
+    <p class="lede">Machinery findings, project context and observation quality are separate. The existing full snapshot remains the source; missing execution telemetry is explicit, not reconstructed from artifacts.</p>
     <table>
-      <thead><tr><th>Level</th><th>Any of</th></tr></thead>
+      <thead><tr><th>Dimension</th><th>Values</th></tr></thead>
       <tbody>
-        <tr><td class="lvl f">failing</td><td class="why">timer inactive or District-disabled · last pass failed · snapshot errors non-empty · consecutive failures ≥ 1 · dashboard unreachable</td></tr>
-        <tr><td class="lvl a">attention</td><td class="why">open <code>ready-for-human</code> · upstream sync parked · bounce rate &gt; 33% · doctor WARN</td></tr>
-        <tr><td class="lvl h">healthy</td><td class="why">none of the above</td></tr>
+        <tr><td>Operating</td><td>running · scheduled waiting · deliberately paused (recorded intent only) · capped · unexpectedly stopped (authoritative evidence only) · unknown</td></tr>
+        <tr><td>Execution</td><td>stage-active · known wait · blocked · completed · failed · interrupted · unknown</td></tr>
+        <tr><td>Observation</td><td>fresh · stale · partial · unavailable; source times are retained across rereads</td></tr>
       </tbody>
     </table>
+    <p><code>district status --json</code> is keyed by repository slug. Each entry exposes <code>schema_version</code>, <code>operating_state</code>, <code>execution_state</code>, <code>observation</code>, <code>assessment</code>, <code>findings</code>, <code>sources</code>, reported <code>executions</code>, <code>resources</code> and explicit <code>unknowns</code>, alongside existing <code>table</code>, <code>snap</code>, <code>error</code> and cached <code>metrics</code> context. The obsolete <code>health</code>/<code>reasons</code> fields are removed. The complete normalized D02 contract is in <code>OPERATIONS-CONSOLE-SPEC.md</code> §6.1 and <code>district/health.py</code>.</p>
+    <p>Exit <strong>0</strong>: every entry normal, or an empty fleet (<code>{}</code> in JSON). Exit <strong>1</strong>: any supported operational attention. Exit <strong>2</strong>: unknown observation/state without attention; command-usage errors also use 2. Attention takes precedence over unknown, which remains visible in each JSON entry. Existing engines without execution telemetry normally report partial/unknown, not silently healthy.</p>
+    <p>Ready-for-human tickets, parked upstream project work, review bounce, legitimate gate/review rejection and ordinary CI/capacity/resource waits do not independently create findings. A failed snapshot is an observation gap, not proof of stopped dispatch. <code>apply</code> retains its separate reconciliation exit contract and failure-cap policy.</p>
     <div class="grid three" style="margin-top:24px">
       <div class="card"><h3>Failure cap</h3><p>Ten consecutive failed passes and District disables the timer. A pass that fails every ten minutes otherwise burns model spend indefinitely. <code>apply</code> re-enables it once the cause is fixed.</p></div>
       <div class="card"><h3>Supply-chain policy</h3><p>Workers install packages with the operator's credentials. District checks the host-wide minimum package age for <code>uv</code>, <code>npm</code>, and <code>cargo</code>. Missing policy is a WARN, never a silent skip.</p></div>

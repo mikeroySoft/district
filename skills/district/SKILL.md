@@ -26,9 +26,9 @@ Confirm `district --version`, `factory --version`, and authenticated `gh auth st
 
 ## Inspect
 
-Run `district status`. Exit 0 means no factory is failing; attention rows still need reporting. For diagnosis, run `district status --json` and report each affected slug's `health` and `reasons`. Use the repository's `factory dashboard --json` and `.factory/events.jsonl` only when the fleet record does not identify the cause.
+Run `district status`. Exit 0 means all registered factories classify normal (or the fleet is empty); exit 1 means supported operational attention; exit 2 means unknown/partial/stale observation without attention. Exit 1 takes precedence over 2. For diagnosis, run `district status --json` and report each affected slug's `operating_state`, `execution_state`, `observation`, and `findings`, retaining `sources` timestamps and evidence. Missing telemetry remains unknown, not stopped. Project escalations and review bounces remain context, not incidents. See `OPERATIONS-CONSOLE-SPEC.md` §6 for the shared JSON contract.
 
-Done when every non-healthy factory has a stated reason and evidence source.
+Done when every operational finding and observation gap has a stated scope and evidence source.
 
 ## Onboard
 
@@ -36,7 +36,7 @@ Done when every non-healthy factory has a stated reason and evidence source.
 2. For a new repository, take gate commands from its CI or existing scripts. Pass corrections with repeated `--check NAME=CMD`; pass GPU or other single-tenant checks with `--exclusive name1,name2`.
 3. Run `district add <path-or-github-url>`. Existing `.factory.toml` selects adopt mode; District lifts host-owned settings into the registry. New repositories open the proposed config in `$EDITOR` unless `--no-edit` was explicitly requested.
 4. Report the printed commit command. District writes onboarding files but deliberately does not commit them.
-5. Run `district status` and confirm the new factory is not failing.
+5. Run `district status` and report the new factory's operating state, findings, and observation gaps.
 
 Done when the repository is registered, its timer is active, and `factory doctor` has no blocking problem.
 
@@ -58,7 +58,7 @@ district apply --reset owner/repo
 
 Reset runs one dispatcher pass. It clears the cap and re-enables the timer only after that pass succeeds.
 
-Done when the command reports `pass succeeded` and `district status` no longer marks the factory failing.
+Done when the command reports `pass succeeded`, the timer is re-enabled, and `district status --json` no longer reports `capped`; report any remaining findings or observation gaps separately.
 
 ## Remove
 
