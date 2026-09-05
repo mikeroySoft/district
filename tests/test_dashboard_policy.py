@@ -165,10 +165,15 @@ class DashboardPolicyTest(unittest.TestCase):
     def test_stream_bounds_sanitizes_and_preserves_real_exit(self):
         child = Path(self.tmp) / "diagnostics.py"
         child.write_text(
-            "import sys\n"
+            "import sys, json\n"
             "print('ordinary command diagnostic')\n"
             "print('token=ghp_FAKE_SECRET_FOR_TEST_ONLY')\n"
             "print('model = \"PRIVATE_CONFIGURATION_VALUE\"')\n"
+            "print('{\"password\": \"QUOTED_JSON_CREDENTIAL\"}')\n"
+            "print(\"{'api_key': 'SINGLE_QUOTED_CREDENTIAL'}\")\n"
+            "print('\"model\" = \"QUOTED_TOML_VALUE\"')\n"
+            "print('{\"model\": \"JSON_CONFIGURATION_VALUE\"}')\n"
+            "print(json.dumps({'password': 'prefix\"ESCAPED_CREDENTIAL'}))\n"
             "print('https://user:fake-password@example.com/private')\n"
             "print('/private/credential/location')\n"
             "print('-----BEGIN PRIVATE KEY-----')\n"
@@ -190,13 +195,33 @@ class DashboardPolicyTest(unittest.TestCase):
         for secret in ("ghp_FAKE_SECRET_FOR_TEST_ONLY", "fake-password", "/private/credential/location",
                        "ghp_OVERSIZED_SECRET", "/private/argument", "ghp_ARG_SECRET",
                        "RkFLRS1QUklWQVRFLUtFWS1NQVRFUklBTA==", "PRIVATE_CONFIGURATION_VALUE",
-                       "BASE64_AFTER_OVERSIZED_PRIVATE_HEADER"):
+                       "BASE64_AFTER_OVERSIZED_PRIVATE_HEADER", "QUOTED_JSON_CREDENTIAL",
+                       "SINGLE_QUOTED_CREDENTIAL", "QUOTED_TOML_VALUE", "JSON_CONFIGURATION_VALUE",
+                       "ESCAPED_CREDENTIAL"):
             self.assertNotIn(secret, text)
         self.assertLess(len(body), 128 * 2056 + 4096)
         self.assertNotIn("diagnostic number 199", text)
         self.assertIn("truncated", text)
         self.assertNotIn("\n[exit 0]\n", text)
         self.assertTrue(text.endswith("[exit 7]\n"), text[-200:])
+
+    def test_stream_withholds_multiline_configuration_until_exit(self):
+        child = Path(self.tmp) / "configuration.py"
+        for delimiter in ('"""', "'''"):
+            with self.subTest(delimiter=delimiter):
+                lines = ("ordinary diagnostic", '-"model" = ' + delimiter,
+                         "-MULTILINE_CONFIGURATION", "-" + delimiter,
+                         "-----END PRIVATE KEY-----", "TRAILING_CONFIGURATION")
+                child.write_text("\n".join(f"print({line!r})" for line in lines))
+                with patch.object(dash, "DISTRICT", [sys.executable, str(child)]):
+                    code, body, _ = self.request("POST", "/api/act", self.good, b'{"args":["apply"]}')
+                text = body.decode()
+                self.assertEqual(code, 200)
+                self.assertIn("ordinary diagnostic", text)
+                self.assertNotIn("MULTILINE_CONFIGURATION", text)
+                self.assertNotIn("TRAILING_CONFIGURATION", text)
+                self.assertTrue(text.endswith("[exit 0]\n"))
+
 
 
 if __name__ == "__main__":

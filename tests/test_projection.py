@@ -335,7 +335,8 @@ class ProjectionTest(unittest.TestCase):
                              reference=secret_url)],
             "raw": source_data, "logs": [log], "configuration": config_value,
         }
-        sources = [source(data, identity=secret_url, error=f"token={token}")]
+        sources = [source(data, identity=secret_url,
+                          error=json.dumps({"password": diagnostic, "api_key": diagnostic}))]
         result = self.observe(sources, snap=snap, error=f"password={diagnostic}")
         self.assert_state(result, (1, "attention", "running", "stage-active", "partial"))
         raw, public, block, _ = result

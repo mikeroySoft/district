@@ -182,6 +182,7 @@ class Handler(BaseHTTPRequestHandler):
         with proc.stdout:
             count = 0
             private_key = False
+            withhold_rest = False
             while line := proc.stdout.readline(8193):
                 if count == 128:
                     chunk(b"[diagnostics truncated]\n")
@@ -190,17 +191,19 @@ class Handler(BaseHTTPRequestHandler):
                     break
                 count += 1
                 if len(line) > 8192:
-                    # The hidden remainder may open a private-key block. Fail closed
-                    # for subsequent diagnostics until an explicit closing marker.
-                    private_key = True
+                    # A hidden fragment may begin a key/config block; do not guess
+                    # where it ends. Keep draining, then report the actual exit.
+                    withhold_rest = True
                     while line and not line.endswith(b"\n"):
                         line = proc.stdout.readline(8193)
                     text = "[oversized diagnostic withheld]"
                 else:
                     decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if '"""' in decoded or "'''" in decoded:
+                        withhold_rest = True
                     if "BEGIN " in decoded and "PRIVATE KEY" in decoded:
                         private_key = True
-                    text = "[details withheld]" if private_key else safe_text(decoded) or "[details withheld]"
+                    text = "[details withheld]" if private_key or withhold_rest else safe_text(decoded) or "[details withheld]"
                     if "END " in decoded and "PRIVATE KEY" in decoded:
                         private_key = False
                 # Only the server emits unprefixed exit framing, never child text.

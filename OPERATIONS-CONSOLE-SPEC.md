@@ -289,8 +289,10 @@ does not renew them. Declared finding history and first/last observations surviv
 The browser has no new incident store or onset calculation.
 
 Evidence prose is single-line, at most 512 characters. Credential patterns,
-authorization material, assignment values, URLs and absolute paths are redacted;
-multiline/oversized text, key/cookie material and non-text fields are withheld.
+authorization material, assignment values, URLs and absolute paths are redacted.
+Quoted JSON/TOML keys are recognized; an assignment's entire remaining line is
+masked rather than guessing where an escaped value ends. Multiline/oversized
+text, key/cookie material and non-text fields are withheld.
 References are identifiers, not arbitrary clickable URLs. Only documented
 fields are copied: source data, raw logs, host registry/configuration values and
 unknown extension fields never pass through. Producers must still keep secrets
@@ -355,10 +357,11 @@ values are withheld. Markers must be bounded regular files; doctor, cloning,
 gate commands and host mutations are not run by detection.
 
 Authorized action diagnostics are bounded to 128 records of at most 512
-characters. Oversized lines/private-key blocks are withheld; after an oversized
-line further diagnostics remain withheld until a key closing marker. Excess
-output is drained without killing an in-progress mutation. Child output is
-prefixed separately from the server's actual `[exit N]` marker. This retains the
+characters. Private-key blocks are withheld. Oversized lines and triple-quoted
+configuration markers withhold all remaining diagnostics, rather than guessing
+where a hidden or multiline value ends. Excess output is drained without killing
+an in-progress mutation; the actual exit is still reported. Child output is
+prefixed separately from the server's `[exit N]` marker. This retains the
 legacy action endpoint under D07 authorization; D08's typed requests, conflict
 serialization and full management workflow acceptance remain held, not waived.
 

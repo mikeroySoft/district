@@ -40,8 +40,8 @@ PRIVATE_TEXT = re.compile(
     r"(?i)(?:gh[pousr]_|github_pat_|sk-)[A-Za-z0-9_-]+|AKIA[0-9A-Z]{16}|"
     r"(?:bearer|basic)\s+\S+|"
     r"\b(?:[\w.-]*(?:token|password|passwd|secret|api.?key|credential)[\w.-]*|authorization)"
-    r"\s*[=:]\s*(?:\"[^\"]*\"|'[^']*'|\S+)|"
-    r"\b[A-Za-z_][\w.-]*\s*=\s*(?:\"[^\"]*\"|'[^']*'|\S+)|"
+    r"[\"']?\s*[=:].*|"
+    r"\b[A-Za-z_][\w.-]*(?:[\"']\s*[:=]|\s*=).*|"
     r"[a-z][a-z0-9+.-]*://[^\s<>\"']+|"
     r"(?<![\w])(?:~/|/)[^\s<>\"']+|[A-Za-z]:\\[^\s<>\"']+"
 )
