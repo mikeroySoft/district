@@ -694,12 +694,104 @@ class AtlasTest(unittest.TestCase):
 
 
 class DashboardTest(DistrictCase):
-    def test_act_rule(self) -> None:
-        self.assertFalse(dash.act_allowed("10.0.0.5", False, "1"))
-        self.assertTrue(dash.act_allowed("10.0.0.5", True, "1"))
-        self.assertTrue(dash.act_allowed("127.0.0.1", False, "1"))
-        self.assertTrue(dash.act_allowed("::1", False, "1"))
-        self.assertFalse(dash.act_allowed("127.0.0.1", False, None))
+    def test_remote_peer_cannot_claim_loopback_authority(self) -> None:
+        from email.message import Message
+
+        headers = Message()
+        for key, value in (("Host", "127.0.0.1:8760"), ("Origin", "http://127.0.0.1:8760"), ("X-District-Act", "1")):
+            headers[key] = value
+        self.assertTrue(dash.act_allowed("127.0.0.1", ("127.0.0.1", 8760), headers))
+        self.assertFalse(dash.act_allowed("10.0.0.5", ("127.0.0.1", 8760), headers))
+        self.assertFalse(dash.act_allowed("127.0.0.1", ("10.0.0.5", 8760), headers))
+        headers["X-Forwarded-For"] = "127.0.0.1"
+        self.assertFalse(dash.act_allowed("10.0.0.5", ("127.0.0.1", 8760), headers))
+        self.assertFalse(dash.act_allowed("127.0.0.1", ("127.0.0.1", 8760), headers))
+        del headers["X-Forwarded-For"]
+        headers["Host"] = "evil.example:8760"
+        self.assertFalse(dash.act_allowed("127.0.0.1", ("127.0.0.1", 8760), headers))
+
+    def test_mutation_boundary(self) -> None:
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        from unittest.mock import patch
+
+        for bind in ("127.0.0.1", "0.0.0.0"):
+            with ThreadingHTTPServer((bind, 0), dash.Handler) as server:
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                port = server.server_port
+                good = {"Host": f"127.0.0.1:{port}", "Origin": f"http://127.0.0.1:{port}", "X-District-Act": "1"}
+                cases = [
+                    {k: v for k, v in good.items() if k != "X-District-Act"},
+                    {**good, "X-District-Act": "0"},
+                    {k: v for k, v in good.items() if k != "Origin"},
+                    {**good, "Origin": "http://evil.example"},
+                    {**good, "Host": f"evil.example:{port}", "Origin": f"http://evil.example:{port}"},
+                    {**good, "Host": "127.0.0.1:1"},
+                    {**good, "Forwarded": "for=127.0.0.1;host=localhost"},
+                    {**good, "X-Forwarded-For": "127.0.0.1"},
+                ]
+                try:
+                    with patch.object(dash.Handler, "_stream", autospec=True,
+                                      side_effect=lambda handler, argv: handler._send(200, "text/plain", b"executed")) as command:
+                        for headers in cases:
+                            for method, route in (("POST", "/api/act"), ("POST", "/api/future"), ("PUT", "/api/future"), ("DELETE", "/api/future")):
+                                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                                connection.request(method, route, '{"args":["apply"]}', headers)
+                                response = connection.getresponse()
+                                self.assertEqual(response.status, 403, (method, route, headers))
+                                response.read()
+                                connection.close()
+                        command.assert_not_called()
+                    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                    connection.request("POST", "/api/act", '{"args":["rm","not-registered"]}', good)
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertIn(b"[exit 1]", response.read())
+                    connection.close()
+                finally:
+                    server.shutdown()
+
+    def test_detect_and_read_do_not_disclose_configuration(self) -> None:
+        import threading
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+
+        secret = "ghp_SUPER_SECRET_CREDENTIAL"
+        repo = self.repo(toml=f'[triage]\nurl="https://user:{secret}@example.com"\n')
+        host.save({"repo": {"acme/widgets": {"path": str(repo), "triage": {"token": secret}}}})
+        self.stub("factory", ("dashboard --json", json.dumps(dashboard(errors=[secret]))),
+                  ("doctor --json", secret))
+        with ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                for path in ("/", "/api/fleet"):
+                    body = urllib.request.urlopen(base + path).read().decode()
+                    self.assertNotIn(secret, body)
+                    self.assertNotIn(str(repo), body)
+                target_url = base + "/api/detect?target=" + urllib.parse.quote(str(repo))
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(target_url)
+                self.assertEqual(ctx.exception.code, 403)
+                request = urllib.request.Request(target_url, headers={"X-District-Act": "1"})
+                body = json.loads(urllib.request.urlopen(request).read())
+                self.assertTrue(body["ok"], body)
+                self.assertIn("adopt", body["output"])
+                self.assertNotIn(secret, body["output"])
+                self.assertNotIn(str(repo), body["output"])
+                self.assertNotIn("doctor --json", self.calls("factory"))
+                for target in ("/etc/passwd", "--help", "https://evil.example/repo", "https://user:password@github.com/a/b"):
+                    request = urllib.request.Request(base + "/api/detect?target=" + urllib.parse.quote(target),
+                                                     headers={"X-District-Act": "1"})
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(ctx.exception.code, 400)
+                    self.assertLess(len(ctx.exception.read()), 1024)
+            finally:
+                server.shutdown()
 
     def test_server_routes(self) -> None:
         import threading
@@ -713,6 +805,7 @@ class DashboardTest(DistrictCase):
         self.addCleanup(os.environ.pop, "PYTHONPATH", None)
         server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_address[1]}"
 
@@ -724,11 +817,11 @@ class DashboardTest(DistrictCase):
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(urllib.request.Request(base + "/api/act", data=b'{"args":["apply"]}', method="POST"))
         self.assertEqual(ctx.exception.code, 403)
-        req = urllib.request.Request(base + "/api/act", data=b'{"args":["status"]}', method="POST", headers={"X-District-Act": "1"})
+        req = urllib.request.Request(base + "/api/act", data=b'{"args":["status"]}', method="POST", headers={"X-District-Act": "1", "Origin": base})
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(req)
         self.assertEqual(ctx.exception.code, 400)
-        req = urllib.request.Request(base + "/api/act", data=b'{"args":["apply","--reset","nope"]}', method="POST", headers={"X-District-Act": "1"})
+        req = urllib.request.Request(base + "/api/act", data=b'{"args":["apply","--reset","nope"]}', method="POST", headers={"X-District-Act": "1", "Origin": base})
         out = urllib.request.urlopen(req).read().decode()
         self.assertIn("$ district apply --reset nope", out)
         self.assertIn("nope is not registered", out)
