@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>District — Operations brief · Prototype C</title>
+<style>
+:root{--paper:#f5f3ee;--surface:#fffefb;--ink:#252a27;--muted:#62665e;--line:#d7d8ce;--green:#315c44;--green-bg:#e8eee5;--red:#a13c29;--red-bg:#f5e7df;--amber:#785326;--amber-bg:#eee7d6}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:0 42px 120px}
+a{color:inherit;text-underline-offset:4px}
+a:hover{color:var(--red)}
+:focus-visible{outline:3px solid #245cab;outline-offset:5px}
+.skip{position:absolute;left:24px;top:-100px;background:var(--surface);padding:12px;z-index:10}.skip:focus{top:12px}
+.shell{max-width:1312px;margin:auto}
+header{min-height:94px;display:flex;align-items:center;justify-content:space-between;gap:24px;border-bottom:1px solid var(--ink)}
+.brand{display:flex;align-items:center;gap:11px;font-size:23px;letter-spacing:-1px;font-weight:750}.brand svg{width:27px;height:27px}
+.header-right{display:flex;align-items:center;gap:22px;color:var(--muted);font-size:13px}.sample{border:1px solid #8b8c80;padding:5px 9px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:var(--ink)}
+nav{display:flex;gap:26px;font-size:13px}nav a{text-decoration:none;padding:12px 0}nav a:first-child{font-weight:700;border-bottom:2px solid var(--ink)}
+.hero{padding:43px 0 32px;display:flex;justify-content:space-between;gap:32px;align-items:flex-end}
+.eyebrow{font-size:11px;font-weight:750;text-transform:uppercase;letter-spacing:1.8px;margin:0 0 13px;color:var(--muted)}
+h1{font-size:clamp(39px,4.6vw,64px);line-height:1.08;font-weight:550;letter-spacing:-3px;margin:0 0 17px}h1 span{color:var(--red)}
+.lede{margin:0;color:var(--muted);max-width:610px;font-size:16px}
+.snapshot{min-width:176px;border-left:1px solid var(--line);padding-left:21px;font-size:13px;color:var(--muted);margin-bottom:3px}.snapshot strong{display:block;font-size:15px;font-weight:600;color:var(--ink);margin:3px 0}.snapshot small{font-size:12px}
+.verdict-line{height:5px;display:flex;gap:5px;margin-bottom:36px}.verdict-line span{flex:1;background:var(--green)}.verdict-line span:last-child{background:var(--red)}
+.layout{display:grid;grid-template-columns:minmax(0,1.9fr) minmax(285px,1fr);gap:38px;align-items:start}
+.section-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px}.section-heading h2{margin:0;font-size:13px;font-weight:700;letter-spacing:1px;text-transform:uppercase}.section-heading>span{font-size:12px;color:var(--muted)}
+.incident{background:var(--surface);border:1px solid var(--line);border-top:3px solid var(--red)}
+.incident-top{padding:27px 29px 24px}.incident-meta{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px}.tag{display:inline-flex;align-items:center;gap:7px;padding:4px 8px;background:var(--red-bg);color:var(--red);font-size:11px;font-weight:750;letter-spacing:.65px;text-transform:uppercase}.tag:before{content:"";width:6px;height:6px;background:currentColor;border-radius:50%}.incident-meta .mono{font-size:12px;color:var(--muted)}
+.mono,code,time{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}h3{margin:0} .incident h3{font-size:27px;letter-spacing:-.7px;font-weight:620;line-height:1.25}.incident h3 span{display:block;font-size:17px;line-height:1.6;font-weight:450;letter-spacing:0;margin-top:6px;color:var(--muted)}
+.impact{margin:22px 0 0;padding-left:14px;border-left:2px solid #d4b4a7;font-size:14px}.impact strong{font-weight:650}.impact p{margin:4px 0 0;color:var(--muted)}
+.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:23px 0 0;padding-top:19px;border-top:1px solid var(--line)}.facts dt{font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:4px}.facts dd{margin:0;font-size:15px;font-weight:650}.facts dd.danger{color:var(--red)}
+details{border-top:1px solid var(--line)}summary{cursor:pointer;min-height:62px;padding:19px 29px;font-size:14px;font-weight:650;list-style:none;display:flex;align-items:center;gap:12px}summary::-webkit-details-marker{display:none}summary:before{content:"+";font-family:ui-monospace,monospace;font-size:20px;font-weight:400;line-height:1;width:16px;color:var(--muted)}details[open]>summary:before{content:"−"}summary:hover{background:#efefe8}summary small{margin-left:auto;font-size:11px;color:var(--muted);font-weight:450}.detail-body{padding:0 29px 25px;font-size:14px}.detail-body>p:first-child{margin-top:0}.detail-body p{color:var(--muted)}.log{margin:15px 0;padding:16px;background:#eeeee7;border:1px solid var(--line);font-size:12px;line-height:1.85;overflow-wrap:anywhere;white-space:pre-wrap;color:var(--ink)}.evidence-list{padding-left:18px;margin:12px 0}.evidence-list li{margin:7px 0}.note{font-size:12px!important;color:var(--muted)}
+.rehearsal{display:block;padding:10px 12px;background:var(--amber-bg);color:var(--amber);font-size:12px;margin-bottom:14px;border-left:2px solid #a9814c}.checklist{border:0;margin:0;padding:0}.checklist legend{font-weight:650;font-size:13px;margin-bottom:10px}.checklist label{display:flex;align-items:flex-start;gap:12px;cursor:pointer;min-height:54px;padding:11px 0;border-bottom:1px solid var(--line)}.checklist label:last-child{border:0}.checklist input{width:18px;height:18px;margin:3px 0 0;flex-shrink:0;accent-color:var(--green)}.checklist strong{display:block;font-size:13px;font-weight:600}.checklist small{display:block;font-size:12px;color:var(--muted);margin-top:3px}.checklist input:checked+span strong{color:var(--green);text-decoration:line-through}
+.aside{border-left:1px solid var(--line);padding-left:30px}.factory{border-bottom:1px solid var(--line);padding:0 0 23px;margin-bottom:22px}.factory-line{display:flex;justify-content:space-between;align-items:center;gap:12px}.factory h3{font-size:18px;font-weight:650;letter-spacing:-.3px}.healthy{color:var(--green);font-size:11px;letter-spacing:.5px;font-weight:700;text-transform:uppercase;display:flex;align-items:center;gap:6px}.healthy:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}.factory p{font-size:13px;margin:10px 0;color:var(--muted)}.factory .state{display:block;font-size:15px;font-weight:550;color:var(--ink);margin-top:12px}.mini-flow{display:flex;align-items:center;gap:4px;margin:14px 0 11px}.mini-flow span{height:4px;flex:1;background:#d9ded4}.mini-flow .done{background:var(--green)}.mini-flow .current{background:var(--green);height:8px}.factory-footer{font-size:11px;color:var(--muted);display:flex;justify-content:space-between;gap:10px}.factory details{margin-top:16px}.factory summary{padding:10px 0;min-height:44px;font-size:12px}.factory .detail-body{padding:4px 0 0;font-size:12px}.scope{padding:16px 18px;background:#eaece4;font-size:13px}.scope h3{font-size:13px;font-weight:650}.scope p{color:var(--muted);margin:7px 0 0}.scope code{font-size:11px;overflow-wrap:anywhere}
+.events{margin-top:33px}.timeline{padding:0;margin:0;list-style:none}.timeline li{display:grid;grid-template-columns:65px 1fr;gap:15px;font-size:13px;padding:0 0 20px}.timeline time{font-size:11px;color:var(--muted);padding-top:3px}.timeline .event-copy{border-left:1px solid var(--line);padding-left:17px;position:relative}.event-copy:before{content:"";position:absolute;left:-4px;top:7px;width:7px;height:7px;border-radius:50%;background:var(--green);outline:4px solid var(--paper)}.timeline li:first-child .event-copy:before{background:var(--red)}.event-copy strong{font-weight:600}.event-copy p{margin:3px 0 0;color:var(--muted);font-size:12px}
+.maintenance{display:grid;grid-template-columns:180px 1fr 1fr;gap:25px;border-top:1px solid var(--ink);border-bottom:1px solid var(--line);margin-top:32px;padding:23px 0}.maintenance h2{font-size:12px;letter-spacing:1px;text-transform:uppercase;margin:1px 0}.maintenance div{font-size:13px}.maintenance strong{font-weight:600}.maintenance p{color:var(--muted);font-size:12px;margin:4px 0 0}.footer{display:flex;justify-content:space-between;gap:24px;font-size:11px;color:var(--muted);padding-top:20px}.footer p{margin:0}
+@media(min-width:1300px){.incident h3{font-size:30px}}
+@media(max-width:960px){body{padding-inline:25px}.layout{gap:25px;grid-template-columns:minmax(0,1.5fr) minmax(255px,1fr)}.aside{padding-left:22px}.incident-top,summary{padding-left:21px;padding-right:21px}.detail-body{padding-left:21px;padding-right:21px}.hero{gap:20px}h1{letter-spacing:-2px}.facts{gap:8px}.facts dd{font-size:13px}nav{display:none}}
+@media(max-width:720px){body{padding:0 20px 120px}header{min-height:80px}.header-right{gap:10px}.header-right>span:last-child{display:none}.hero{padding-top:29px;display:block}h1{font-size:43px;letter-spacing:-2px}.snapshot{border:0;padding:0;margin-top:22px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}.snapshot strong{font-size:13px;margin:0}.snapshot small{display:none}.layout{display:block}.aside{border:0;padding:0;margin-top:32px}.verdict-line{margin-bottom:25px}.incident h3{font-size:26px}.incident h3 span{font-size:16px}.facts{grid-template-columns:1fr 1fr 1fr}.facts dt{font-size:10px}.facts dd{font-size:12px}summary small{display:none}.maintenance{grid-template-columns:1fr;gap:16px}.footer{display:block}.footer p+p{margin-top:8px}.lede{font-size:14px}.section-heading>span{font-size:11px}}
+@media(prefers-reduced-motion:no-preference){summary{transition:background .15s ease}}
+</style>
+</head>
+<body>
+<!-- Throwaway variant C: incident-first operations brief. Parent provides the A/B/C route switcher. -->
+<a class="skip" href="#main">Skip to operations brief</a>
+<div class="shell">
+<header>
+  <div class="brand"><svg viewBox="0 0 28 28" fill="none" aria-hidden="true"><path d="M3 4h9v9H3zM16 4h9v9h-9zM3 17h9v7H3zM16 17h9v7h-9z" stroke="currentColor" stroke-width="2"/></svg>district<span style="font-size:12px;font-weight:450;letter-spacing:0;color:var(--muted);margin-left:7px">/ operations</span></div>
+  <div class="header-right"><nav aria-label="On this page"><a href="#main">Brief</a><a href="#events">Events</a><a href="#maintenance">Maintenance</a></nav><span class="sample">Illustrative sample</span><span>Not connected</span></div>
+</header>
+<main id="main">
+  <section class="hero" aria-labelledby="verdict">
+    <div><p class="eyebrow">Factory operations brief / 03 factories</p><h1 id="verdict">2 flowing. <span>1 stopped.</span></h1><p class="lede">One dispatcher needs attention. The rest of the fleet is progressing normally or waiting on schedule.</p></div>
+    <div class="snapshot">Sample snapshot<strong>04 Sep 2026 · 14:32 UTC</strong><small>Static scenario · no live polling</small></div>
+  </section>
+  <div class="verdict-line" aria-hidden="true"><span></span><span></span><span></span></div>
+  <div class="layout">
+    <div>
+      <div class="section-heading"><h2>Needs operator attention</h2><span>01 operational incident</span></div>
+      <article class="incident" aria-labelledby="incident-title">
+        <div class="incident-top">
+          <div class="incident-meta"><span class="tag">Dispatch stopped</span><span class="mono">rocm-cli / dispatcher</span></div>
+          <h3 id="incident-title">The dispatcher reached its failure cap.<span>Triage endpoint refused the connection.</span></h3>
+          <div class="impact"><strong>New dispatch cycles are blocked for rocm-cli.</strong><p>The dispatcher stopped after 10 consecutive failures. This is an orchestration fault, not a project decision or a failed code gate.</p></div>
+          <dl class="facts"><div><dt>Failure count</dt><dd class="danger">10 / 10 · capped</dd></div><div><dt>Stopped since</dt><dd>14:26 UTC</dd></div><div><dt>Next attempt</dt><dd>None scheduled</dd></div></dl>
+        </div>
+        <details open>
+          <summary>Evidence &amp; affected boundary <small>Dispatcher log + dependency</small></summary>
+          <div class="detail-body">
+            <pre class="log">14:25:51  triage request → connection refused
+14:26:01  consecutive_failures=10  limit=10
+14:26:01  dispatcher stopped: failure cap reached</pre>
+            <p class="note">Illustrative log excerpt, not output from a running factory.</p>
+            <ul class="evidence-list"><li><strong>Observed boundary:</strong> dispatcher → triage service. No successful triage response in these failed cycles.</li><li><strong>Sample shared endpoint:</strong> <code>http://triage.example.invalid:8080</code>. Reachability from the other factories is not established by their current health.</li><li><strong>Not established:</strong> why the service refused connections. Inspect the service and network path before restarting the dispatcher.</li></ul>
+          </div>
+        </details>
+        <details>
+          <summary>Safe recovery checklist <small>Local rehearsal only</small></summary>
+          <div class="detail-body">
+            <span class="rehearsal"><strong>Rehearsal — no commands executed.</strong> Checkboxes are local, unsaved notes. They do not change fleet state.</span>
+            <fieldset class="checklist"><legend>Review before taking action outside this prototype</legend>
+              <label><input type="checkbox"><span><strong>Confirm the configured endpoint and service owner</strong><small>Use the actual factory configuration, not the sample address shown here.</small></span></label>
+              <label><input type="checkbox"><span><strong>Inspect the triage service and its network path</strong><small>Confirm that the expected listener is available from the rocm-cli host. Preserve failure logs.</small></span></label>
+              <label><input type="checkbox"><span><strong>Plan a scoped recovery of rocm-cli</strong><small>Follow the installed runbook; confirm no duplicate dispatcher is active before resuming. Do not raise the failure cap to hide the fault.</small></span></label>
+              <label><input type="checkbox"><span><strong>Observe a successful dispatch cycle</strong><small>Check triage success, a fresh dispatcher heartbeat and stable failure count. If it fails again, stop and inspect rather than repeatedly restarting.</small></span></label>
+            </fieldset>
+          </div>
+        </details>
+      </article>
+      <section class="events" id="events" aria-labelledby="events-title">
+        <div class="section-heading"><h2 id="events-title">Recent operational events</h2><span>Sample · UTC</span></div>
+        <ol class="timeline">
+          <li><time datetime="2026-09-04T14:26:01Z">14:26</time><div class="event-copy"><strong>rocm-cli dispatcher stopped at its failure cap</strong><p>10 consecutive triage connection failures. No further dispatch scheduled.</p></div></li>
+          <li><time datetime="2026-09-04T14:24:00Z">14:24</time><div class="event-copy"><strong>gpuflo entered the gate stage</strong><p>Gate process running; latest heartbeat received at 14:32.</p></div></li>
+          <li><time datetime="2026-09-04T14:22:00Z">14:22</time><div class="event-copy"><strong>district completed a dispatch cycle</strong><p>Healthy scheduled wait. Next dispatch at 14:38, in 6 minutes.</p></div></li>
+        </ol>
+      </section>
+    </div>
+    <aside class="aside" aria-labelledby="healthy-title">
+      <div class="section-heading"><h2 id="healthy-title">Flowing normally</h2><span>02 / 03</span></div>
+      <article class="factory">
+        <div class="factory-line"><h3>gpuflo</h3><span class="healthy">Healthy</span></div>
+        <span class="state">Gate running</span><p>Active execution. No operator intervention indicated by this sample.</p>
+        <div class="mini-flow" aria-hidden="true"><span class="done"></span><span class="done"></span><span class="current"></span><span></span><span></span></div>
+        <div class="factory-footer"><span>Current stage: gate</span><span>Heartbeat 14:32</span></div>
+        <details><summary>Inspect flow evidence</summary><div class="detail-body"><p>Dispatcher active. Worker handed execution to the gate at 14:24. Gate heartbeat is current at the snapshot; there is no gate result yet.</p><p><strong>Healthy means progressing</strong> — it does not mean the gate has passed.</p></div></details>
+      </article>
+      <article class="factory">
+        <div class="factory-line"><h3>district</h3><span class="healthy">Healthy</span></div>
+        <span class="state">Next dispatch in 6 min</span><p>Expected scheduled wait. The dispatcher is not stalled.</p>
+        <div class="factory-footer"><span>Waiting on schedule</span><span>Due 14:38 UTC</span></div>
+        <details><summary>Inspect schedule evidence</summary><div class="detail-body"><p>Previous dispatch completed at 14:22. Scheduler remains enabled with its next wake at 14:38. No repeated dispatcher failures in this sample.</p><p>The 6-minute countdown is illustrative and does not tick.</p></div></details>
+      </article>
+      <div class="scope"><h3>Watch the shared dependency</h3><p>The sample triage service is shared. gpuflo is already at its gate; district has not reached its next dispatch. Neither proves triage is reachable now.</p></div>
+    </aside>
+  </div>
+  <section class="maintenance" id="maintenance" aria-labelledby="maintenance-title">
+    <h2 id="maintenance-title">Maintenance</h2>
+    <div><strong>No maintenance window in this sample</strong><p>No planned host interruption explains the stopped dispatcher.</p></div>
+    <div><strong>Keep recovery scoped</strong><p>Inspect the shared triage service before changing factory processes. Healthy flows need no restart.</p></div>
+  </section>
+</main>
+<footer class="footer"><p>Infrastructure &amp; orchestration only. Project escalations are outside this brief.</p><p>Prototype C · All statuses, logs, times and endpoints are illustrative.</p></footer>
+</div>
+</body>
+</html>
