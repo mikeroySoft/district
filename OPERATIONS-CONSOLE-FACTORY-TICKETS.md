@@ -1,6 +1,6 @@
 # Operations console — Factory ticket drafts
 
-Status: **local drafts only**. F01–F03 are draft IDs, not GitHub issue numbers. Proposed repository: Factory. Proposed label for each: `needs-triage`. Nothing here authorizes publishing, committing, dispatching, implementation, deployment, or visual signoff. These tickets describe future contracts; they do not claim that the proposed telemetry fields or `--runtime-json` already exist.
+Status: published ticket source for [Factory #26](https://github.com/mikeroySoft/factory/issues/26) (F01), [#27](https://github.com/mikeroySoft/factory/issues/27) (F02), and [#28](https://github.com/mikeroySoft/factory/issues/28) (F03). F01 was released through normal triage on 2026-09-05; F02/F03 remain held. The original draft instructions below are retained as provenance; the publication record in `OPERATIONS-CONSOLE-SPEC.md` and live issue bodies govern release. Publication does not assert telemetry is implemented or authorize deployment/visual signoff.
 
 ## Dependency and release table
 

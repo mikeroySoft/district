@@ -1,7 +1,30 @@
 # District operations console
 
-Status: agreed product direction; implementation specification and local ticket drafts.
-Date: 2026-09-05. No implementation or dispatch authorized by this document alone.
+Status: approved specification, published with implementation issues.
+Date: 2026-09-05. The operator authorized publication and first-wave release; later waves, production deployment, and human visual signoff remain gated.
+ 
+### Publication and first-wave release
+
+The immutable design and prototype source revision is [`164663b1a3e5e78b4fde3b127cf013d87b7e3c28`](https://github.com/mikeroySoft/district/commit/164663b1a3e5e78b4fde3b127cf013d87b7e3c28). Issue bodies pin that specification. This release record supersedes the original draft-only publication wording below; design requirements and operator checkpoints are unchanged.
+
+| Draft ID | Published issue | Initial release |
+| --- | --- | --- |
+| F01 | [Factory #26 — Execution lifecycle](https://github.com/mikeroySoft/factory/issues/26) | First wave: normal triage |
+| F02 | [Factory #27 — Waits and resource ownership](https://github.com/mikeroySoft/factory/issues/27) | Held; F01 required |
+| F03 | [Factory #28 — Runtime JSON](https://github.com/mikeroySoft/factory/issues/28) | Held; F02 required |
+| D01 | [District #23 — Operational classification](https://github.com/mikeroySoft/district/issues/23) | First wave: normal triage |
+| D07 | [District #24 — Read-only LAN policy](https://github.com/mikeroySoft/district/issues/24) | First wave: normal triage |
+| D02 | [District #25 — Shared collector](https://github.com/mikeroySoft/district/issues/25) | Held; #23, #24 and verified installed F03 |
+| D03 | [District #26 — Scoped shell](https://github.com/mikeroySoft/district/issues/26) | Held; #25 required |
+| D04 | [District #27 — Graphical Overview](https://github.com/mikeroySoft/district/issues/27) | Held; #26 required |
+| D05 | [District #28 — Flows and evidence](https://github.com/mikeroySoft/district/issues/28) | Held; #27 required |
+| D06 | [District #29 — Brief](https://github.com/mikeroySoft/district/issues/29) | Held; #28 required |
+| D08 | [District #30 — Management workflows](https://github.com/mikeroySoft/district/issues/30) | Held; #28 and #24 required |
+| D09 | [District #31 — Cutover](https://github.com/mikeroySoft/district/issues/31) | Held; #27, #29, #30 and operator acceptance/archive checkpoints |
+
+Only F01, D01 and D07 were released with `needs-triage`; no direct `ready-for-agent` bypass. The other nine issues carry `factory-held` and no intake label. `factory-held` is a visible operator marker, not a new dispatcher feature: exclusion is enforced by absence of `needs-triage`/`ready-for-agent`. Later releases require explicit dependency/checkpoint verification and removal of the hold before normal triage. Same-repository issue bodies contain concrete `Blocked by: #N` references; F03 installation and human approval remain explicit operator holds, not guessed cross-repository issue parsing.
+
+The normal Factory and District timer services were started for first-wave intake. This records release, not implementation completion; current execution state belongs to GitHub and the Factory dashboards.
 
 ## 1. Purpose and precedence
 

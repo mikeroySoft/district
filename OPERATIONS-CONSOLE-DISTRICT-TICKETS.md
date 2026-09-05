@@ -1,6 +1,6 @@
 # District operations console — District ticket drafts
 
-Status: local drafts only. These are not issued, committed, dispatched, or authorized for implementation or deployment by their existence. D01–D09 are draft IDs, not GitHub issue numbers.
+Status: published ticket source for District [#23](https://github.com/mikeroySoft/district/issues/23) (D01), [#24](https://github.com/mikeroySoft/district/issues/24) (D07), [#25](https://github.com/mikeroySoft/district/issues/25) (D02), [#26](https://github.com/mikeroySoft/district/issues/26) (D03), [#27](https://github.com/mikeroySoft/district/issues/27) (D04), [#28](https://github.com/mikeroySoft/district/issues/28) (D05), [#29](https://github.com/mikeroySoft/district/issues/29) (D06), [#30](https://github.com/mikeroySoft/district/issues/30) (D08), and [#31](https://github.com/mikeroySoft/district/issues/31) (D09). D01/D07 were released through normal triage on 2026-09-05; the other seven remain held. Original draft instructions below are provenance; `OPERATIONS-CONSOLE-SPEC.md`'s publication record and live issue bodies govern release. Deployment and human acceptance remain separately gated.
 
 Canonical contract: `OPERATIONS-CONSOLE-SPEC.md` in this repository. Every worker must read it completely before changing source. These bodies use the existing **Scope**, **Touches**, **Exit gate**, **Out of scope** template; file pointers are starting points, not requirements to introduce new modules.
 
