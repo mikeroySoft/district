@@ -1,0 +1,26 @@
+[
+  {
+    "case": "file target",
+    "status": 400,
+    "bytes": 123,
+    "target_echoed": false
+  },
+  {
+    "case": "option instead of target",
+    "status": 400,
+    "bytes": 83,
+    "target_echoed": false
+  },
+  {
+    "case": "foreign URL",
+    "status": 400,
+    "bytes": 81,
+    "target_echoed": false
+  },
+  {
+    "case": "credential-bearing GitHub URL",
+    "status": 400,
+    "bytes": 81,
+    "target_echoed": false
+  }
+]
