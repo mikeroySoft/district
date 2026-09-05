@@ -218,22 +218,21 @@ is the renderer seam and `atlas/district-atlas.html` the first static cut
 (snapshot 2026-09-04). The live page regenerates the DATA blocks from the
 registry, a LOC scan, and each factory's `dashboard --json`.
 
-Above the map, an exec KPI strip: factory count, health tally, code under
-management, engine version spread, velocity, open work, defects, traffic.
-Clicking a factory shows its health signals and the metrics in §5.7.
+Above the map, an exec KPI strip: factory count, operational assessment, code
+under management, engine version spread, velocity, open work, defects, traffic.
+Clicking a factory shows its operational evidence and the metrics in §5.7.
 
-### 5.7 Health and metrics model
+### 5.7 Operational classification and project metrics
 
-> Historical mixed-health requirement below, superseded by `OPERATIONS-CONSOLE-SPEC.md` §6 (D01 shared semantic/JSON contract). Current status exits: 0 normal/empty, 1 operational attention, 2 unknown without attention. Project metrics remain context; `health`/`reasons` are removed.
+District uses the shared operating, execution, observation and findings model
+in `OPERATIONS-CONSOLE-SPEC.md` §6.1. CLI and Atlas consume that classification
+unchanged. Project feedback, escalation, review bounce and parked project work
+are context, not independently machinery incidents. Snapshot failures report
+unavailable/partial observation, not stopped dispatch.
 
-A factory's notifications stay with the factory. District derives one
-**health** level per factory from `factory dashboard --json` alone:
-
-| Level | Any of |
-|---|---|
-| failing | timer inactive or District-disabled · last pass failed · snapshot `errors` non-empty · `consecutive_failures ≥ 1` · dashboard unreachable |
-| attention | open `ready-for-human` · upstream sync parked · bounce rate > 33% · doctor WARN |
-| healthy | none of the above |
+`district status` exits 0 for normal/empty, 1 for operational attention, and 2
+for unknown without attention. JSON exposes the shared classification alongside
+snapshots and project metrics; the obsolete mixed `health`/`reasons` are removed.
 
 Exec metrics per factory, all sourced from `git`, `gh`, or the snapshot — never
 estimated:

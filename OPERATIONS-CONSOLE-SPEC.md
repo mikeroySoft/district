@@ -201,9 +201,11 @@ Source output retains `id`, `observed_at`, `cadence_seconds`, `age_seconds`,
 `observation`, and `error`, without recopying source data. Freshness uses source
 time: up to two collection intervals is fresh (one missed interval tolerated);
 older is stale. Missing/invalid/future timestamps or unknown cadence are partial.
-Missing data is unavailable. Mixed qualities are partial; all usable sources
-stale yields stale. Missing execution telemetry prevents fresh overall
-observation. Source age is recomputed on reread without changing source time.
+Missing/null data is unavailable; an empty object is partial. Mixed qualities
+and malformed observations are partial; all usable sources stale yields stale.
+Missing execution telemetry prevents fresh overall observation. Unresolved
+operational meaning does not change observation freshness; it changes assessment.
+Source age is recomputed on reread without changing source time.
 Reported last-known states remain visible with their observation quality.
 
 `assessment` is derived here, never in a view: any supported finding means
@@ -220,6 +222,10 @@ legacy false booleans also encode failed probes and cannot prove a stop.
 GitHub failure preserves local runtime evidence. Failed dispatcher-unit runs and
 configured triage probes are scoped findings with unknown cause; ordinary gate
 verdicts, review revisions, escalations, bounce and parked project work are not.
+The installed Factory producer's `dashboard.parse_journal` derives run results
+only from systemd `Starting`/`Finished`/`Failed` journal brackets; application
+output remains run lines. `consecutive_failures` counts those unit results,
+not ticket gate verdicts.
 Existing registry `disabled_at`/`disabled_reason` records a cap, never a pause.
 No F03 support, local log parsing, runtime collector or pause-recording mechanism
 is introduced by D01.

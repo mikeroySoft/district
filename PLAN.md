@@ -224,14 +224,15 @@ Non-interactive: `--exclusive a,b --no-edit --check …`.
 
 ### 2.4 `district status`
 
-> Historical implementation record below, superseded by D01 in `OPERATIONS-CONSOLE-SPEC.md` §6. CLI and Atlas now consume one operational classification. Snapshot failures mean unavailable/partial observation, not stopped machinery; status exits 0 normal/empty, 1 attention, 2 unknown without attention.
-
-`factory dashboard --json` per repo in a thread pool. A nonzero subprocess,
-malformed JSON, or non-empty `errors` in a snapshot marks that repo
-**unhealthy** (never shown as zero escalations). Columns: repo · version ·
-timer next/last · last pass · active · esc · first-gate · bounce · failures ·
-upstream. Exit 1 on any unhealthy repo, failed last pass, inactive or
-District-disabled timer. `--json` dumps snapshots.
+`factory dashboard --json` is collected per repo in a thread pool and adapted
+into the shared operational classification in `OPERATIONS-CONSOLE-SPEC.md`
+§6.1. Failed or malformed snapshots mean unavailable/partial observation,
+not stopped machinery. Independently usable runtime evidence is retained.
+Text and JSON report operating state, execution state, observation quality,
+assessment and findings; project metrics remain context. `--json` retains
+snapshots and metrics alongside the classification, keyed by slug.
+Exit 0 means normal/empty fleet, 1 means operational attention, and 2 means
+unknown without attention. The obsolete mixed `health`/`reasons` fields are removed.
 
 ### 2.5 `district rm <slug>`
 
@@ -251,7 +252,7 @@ occupied `upstream` name aborts; net-new with no marker and `--no-edit` writes
 nothing; npm day conversion (`"24h"` → `1`, `"36h"` → `2`); `install`
 nonzero → FAIL row; cap at 9 no action / 10 disable / second apply still exits
 nonzero / `--reset` re-enables only on success; malformed dashboard JSON →
-unhealthy; `--upgrade` restores timers on failure.
+unavailable observation; `--upgrade` restores timers on failure.
 
 ## Phase 3 — Migration and PMF check
 
