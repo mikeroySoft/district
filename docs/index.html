@@ -185,7 +185,7 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
   <section id="commands">
     <div class="kicker">Commands</div>
     <h2>Six verbs. Each one shells out to <code>factory</code>, <code>gh</code>, and <code>git</code>.</h2>
-    <p class="lede">District never imports agent-factory internals and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
+    <p class="lede">District uses only the public agent-factory CLI and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
       <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
       <div class="k">district apply</div><div class="v">Reconcile the host to the registry. Re-renders units, ensures labels, runs <code>doctor</code>, enforces the failure cap and supply-chain policy. <code>--upgrade</code> reinstalls the engine so every timer picks it up on the next tick.</div>
