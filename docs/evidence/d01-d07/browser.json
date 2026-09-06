@@ -1,0 +1,1069 @@
+{
+  "url": "http://10.0.10.99:18973/",
+  "status": 200,
+  "apiBytes": 79269,
+  "capability": "Read-only — checking trusted-local access…",
+  "controlsDisabled": true,
+  "safe": true,
+  "fleet": {
+    "acceptance/scheduled": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19000
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "normal",
+      "operating_state": "scheduled waiting",
+      "execution_state": "known wait",
+      "observation": "fresh",
+      "findings": [],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "fresh",
+          "error": null
+        }
+      ],
+      "executions": [],
+      "resources": [],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/paused": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19001
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "normal",
+      "operating_state": "deliberately paused",
+      "execution_state": "known wait",
+      "observation": "fresh",
+      "findings": [],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "fresh",
+          "error": null
+        }
+      ],
+      "executions": [],
+      "resources": [],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/capped": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19002
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "attention",
+      "operating_state": "capped",
+      "execution_state": "known wait",
+      "observation": "fresh",
+      "findings": [
+        {
+          "id": "[\"factory\",\"acceptance/capped\",\"scheduling.capped\",\"dispatcher\"]",
+          "factory": "acceptance/capped",
+          "scope": {
+            "kind": "factory",
+            "id": "acceptance/capped"
+          },
+          "condition_code": "scheduling.capped",
+          "resource": "dispatcher",
+          "severity": "warning",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "impact": "Automatic dispatch is disabled by its failure cap.",
+          "cause": null,
+          "evidence": [
+            {
+              "source_id": "runtime",
+              "factory": "acceptance/capped",
+              "observed_at": "2026-09-05T22:58:16Z",
+              "observation": "fresh",
+              "reference": "dispatcher.capped",
+              "detail": "failure cap"
+            }
+          ],
+          "projection": {
+            "truncated": false,
+            "omitted": {
+              "evidence": 0
+            }
+          }
+        }
+      ],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "fresh",
+          "error": null
+        }
+      ],
+      "executions": [],
+      "resources": [],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "evidence": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/stopped": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19003
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "attention",
+      "operating_state": "unexpectedly stopped",
+      "execution_state": "unknown",
+      "observation": "fresh",
+      "findings": [
+        {
+          "id": "[\"factory\",\"acceptance/stopped\",\"scheduling.unexpected_stop\",\"dispatcher\"]",
+          "factory": "acceptance/stopped",
+          "scope": {
+            "kind": "factory",
+            "id": "acceptance/stopped"
+          },
+          "condition_code": "scheduling.unexpected_stop",
+          "resource": "dispatcher",
+          "severity": "error",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "impact": "Automatic dispatch cannot start.",
+          "cause": null,
+          "evidence": [
+            {
+              "source_id": "runtime",
+              "factory": "acceptance/stopped",
+              "observed_at": "2026-09-05T22:58:16Z",
+              "observation": "fresh",
+              "reference": "dispatcher",
+              "detail": "Service and timer are confirmed inactive despite enabled intent."
+            }
+          ],
+          "projection": {
+            "truncated": false,
+            "omitted": {
+              "evidence": 0
+            }
+          }
+        }
+      ],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "fresh",
+          "error": null
+        }
+      ],
+      "executions": [],
+      "resources": [],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "evidence": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/stale": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19004
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "unknown",
+      "operating_state": "scheduled waiting",
+      "execution_state": "known wait",
+      "observation": "stale",
+      "findings": [],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:05Z",
+          "cadence_seconds": 5,
+          "age_seconds": 11,
+          "observation": "stale",
+          "error": null
+        }
+      ],
+      "executions": [],
+      "resources": [],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/partial": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19005
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "unknown",
+      "operating_state": "running",
+      "execution_state": "stage-active",
+      "observation": "partial",
+      "findings": [],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "fresh",
+          "error": null
+        },
+        {
+          "id": "github",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 60,
+          "age_seconds": 0,
+          "observation": "unavailable",
+          "error": "github unavailable; [redacted]"
+        }
+      ],
+      "executions": [
+        {
+          "id": "pass/worker",
+          "source_id": "runtime",
+          "state": "stage-active",
+          "observation": "fresh",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "stage": "worker"
+        }
+      ],
+      "resources": [],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/unavailable": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19006
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "unknown",
+      "operating_state": "unknown",
+      "execution_state": "unknown",
+      "observation": "unavailable",
+      "findings": [],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "unavailable",
+          "error": null
+        }
+      ],
+      "executions": [],
+      "resources": [],
+      "unknowns": [
+        "execution telemetry unavailable"
+      ],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/unknown": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19007
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "unknown",
+      "operating_state": "unknown",
+      "execution_state": "unknown",
+      "observation": "fresh",
+      "findings": [],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "fresh",
+          "error": null
+        }
+      ],
+      "executions": [],
+      "resources": [],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/project": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19008
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "normal",
+      "operating_state": "scheduled waiting",
+      "execution_state": "failed",
+      "observation": "fresh",
+      "findings": [],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "fresh",
+          "error": null
+        }
+      ],
+      "executions": [
+        {
+          "id": "pass/gate",
+          "source_id": "runtime",
+          "state": "failed",
+          "observation": "fresh",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "stage": "gate",
+          "reason": "ordinary product test failure",
+          "outcome_kind": "product"
+        }
+      ],
+      "resources": [
+        {
+          "id": "gpu-lock",
+          "source_id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "observation": "fresh",
+          "held": true,
+          "ownership": "unknown",
+          "owner": null
+        }
+      ],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    },
+    "acceptance/mechanism": {
+      "table": {
+        "disabled_at": null,
+        "dashboard": {
+          "port": 19009
+        }
+      },
+      "snap": {
+        "version": "0.2.0",
+        "generated_at": "2026-09-05T22:58:16Z",
+        "config": {
+          "upstream": "upstream",
+          "gate_checks": [
+            "tests"
+          ],
+          "exclusive_checks": []
+        },
+        "dispatcher": {
+          "timer": {
+            "active": null,
+            "next": null,
+            "last": null
+          },
+          "service_active": null,
+          "consecutive_failures": 0,
+          "runs": []
+        },
+        "tickets": [
+          {
+            "number": 7,
+            "state": "OPEN",
+            "stage": "escalated",
+            "labels": [
+              "ready-for-human"
+            ]
+          }
+        ],
+        "metrics": {
+          "first_pass": 0,
+          "bounce_rate": 1,
+          "escalations": 8
+        },
+        "upstream": {
+          "repo": "acme/upstream",
+          "ahead": 0,
+          "behind": 2,
+          "blocker": {
+            "number": 31
+          }
+        },
+        "errors": []
+      },
+      "metrics": null,
+      "error": null,
+      "schema_version": 1,
+      "assessment": "attention",
+      "operating_state": "running",
+      "execution_state": "failed",
+      "observation": "fresh",
+      "findings": [
+        {
+          "id": "[\"factory\",\"acceptance/mechanism\",\"runtime.mechanism_unavailable\",\"gate\"]",
+          "factory": "acceptance/mechanism",
+          "scope": {
+            "kind": "factory",
+            "id": "acceptance/mechanism"
+          },
+          "condition_code": "runtime.mechanism_unavailable",
+          "resource": "gate",
+          "severity": "error",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "impact": "Execution pass/gate cannot complete its configured mechanism.",
+          "cause": null,
+          "evidence": [
+            {
+              "source_id": "runtime",
+              "factory": "acceptance/mechanism",
+              "observed_at": "2026-09-05T22:58:16Z",
+              "observation": "fresh",
+              "reference": "pass/gate",
+              "detail": "configured executable missing"
+            }
+          ],
+          "projection": {
+            "truncated": false,
+            "omitted": {
+              "evidence": 0
+            }
+          }
+        }
+      ],
+      "sources": [
+        {
+          "id": "runtime",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "cadence_seconds": 5,
+          "age_seconds": 0,
+          "observation": "fresh",
+          "error": null
+        }
+      ],
+      "executions": [
+        {
+          "id": "pass/gate",
+          "source_id": "runtime",
+          "state": "failed",
+          "observation": "fresh",
+          "observed_at": "2026-09-05T22:58:16Z",
+          "stage": "gate",
+          "reason": "configured executable missing",
+          "outcome_kind": "mechanism"
+        }
+      ],
+      "resources": [],
+      "unknowns": [],
+      "projection": {
+        "truncated": false,
+        "omitted": {
+          "findings": 0,
+          "evidence": 0,
+          "sources": 0,
+          "executions": 0,
+          "resources": 0,
+          "unknowns": 0,
+          "tickets": 0,
+          "runs": 0,
+          "gate_checks": 0,
+          "exclusive_checks": 0,
+          "ticket_labels": 0,
+          "factories": 0
+        }
+      }
+    }
+  },
+  "ariaStates": [
+    "scheduled: normal; operating state: scheduled waiting; execution state: known wait; observation: fresh",
+    "paused: normal; operating state: deliberately paused; execution state: known wait; observation: fresh",
+    "capped: attention; operating state: capped; execution state: known wait; observation: fresh",
+    "stopped: attention; operating state: unexpectedly stopped; execution state: unknown; observation: fresh",
+    "stale: unknown; operating state: scheduled waiting; execution state: known wait; observation: stale",
+    "partial: unknown; operating state: running; execution state: stage-active; observation: partial",
+    "unavailable: unknown; operating state: unknown; execution state: unknown; observation: unavailable",
+    "unknown: unknown; operating state: unknown; execution state: unknown; observation: fresh",
+    "project: normal; operating state: scheduled waiting; execution state: failed; observation: fresh",
+    "mechanism: attention; operating state: running; execution state: failed; observation: fresh"
+  ]
+}

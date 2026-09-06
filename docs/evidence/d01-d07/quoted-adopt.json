@@ -1,0 +1,6 @@
+{
+  "status": 200,
+  "output": "$ district add --no-edit [redacted]\n> registered acceptance/disposable at [redacted] (dashboard port 19020)\n> shared by every repo, now in [defaults]: triage.model, triage.password\n> --- a/.factory.toml\n> +++ b/.factory.toml\n> @@ -1,10 +1,3 @@\n> -[dashboard]\n> -[redacted]\n> -[triage]\n> -\"[redacted]\n> [details withheld]\n> [details withheld]\n> [details withheld]\n> [details withheld]\n> [details withheld]\n> [details withheld]\n> [details withheld]\n> [details withheld]\n> [details withheld]\n> [details withheld]\n[exit 0]\n",
+  "quoted_and_multiline_values_disclosed": false,
+  "adopt_postcondition": "triage lifted from disposable repo to temporary host registry; values preserved privately"
+}

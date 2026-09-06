@@ -236,7 +236,8 @@ accepts normalized D02 observations instead of applying the legacy adapter.
 `district status --json` remains an object keyed by repository slug; `health`
 and `reasons` are removed. Empty fleets serialize as `{}`. Text status includes
 operating, execution, observation and assessment columns and retains project
-metrics as context. Atlas and `/api/fleet` consume these same entries verbatim.
+metrics as context. Atlas and `/api/fleet` consume the bounded public projection
+below; the classification itself is unchanged.
 
 Exact **status** exit codes, for both text and JSON:
 
@@ -251,6 +252,52 @@ inspector and fleet tally, dashboard `/api/fleet` through `status.fleet`, tests,
 website status/JSON documentation and the repository District skill. `apply`
 does not call the former health classifier: its reconciliation failures,
 failure-cap writes and reset behavior retain their separate existing contract.
+
+### 6.2 D01/D07 public projection and integration order
+
+Merge [D01 PR #33](https://github.com/mikeroySoft/district/pull/33) first, then
+[D07 PR #32](https://github.com/mikeroySoft/district/pull/32). PR #32 owns the
+reconciliation and contains D01's exact `535c9f78a4330c81d3303a4ce1c62daf642f1e74`
+head. Review the combined result, not D07's original legacy-only allowlist.
+Acceptance commands, source provenance, screenshots and network receipts are in
+[`docs/d01-d07-acceptance.md`](docs/d01-d07-acceptance.md).
+
+`dashboard_read.safe_fleet` projects the result of `status.fleet`; it never calls
+another classifier. It retains D01's schema version, assessment, operating and
+execution states, observation quality, sources, findings, reported executions,
+resources and unknowns. Absent classification is explicitly unknown/unavailable,
+never inferred from `health`/`reasons`. Missing project measurements remain null,
+not zero. Project feedback and upstream blockers remain labeled context.
+
+The browser receives at most 64 factories; each retains at most 32 findings,
+sources, executions, resources and unknown messages, with eight evidence records
+per finding. Snapshot context retains at most 128 tickets, 32 recent unit runs,
+64 gate/exclusive check names and 64 labels per ticket. Identifier/number
+allowlists bound the other project fields. Omitted counts are reported through
+entry `projection: {truncated, omitted}` and per-finding evidence projection;
+`/api/fleet` also returns top-level `projection.omitted_factories`. Atlas labels
+the visible subset and omissions. Truncation never recomputes a verdict from the
+surviving evidence or claims the omitted factories are normal.
+
+Finding condition, severity, supported scope, evidence source relationships and
+source timestamps/quality survive projection. Safe identities retain their
+value; unsafe identities (including URLs or host paths) become deterministic
+opaque SHA-256 identifiers, preserving equality and ownership joins. Finding
+identity uses the same D01 tuple with projected scope/resource identifiers.
+Source timestamps retain their original timezone/fractional precision; rereading
+does not renew them. Declared finding history and first/last observations survive.
+The browser has no new incident store or onset calculation.
+
+Evidence prose is single-line, at most 512 characters. Credential patterns,
+authorization material, assignment values, URLs and absolute paths are redacted.
+Quoted JSON/TOML keys are recognized; an assignment's entire remaining line is
+masked rather than guessing where an escaped value ends. Multiline/oversized
+text, key/cookie material and non-text fields are withheld.
+References are identifiers, not arbitrary clickable URLs. Only documented
+fields are copied: source data, raw logs, host registry/configuration values and
+unknown extension fields never pass through. Producers must still keep secrets
+out of evidence prose; pattern redaction is not a secret-discovery guarantee for
+unmarked arbitrary strings.
 
 ## 7. Factory/District contract
 
@@ -287,6 +334,36 @@ Deduplicate lifecycle events by identity, not text or wall-clock proximity. Firs
 ## 9. Management and network safety
 
 Viewing over the LAN and permission to modify the host are distinct. Binding to 0.0.0.0 must not itself grant mutation authority. The current custom action header prevents some cross-origin requests but is not authentication. D07 establishes a trusted authorization policy before D08 exposes management in the new console: unauthenticated network clients are read-only, and mutating endpoints fail closed; local authorized operations retain CSRF/origin protections. Do not add a full account system for one operator. Remote management, if later required, needs explicit authentication design rather than an insecure opt-in.
+
+The supported management topology is direct HTTP from a numeric loopback peer to a numeric loopback socket destination. The request Host must match that destination or `localhost`, with the actual server port; use `http://127.0.0.1:8760` for the default listener. A LAN URL remains read-only even when opened on the server host. Reverse proxies are unsupported; forwarded address/host headers cannot establish authority and requests carrying them fail closed. DNS names other than `localhost` do not qualify, even if they resolve to loopback.
+
+This is a single-operator host boundary, not OS-user authentication: local processes are trusted. Do not publish a loopback listener through a tunnel or a proxy that strips forwarding metadata and rewrites Host/Origin; such traffic is indistinguishable from a trusted local process. There is no proxy allowlist or remote-management switch. Binding only a specific LAN address provides viewing only; retain the default loopback bind or use a wildcard bind and the loopback URL for local management.
+
+`GET /api/capabilities` exposes only `{manage, detect, reason}` so the page can explain trusted-local or read-only mode and keep controls disabled until the check succeeds. Management POSTs require `X-District-Act: 1` and an Origin exactly matching `http://Host`. Detection GETs require the same trusted-local destination and custom header; browsers may omit Origin on this GET, but any supplied Origin must match exactly. Viewing never grants arbitrary host-path detection or access to raw credential-bearing diagnostics.
+
+For viewing, use direct `http://<numeric-LAN-address>:<actual-port>/` (or the
+loopback URL locally). DNS aliases other than `localhost` and reverse proxies
+are unsupported and fail closed. An external top-level link may navigate to
+the root document; cross-site data fetches and embedded documents remain refused.
+Factory links use the current browser hostname and registered port, with
+`/#ops`, a new tab and `noopener`, never forwarded headers or a LAN viewer's
+own localhost.
+
+Authorized detection reuses CLI clone-destination, port-selection and check
+proposal decisions. An already-existing clone is inspected as onboard/adopt,
+not mislabeled as a new clone. Only the selected port, identity, check names,
+exclusivity and host-key names are returned; commands, host paths and setting
+values are withheld. Markers must be bounded regular files; doctor, cloning,
+gate commands and host mutations are not run by detection.
+
+Authorized action diagnostics are bounded to 128 records of at most 512
+characters. Private-key blocks are withheld. Oversized lines and triple-quoted
+configuration markers withhold all remaining diagnostics, rather than guessing
+where a hidden or multiline value ends. Excess output is drained without killing
+an in-progress mutation; the actual exit is still reported. Child output is
+prefixed separately from the server's `[exit N]` marker. This retains the
+legacy action endpoint under D07 authorization; D08's typed requests, conflict
+serialization and full management workflow acceptance remain held, not waived.
 
 D08 presents existing District-owned add/adopt, reconcile, upgrade, reset and remove operations with exact target/effects, deliberate confirmation, streaming result and refreshed postcondition. Do not wrap arbitrary CLI argument arrays as a public management interface. Conflicting operations must not race. Failure/disconnect must not display success. Reset is recommended after cause repair, not as a universal fix. Factory ticket/PR/label/gate/review decisions stay in Factory. Destructive removal does not delete repository content. Sanitize bounded error output; do not expose credentials via snippets or config rendering.
 
