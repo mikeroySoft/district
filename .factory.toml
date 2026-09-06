@@ -14,3 +14,6 @@ run = [
     "tests",
 ]
 exclusive = false
+
+[dashboard]
+theme = ".factory-dashboard.css"

@@ -1,0 +1,30 @@
+{
+  "topology": "private user namespace; server/client in separate network namespaces joined only by veth",
+  "reads": [
+    {
+      "route": "/",
+      "status": 200,
+      "bytes": 129371,
+      "client": "198.18.0.2",
+      "server": "198.18.0.1"
+    },
+    {
+      "route": "/api/fleet",
+      "status": 200,
+      "bytes": 81935,
+      "client": "198.18.0.2",
+      "server": "198.18.0.1"
+    },
+    {
+      "route": "/api/capabilities",
+      "status": 200,
+      "bytes": 116,
+      "client": "198.18.0.2",
+      "server": "198.18.0.1"
+    }
+  ],
+  "mutation_denials": 60,
+  "detect_status": 403,
+  "spoofing_variants": 6,
+  "cli_mutations_invoked": 0
+}

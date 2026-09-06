@@ -1,0 +1,6 @@
+{
+  "capability": "Trusted-local — Trusted-local management",
+  "detect": "read-only preview: nothing written\nrepo: acceptance/disposable (adopt)\ndashboard port: 19020\nnot a fork\nhost keys to lift: triage, dashboard\nchecks (committed):\n  tests (exclusive)\nCommands, paths and configuration values withheld; doctor is not run.\n",
+  "target": "https://github.com/acceptance/disposable",
+  "controlsEnabled": true
+}

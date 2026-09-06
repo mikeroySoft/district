@@ -5,95 +5,87 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>District — fleet manager for mikeroySoft/factory</title>
 <meta name="description" content="District runs many mikeroySoft/factory pipelines on one host: registry, ports, host config, upgrades, failure caps, and one bird's-eye dashboard.">
+<link rel="stylesheet" href="mikeroysoft.css">
 <style>
-  :root {
-    --bg: #0A0D12; --ground: #0E1219; --panel: #10141B; --panel-2: #141926;
-    --line: #202836; --ink: #D3DBE7; --muted: #7C8798; --faint: #55617A;
-    --cli: #E8493E; --core: #5B8DD6; --dash: #38BFAD; --engine: #E3A83B;
-    --ext: #9B7BD8; --hw: #4CBB6C; --ctrl: #E8A87C; --data: #62D6E8;
-    --mono: ui-monospace, "Cascadia Code", Menlo, Consolas, "DejaVu Sans Mono", monospace;
-    --sans: system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-  }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
-  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--sans); }
-  a { color: var(--data); text-decoration: none; }
+  body { margin: 0; background: var(--surface-page); color: var(--text-primary); font: 16px/1.6 var(--font-mono); }
+  a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  code, pre { font-family: var(--mono); }
-  code { background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; font-size: 0.9em; }
+  code, pre { font-family: var(--font-mono); }
+  code { background: var(--surface-inset); border: 1px solid var(--border-hairline); border-radius: 4px; padding: 0 5px; font-size: 0.9em; }
   pre { margin: 0; overflow-x: auto; }
   .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
-  h1, h2, h3 { line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.01em; }
+  h1, h2, h3 { font-family: var(--font-display); font-weight: 400; line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.01em; }
   h2 { font-size: 30px; }
   h3 { font-size: 17px; }
-  section { padding: 72px 0; border-top: 1px solid var(--line); }
-  .lede { color: var(--muted); font-size: 18px; max-width: 680px; margin: 0 0 36px; }
-  .kicker { font: 600 12px/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--dash); margin-bottom: 14px; }
+  section { padding: 72px 0; border-top: 1px solid var(--border-hairline); }
+  .lede { color: var(--text-muted); font-size: 18px; max-width: 680px; margin: 0 0 36px; }
+  .kicker { font: 600 12px/1 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
 
   nav { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; }
-  nav .brand { font: 700 18px var(--mono); color: var(--ink); }
-  nav .brand::before { content: "▣ "; color: var(--dash); }
-  nav .links a { color: var(--muted); margin-left: 24px; font-size: 14px; }
-  nav .links a:hover { color: var(--ink); text-decoration: none; }
+  nav .brand { font: 700 18px var(--font-mono); color: var(--text-primary); }
+  nav .links a { color: var(--text-muted); margin-left: 24px; font-size: 14px; }
+  nav .links a:hover { color: var(--text-primary); text-decoration: none; }
 
   header.hero { padding: 72px 0 80px; display: grid; grid-template-columns: 1.05fr 1fr; gap: 48px; align-items: center; }
   header h1 { font-size: 52px; }
-  header h1 em { font-style: normal; color: var(--dash); }
-  header p { color: var(--muted); font-size: 19px; max-width: 520px; }
+  header h1 em { font-style: normal; color: var(--accent); }
+  header p { color: var(--text-muted); font-size: 19px; max-width: 520px; }
   .actions { display: flex; gap: 12px; margin-top: 28px; flex-wrap: wrap; }
-  .btn { display: inline-block; padding: 11px 18px; border-radius: 6px; font-weight: 600; font-size: 15px; border: 1px solid var(--line); color: var(--ink); background: var(--panel); }
-  .btn:hover { text-decoration: none; border-color: var(--muted); }
-  .btn.primary { background: var(--dash); border-color: var(--dash); color: #06110F; }
+  .btn { display: inline-block; padding: 11px 18px; border-radius: 6px; font-weight: 600; font-size: 15px; border: 1px solid var(--border-hairline); color: var(--text-primary); background: var(--surface-panel); }
+  .btn:hover { text-decoration: none; border-color: var(--text-muted); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--text-on-accent); }
   .btn.primary:hover { filter: brightness(1.08); }
 
-  .term { background: var(--ground); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .term .bar { display: flex; justify-content: space-between; padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--line); font: 12px var(--mono); color: var(--faint); }
-  .term pre { padding: 14px 16px; font-size: 12.5px; line-height: 1.5; color: var(--ink); }
-  .term .p { color: var(--dash); }
-  .term .m { color: var(--muted); }
-  .term .ok { color: var(--hw); }
-  .term .att { color: var(--engine); }
-  .term .bad { color: var(--cli); }
-  .term .c { color: var(--faint); }
+  .term { background: var(--surface-terminal); border: 1px solid var(--border-hairline); border-radius: 8px; overflow: hidden; }
+  .term .bar { display: flex; justify-content: space-between; padding: 8px 14px; background: var(--surface-panel); border-bottom: 1px solid var(--border-hairline); font: 12px var(--font-mono); color: var(--text-faint); }
+  .term pre { padding: 14px 16px; font-size: 12.5px; line-height: 1.5; color: var(--text-primary); }
+  .term .p { color: var(--accent); }
+  .term .m { color: var(--text-muted); }
+  .term .ok { color: var(--status-ok); }
+  .term .att { color: var(--status-warn); }
+  .term .bad { color: var(--status-danger); }
+  .term .c { color: var(--text-faint); }
 
   .grid { display: grid; gap: 16px; }
   .grid.two { grid-template-columns: repeat(2, 1fr); }
   .grid.three { grid-template-columns: repeat(3, 1fr); }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 20px 22px; }
-  .card p { margin: 6px 0 0; color: var(--muted); font-size: 15px; }
-  .card .n { font: 600 12px var(--mono); color: var(--faint); margin-bottom: 8px; }
+  .card { background: var(--surface-panel); border: 1px solid var(--border-hairline); border-radius: 8px; padding: 20px 22px; }
+  .card p { margin: 6px 0 0; color: var(--text-muted); font-size: 15px; }
+  .card .n { font: 600 12px var(--font-mono); color: var(--text-faint); margin-bottom: 8px; }
 
   .own { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .own .card h3 { display: flex; align-items: center; gap: 8px; }
   .own .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  .own ul { margin: 12px 0 0; padding-left: 18px; color: var(--muted); font-size: 15px; }
+  .own ul { margin: 12px 0 0; padding-left: 18px; color: var(--text-muted); font-size: 15px; }
   .own li { margin: 4px 0; }
-  .rules { margin-top: 20px; padding-left: 22px; color: var(--muted); }
+  .rules { margin-top: 20px; padding-left: 22px; color: var(--text-muted); }
   .rules li { margin: 6px 0; }
-  .rules strong { color: var(--ink); }
+  .rules strong { color: var(--text-primary); }
 
-  .cmds { display: grid; grid-template-columns: 220px 1fr; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
-  .cmds > div { padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  .cmds { display: grid; grid-template-columns: 220px 1fr; border: 1px solid var(--border-hairline); border-radius: 8px; overflow: hidden; }
+  .cmds > div { padding: 14px 18px; border-bottom: 1px solid var(--border-hairline); background: var(--surface-panel); }
   .cmds > div:nth-last-child(-n+2) { border-bottom: 0; }
-  .cmds .k { font: 600 14px var(--mono); color: var(--ctrl); background: var(--ground); }
-  .cmds .v { color: var(--muted); font-size: 15px; }
+  .cmds .k { font: 600 14px var(--font-mono); color: var(--accent-soft); background: var(--surface-sunken); }
+  .cmds .v { color: var(--text-muted); font-size: 15px; }
 
   table { width: 100%; border-collapse: collapse; font-size: 15px; }
-  th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font: 600 12px var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
-  td.lvl { font-family: var(--mono); font-weight: 600; white-space: nowrap; }
-  td.lvl.f { color: var(--cli); } td.lvl.a { color: var(--engine); } td.lvl.h { color: var(--hw); }
-  td.why { color: var(--muted); }
+  th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border-hairline); vertical-align: top; }
+  th { font: 600 12px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+  td.lvl { font-family: var(--font-mono); font-weight: 600; white-space: nowrap; }
+  td.lvl.f { color: var(--status-danger); } td.lvl.a { color: var(--status-warn); } td.lvl.h { color: var(--status-ok); }
+  td.why { color: var(--text-muted); }
 
   .atlas { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
-  .city { background: var(--ground); border: 1px solid var(--line); border-radius: 8px; padding: 24px; }
+  .city { background: var(--surface-sunken); border: 1px solid var(--border-hairline); border-radius: 8px; padding: 24px; }
   .city svg { width: 100%; height: auto; display: block; }
   .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
-  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px; }
-  .kpi .l { font: 11px var(--mono); color: var(--faint); text-transform: uppercase; letter-spacing: 0.08em; }
-  .kpi .v { font: 600 20px var(--mono); color: var(--ink); }
+  .kpi { background: var(--surface-panel); border: 1px solid var(--border-hairline); border-radius: 6px; padding: 10px 12px; }
+  .kpi .l { font: 11px var(--font-mono); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.08em; }
+  .kpi .v { font: 600 20px var(--font-mono); color: var(--text-primary); }
 
-  footer { padding: 36px 0 48px; border-top: 1px solid var(--line); color: var(--faint); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+  footer { padding: 36px 0 48px; border-top: 1px solid var(--border-hairline); color: var(--text-faint); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 
   @media (max-width: 820px) {
     header.hero { grid-template-columns: 1fr; padding-top: 32px; }
@@ -106,10 +98,10 @@
   }
 </style>
 </head>
-<body>
+<body data-product="district">
 <div class="wrap">
   <nav>
-    <span class="brand">mikeroySoft :: district</span>
+    <span class="brand"><span class="mrs-mark mrs-mark-square" aria-hidden="true"></span> mikeroySoft :: district</span>
     <span class="links">
       <a href="#how">How it works</a>
       <a href="#commands">Commands</a>
@@ -128,14 +120,15 @@
       </div>
     </div>
     <div class="term">
-      <div class="bar"><span>district status</span><span>exit 0</span></div>
+      <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
 <pre><span class="p">$</span> district status
-<span class="m">repo                  health     version  next   last    pass  active  esc  gate1  bounce  fails  upstream</span>
-mikeroySoft/rocm-cli  <span class="att">attention</span>  0.2.0    -      1m ago  done  yes     4    100%   50%     0      behind 2, parked #31
-mikeroySoft/gpuflo    <span class="ok">healthy</span>    0.2.0    in 8m  1m ago  done  yes     0    -      -       0      -
-mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago  done  yes     1    -      -       0      -
-<span class="c"># nonzero exit if any factory has a failed pass, a dead timer,
-# or a timer District capped — usable from cron or a shell prompt</span></pre>
+<span class="m">repo                  operating          execution  observation  assessment</span>
+mikeroySoft/rocm-cli  scheduled waiting  unknown    partial      unknown
+mikeroySoft/gpuflo    running            unknown    partial      unknown
+mikeroySoft/rocm-app  capped             unknown    partial      attention
+<span class="c"># illustration: this fleet exits 1 because attention takes precedence
+# 0 normal / empty fleet · 1 operational attention · 2 unknown without attention
+# actual output also retains version, schedule, pass and project metrics</span></pre>
     </div>
   </header>
 
@@ -157,7 +150,7 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
     <p class="lede">Every setting District touches is either host-side or committed to a repo. The split is the product.</p>
     <div class="own">
       <div class="card">
-        <h3><span class="dot" style="background:var(--dash)"></span>District owns — host-side, never committed</h3>
+        <h3><span class="dot" style="background:var(--accent)"></span>District owns — host-side, never committed</h3>
         <ul>
           <li>mikeroySoft/factory install and upgrade</li>
           <li>triage endpoint and model</li>
@@ -171,7 +164,7 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
         </ul>
       </div>
       <div class="card">
-        <h3><span class="dot" style="background:var(--engine)"></span>Factory owns — committed to its repo</h3>
+        <h3><span class="dot" style="background:var(--accent-soft)"></span>Factory owns — committed to its repo</h3>
         <ul>
           <li><code>[[gate.check]]</code> commands</li>
           <li><code>[leak_scan]</code> excludes</li>
@@ -198,7 +191,7 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
       <div class="k">district apply</div><div class="v">Reconcile the host to the registry. Re-renders units, ensures labels, runs <code>doctor</code>, enforces the failure cap and supply-chain policy. <code>--upgrade</code> reinstalls the engine so every timer picks it up on the next tick.</div>
       <div class="k">district status</div><div class="v">One table, one screen, one exit code. Version, timer, last pass, tickets in flight, escalations, first-gate pass %, bounce rate, upstream drift.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
-      <div class="k">district dashboard</div><div class="v">Serve the District Atlas and the management page. Every action on the page runs the CLI as a subprocess; the page never mutates state itself.</div>
+      <div class="k">district dashboard</div><div class="v">Serve the District Atlas. <code>--host 0.0.0.0</code> enables read-only LAN viewing at a numeric-IP URL with the actual port, never remote management; a LAN URL stays read-only even on the host. Manage and detect require direct HTTP to numeric loopback or <code>localhost</code> with the actual server port (default <code>http://127.0.0.1:8760</code>). DNS aliases and reverse proxies are unsupported; forwarded headers fail closed. Authorized actions run the CLI as a subprocess with bounded sanitized diagnostics.</div>
       <div class="k">district rm</div><div class="v">Disable and delete the units, drop the registry entry. Repo files untouched; the factory can be re-added later.</div>
     </div>
   </section>
@@ -209,7 +202,7 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
         <div class="kicker">District Atlas</div>
         <h2>The fleet as a city.</h2>
         <p class="lede" style="margin-bottom:16px">Every managed repository is a building whose height is proportional to its tracked lines of code, standing on a plate with the shared engine, the control tower, host runtime, and GitHub. Roads are the real control and data paths, cited to <code>file:line</code>.</p>
-        <p style="color:var(--muted)">Above the map: factory count, health tally, code under management, engine version spread, velocity, open work, defects, traffic. Click a factory for its health signals; each tile links to that factory's own dashboard for ticket-level detail. The hierarchy is District → Factory; it never descends further.</p>
+        <p style="color:var(--text-muted)">Above the map: factory count, shared operational assessment, code under management, engine version spread, velocity, open work, defects, traffic. Click a factory for operating state, execution state, observation quality and evidence-backed findings; each tile links to that factory's own dashboard for ticket-level detail.</p>
       </div>
       <div class="city">
         <svg viewBox="0 0 420 260" role="img" aria-label="Isometric fleet map: three buildings of different heights on a plate beside an engine block and a control tower">
@@ -259,12 +252,12 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
             <polygon points="0,-45 10,-50 20,-45 10,-40" fill="#38BFAD"/>
             <circle cx="10" cy="-56" r="3" fill="#38BFAD"><animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/></circle>
           </g>
-          <text x="20" y="250" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#55617A">height ∝ √(loc / max loc) · dot = health</text>
+          <text x="20" y="250" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#55617A">illustrative architecture · live status uses shared classification</text>
         </svg>
         <div class="kpis">
           <div class="kpi"><div class="l">factories</div><div class="v">3</div></div>
-          <div class="kpi"><div class="l">healthy</div><div class="v" style="color:var(--hw)">1</div></div>
-          <div class="kpi"><div class="l">attention</div><div class="v" style="color:var(--engine)">2</div></div>
+          <div class="kpi"><div class="l">unknown</div><div class="v">2</div></div>
+          <div class="kpi"><div class="l">attention</div><div class="v" style="color:var(--status-warn)">1</div></div>
           <div class="kpi"><div class="l">engine</div><div class="v">0.2.0</div></div>
         </div>
       </div>
@@ -272,17 +265,21 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
   </section>
 
   <section id="health">
-    <div class="kicker">Health model</div>
-    <h2>One level per factory, derived from data the factory already publishes.</h2>
-    <p class="lede">Notifications stay with the factory. District reads <code>factory dashboard --json</code> and nothing else.</p>
+    <div class="kicker">Operational model</div>
+    <h2>One classification for the CLI and dashboard.</h2>
+    <p class="lede">Machinery findings, project context and observation quality are separate. The existing full snapshot remains the source; missing execution telemetry is explicit, not reconstructed from artifacts.</p>
     <table>
-      <thead><tr><th>Level</th><th>Any of</th></tr></thead>
+      <thead><tr><th>Dimension</th><th>Values</th></tr></thead>
       <tbody>
-        <tr><td class="lvl f">failing</td><td class="why">timer inactive or District-disabled · last pass failed · snapshot errors non-empty · consecutive failures ≥ 1 · dashboard unreachable</td></tr>
-        <tr><td class="lvl a">attention</td><td class="why">open <code>ready-for-human</code> · upstream sync parked · bounce rate &gt; 33% · doctor WARN</td></tr>
-        <tr><td class="lvl h">healthy</td><td class="why">none of the above</td></tr>
+        <tr><td>Operating</td><td>running · scheduled waiting · deliberately paused (recorded intent only) · capped · unexpectedly stopped (authoritative evidence only) · unknown</td></tr>
+        <tr><td>Execution</td><td>stage-active · known wait · blocked · completed · failed · interrupted · unknown</td></tr>
+        <tr><td>Observation</td><td>fresh · stale · partial · unavailable; source times are retained across rereads</td></tr>
       </tbody>
     </table>
+    <p><code>district status --json</code> is keyed by repository slug. Each entry exposes <code>schema_version</code>, <code>operating_state</code>, <code>execution_state</code>, <code>observation</code>, <code>assessment</code>, <code>findings</code>, <code>sources</code>, reported <code>executions</code>, <code>resources</code> and explicit <code>unknowns</code>, alongside existing <code>table</code>, <code>snap</code>, <code>error</code> and cached <code>metrics</code> context. The obsolete <code>health</code>/<code>reasons</code> fields are removed. The complete normalized D02 contract is in <code>OPERATIONS-CONSOLE-SPEC.md</code> §6.1 and <code>district/health.py</code>.</p>
+    <p>Exit <strong>0</strong>: every entry normal, or an empty fleet (<code>{}</code> in JSON). Exit <strong>1</strong>: any supported operational attention. Exit <strong>2</strong>: unknown observation/state without attention; command-usage errors also use 2. Attention takes precedence over unknown, which remains visible in each JSON entry. Existing engines without execution telemetry normally report partial/unknown, not silently healthy.</p>
+    <p>The browser receives a bounded, sanitized projection of that same classification, not raw CLI snapshots or host configuration. Findings retain scope, source timestamps, observation quality and evidence; omissions are explicit and never change the assessment. See <code>OPERATIONS-CONSOLE-SPEC.md</code> §6.2 for public limits and identity redaction.</p>
+    <p>Ready-for-human tickets, parked upstream project work, review bounce, legitimate gate/review rejection and ordinary CI/capacity/resource waits do not independently create findings. A failed snapshot is an observation gap, not proof of stopped dispatch. <code>apply</code> retains its separate reconciliation exit contract and failure-cap policy.</p>
     <div class="grid three" style="margin-top:24px">
       <div class="card"><h3>Failure cap</h3><p>Ten consecutive failed passes and District disables the timer. A pass that fails every ten minutes otherwise burns model spend indefinitely. <code>apply</code> re-enables it once the cause is fixed.</p></div>
       <div class="card"><h3>Supply-chain policy</h3><p>Workers install packages with the operator's credentials. District checks the host-wide minimum package age for <code>uv</code>, <code>npm</code>, and <code>cargo</code>. Missing policy is a WARN, never a silent skip.</p></div>
@@ -303,7 +300,7 @@ mikeroySoft/rocm-app  <span class="att">attention</span>  0.2.0    in 2m  7m ago
 <span class="p">$</span> district dashboard --install          <span class="c"># district-dashboard.service + hourly metrics timer</span>
 <span class="p">$</span> district status</pre>
     </div>
-    <p style="color:var(--muted);margin-top:20px">The host config file is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
+    <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/agent-factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
   </section>
 
   <footer>
