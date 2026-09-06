@@ -275,8 +275,10 @@ not zero. Project feedback and upstream blockers remain labeled context.
 The browser receives at most 64 factories; each retains at most 32 findings,
 sources, executions, resources and unknown messages, with eight evidence records
 per finding. Snapshot context retains at most 128 tickets, 32 recent unit runs,
-64 gate/exclusive check names and 64 labels per ticket. Identifier/number
-allowlists bound the other project fields. Omitted counts are reported through
+64 gate/exclusive check names and 64 labels per ticket. Runtime activity retains
+at most 512 events and 32 history gaps; dropped records are disclosed as
+`projection.omitted.events` and `projection.omitted.history_gaps`.
+Identifier/number allowlists bound the other project fields. Omitted counts are reported through
 entry `projection: {truncated, omitted}` and per-finding evidence projection;
 `/api/fleet` also returns top-level `projection.omitted_factories`. Atlas labels
 the visible subset and omissions. Truncation never recomputes a verdict from the

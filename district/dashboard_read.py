@@ -322,7 +322,11 @@ def safe_fleet(fleet: dict) -> dict:
         }
         omitted = result[slug]["projection"]["omitted"]
         snap = _dict(raw.get("snap"))
+        activity = _dict(raw.get("activity"))
+        history = _dict(activity.get("history"))
         omitted.update(
+            events=len(_list(activity.get("events"))) - len(result[slug]["activity"]["events"]),
+            history_gaps=len(_list(history.get("gaps"))) - len(result[slug]["activity"]["history"]["gaps"]),
             tickets=max(0, len(_list(snap.get("tickets"))) - 128),
             runs=max(0, len(_list(_dict(snap.get("dispatcher")).get("runs"))) - 32),
             gate_checks=max(0, len(_list(_dict(snap.get("config")).get("gate_checks"))) - 64),

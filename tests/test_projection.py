@@ -397,10 +397,16 @@ class ProjectionTest(unittest.TestCase):
     def test_event_projection_preserves_safe_sequence_within_event_limit(self):
         raw = {"activity": {"events": [
             {"event_id": f"event-{i}", "sequence": i} for i in range(514)
-        ]}}
-        events = safe_fleet({SLUG: raw})[SLUG]["activity"]["events"]
+        ], "history": {"gaps": [f"gap-{i}" for i in range(33)]}}}
+        public = safe_fleet({SLUG: raw})[SLUG]
+        events = public["activity"]["events"]
         self.assertEqual([(event["event_id"], event["sequence"]) for event in events],
                          [(f"event-{i}", i) for i in range(512)])
+        self.assertTrue(public["projection"]["truncated"])
+        self.assertEqual(public["projection"]["omitted"]["events"], 2)
+        self.assertEqual(public["projection"]["omitted"]["history_gaps"], 1)
+        raw["activity"]["events"][0] = {}
+        self.assertEqual(safe_fleet({SLUG: raw})[SLUG]["projection"]["omitted"]["events"], 3)
         for value, expected in ((2**53 - 1, 2**53 - 1), (2**53, None), (-1, None),
                                 (True, None), ("42", None), (None, None),
                                 (float("inf"), None), (float("nan"), None)):
