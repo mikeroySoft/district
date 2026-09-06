@@ -105,7 +105,7 @@ class DistrictCase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        self.env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.tmp / "xdg"), "PATH": f"{self.bin}:{os.environ['PATH']}"})
+        self.env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.tmp / "xdg"), "XDG_CACHE_HOME": str(self.tmp / "cache"), "PATH": f"{self.bin}:{os.environ['PATH']}"})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))

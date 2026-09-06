@@ -210,8 +210,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--upgrade", action="store_true", help="reinstall factory from [defaults].factory_source first")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
     args = parser.parse_args(argv)
-    from district import metrics
-
+    from district import metrics  # Deferred: metrics imports apply.hours.
 
     lock_path = metrics.cache_dir().parent / "apply.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
