@@ -270,6 +270,7 @@ def _activity(raw: object) -> dict:
         events.append({
             "event_id": event_id,
             "execution_id": _identity(item.get("execution_id")),
+            "sequence": _number(item.get("sequence")),
             "ticket": _number(item.get("ticket")),
             "stage": _identity(item.get("stage")),
             "kind": _identity(item.get("kind")),

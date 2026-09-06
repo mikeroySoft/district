@@ -364,12 +364,14 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(public["resources"][0]["id"], reread["resources"][0]["id"])
 
         # Exercise the actual public routes too: their HTML and embedded DATA must not bypass the projection.
-        response = {"slug": SLUG, "sources": sources, "snap": snap, "error": f"password={diagnostic}"}
+        collector = mock.Mock(
+            read=mock.Mock(return_value=(1, {SLUG: raw})),
+            runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+        )
         bodies = [json.dumps(public), json.dumps(block), atlas.page({SLUG: public}, AT)]
-        with mock.patch.object(status, "snapshot", return_value=response), \
-                mock.patch.object(health, "datetime", wraps=datetime) as clock:
-            clock.now.return_value = AT + timedelta(seconds=1)
+        with mock.patch.object(status, "fleet", side_effect=AssertionError("request collected fleet")):
             with ThreadingHTTPServer(("127.0.0.1", 0), dashboard.Handler) as server:
+                server.collector = collector
                 worker = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
                 worker.start()
                 try:
@@ -381,7 +383,7 @@ class ProjectionTest(unittest.TestCase):
                             body = reply.read().decode()
                             self.assertEqual(reply.status, 200, body)
                             if route == "/api/fleet":
-                                self.assertEqual(json.loads(body)["fleet"][SLUG], reread)
+                                self.assertEqual(json.loads(body)["fleet"][SLUG], public)
                             bodies.append(body)
                         finally:
                             connection.close()
@@ -391,6 +393,21 @@ class ProjectionTest(unittest.TestCase):
         for body in bodies:
             for private in (token, diagnostic, config_value, source_data, log, str(self.repo), secret_url, scope_id):
                 self.assertNotIn(private, body)
+
+    def test_event_projection_preserves_safe_sequence_within_event_limit(self):
+        raw = {"activity": {"events": [
+            {"event_id": f"event-{i}", "sequence": i} for i in range(514)
+        ]}}
+        events = safe_fleet({SLUG: raw})[SLUG]["activity"]["events"]
+        self.assertEqual([(event["event_id"], event["sequence"]) for event in events],
+                         [(f"event-{i}", i) for i in range(512)])
+        for value, expected in ((2**53 - 1, 2**53 - 1), (2**53, None), (-1, None),
+                                (True, None), ("42", None), (None, None),
+                                (float("inf"), None), (float("nan"), None)):
+            with self.subTest(sequence=value):
+                raw["activity"]["events"] = [{"event_id": "event-1", "sequence": value}]
+                event = safe_fleet({SLUG: raw})[SLUG]["activity"]["events"][0]
+                self.assertEqual(event["sequence"], expected)
 
     def test_collection_bounds_are_disclosed_without_reclassifying(self):
         count = 35

@@ -70,8 +70,10 @@ Empty execution telemetry is known wait only with scheduled/paused/capped dispat
 Operating precedence is capped, recorded pause, running, scheduled, stopped,
 unknown: admission may be capped/paused while an existing execution still runs.
 
-Legacy adapter: generated_at is source time; there is no documented periodic full
-snapshot cadence, so cadence_seconds=None. True service/timer facts are usable;
+Legacy adapter: generated_at remains source time. Direct CLI snapshots have
+unknown cadence (cadence_seconds=None); the server collector sets cadence_seconds
+to its configured full-snapshot interval (60 seconds by default), without
+replacing source time with collection time. True service/timer facts are usable;
 false collapses failed probes and becomes unknown. Ticket phases/artifact times,
 project escalations, bounce rates and parked upstream work are never execution
 telemetry or findings. GitHub errors do not erase local dispatcher facts. Unit

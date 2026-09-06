@@ -107,9 +107,8 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _fleet(self) -> tuple[int | None, dict]:
-        collector = getattr(self.server, "collector", None)
-        return collector.read() if collector is not None else (None, status.fleet(host.load()))
+    def _fleet(self) -> tuple[int, dict]:
+        return self.server.collector.read()
 
     def do_GET(self) -> None:
         url = urlparse(self.path)
@@ -130,10 +129,10 @@ class Handler(BaseHTTPRequestHandler):
                 "fleet": fleet, "data": atlas.data(fleet),
                 "revision": revision,
                 "cache": {
-                    "runtime_interval_seconds": status.RUNTIME_INTERVAL,
-                    "full_interval_seconds": status.FULL_INTERVAL,
-                    "factory_timeout_seconds": status.COLLECTION_TIMEOUT,
-                    "concurrency": status.COLLECTION_CONCURRENCY,
+                    "runtime_interval_seconds": self.server.collector.runtime_interval,
+                    "full_interval_seconds": self.server.collector.full_interval,
+                    "factory_timeout_seconds": self.server.collector.timeout,
+                    "concurrency": self.server.collector.concurrency,
                     "event_limit_per_factory": status.EVENT_LIMIT,
                 },
                 "projection": {"omitted_factories": max(0, len(raw) - len(fleet))},

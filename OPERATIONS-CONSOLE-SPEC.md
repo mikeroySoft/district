@@ -213,12 +213,15 @@ Reported last-known states remain visible with their observation quality.
 or unresolved operational meaning means `unknown`; otherwise `normal`.
 Unknown lock ownership remains explicit but is not independently an incident.
 
-Current transport remains `factory dashboard --json`, adapted by
+The full-snapshot transport is `factory dashboard --json`, adapted by
 `health.snapshot_sources(snap, error)`. Its `generated_at` is retained as source
-time. It has no documented periodic District collection cadence, so cadence is
-null, and it lacks confirmed execution telemetry: normally partial/unknown,
-even when running or scheduled. Positive service/timer observations are usable;
-legacy false booleans also encode failed probes and cannot prove a stop.
+time. Direct CLI snapshots have unknown cadence (`cadence_seconds: null`);
+server-collected snapshots use the configured full-snapshot interval (60 seconds
+by default) without replacing the source timestamp with collection time. The
+full snapshot lacks confirmed execution telemetry: by itself it normally remains
+partial/unknown, even when running or scheduled. Positive service/timer
+observations are usable; legacy false booleans also encode failed probes and
+cannot prove a stop.
 GitHub failure preserves local runtime evidence. Failed dispatcher-unit runs and
 configured triage probes are scoped findings with unknown cause; ordinary gate
 verdicts, review revisions, escalations, bounce and parked project work are not.
@@ -326,17 +329,30 @@ Runtime observations run every five seconds with a four-second per-factory
 timeout and at most eight concurrent subprocesses. A factory has at most one
 runtime/full collection in flight, so a slow or hung source cannot overlap or
 hold publication of other factories. Full `factory dashboard --json`
-GitHub/config observations use a separate 60-second schedule; existing hourly
-repository metrics remain outside both paths. Browser polling reads only this
-cache and never starts collection.
+GitHub/config observations use a separate schedule (60 seconds by default), whose
+configured interval supplies their source freshness cadence. Direct CLI snapshots
+have no periodic schedule and retain null cadence. Neither collection nor rereads
+replace the producer's `generated_at`. Existing hourly repository metrics remain
+outside both paths. Browser polling reads only this cache and never starts collection.
+
+The collector reloads the host registry on the configured runtime interval
+(five seconds by default), updating membership and recorded caps. Results from
+in-flight work are discarded when its factory was removed or its path changed.
+A failed registry read preserves the last valid registry. The worker bound is
+the configured concurrency capped at eight, independent of initial registry size,
+so newly registered factories can use the same capacity.
 
 Each completed factory result increments the cache revision independently.
 The API reports the revision and configured bounds; entries expose original
 source times/ages plus separate runtime/full collection times/ages. Last-known
-data survives collection errors without renewing its source time. Each factory
-retains at most 512 producer events, deduplicated by `event_id`, together with
-the producer's declared history window, completeness, truncation and gap codes.
-This supports baselines and reconnect-gap disclosure, not durable total replay.
+data survives transient collection failures, including nonzero exits and malformed
+payloads, without renewing its source time. Explicitly unsupported runtime schemas
+or an unrecognized `--runtime-json` command instead clear the runtime observation
+to unavailable; obsolete telemetry does not masquerade as supported observation.
+Each factory retains at most 512 producer events, deduplicated by `event_id`,
+together with the producer's declared history window, completeness, truncation
+and gap codes. This supports baselines and reconnect-gap disclosure, not durable
+total replay.
 Collector work stops with the server and every subprocess is bounded by its
 per-factory timeout.
 

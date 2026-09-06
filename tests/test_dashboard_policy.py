@@ -9,7 +9,8 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from district import dashboard as dash
 
@@ -25,10 +26,15 @@ class DashboardPolicyTest(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {
             "HOME": self.tmp, "XDG_CONFIG_HOME": self.tmp,
         }))
-        self.fleet = self.enterContext(patch.object(dash.status, "fleet", return_value={}))
-        self.enterContext(patch.object(dash.host, "load", return_value={}))
+        self.fleet = self.enterContext(patch.object(dash.status, "fleet", side_effect=AssertionError("request collected fleet")))
+        self.enterContext(patch.object(dash.host, "load", side_effect=AssertionError("request loaded registry")))
         self.detect = self.enterContext(patch.object(dash, "detect", return_value=(200, {"ok": True, "output": "clone"})))
         self.server = ThreadingHTTPServer(("0.0.0.0", 0), FutureHandler)
+        self.collector = SimpleNamespace(
+            read=Mock(return_value=(7, {})), runtime_interval=2.5, full_interval=47,
+            timeout=3.5, concurrency=6,
+        )
+        self.server.collector = self.collector
         self.addCleanup(self.server.server_close)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -65,6 +71,21 @@ class DashboardPolicyTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["manage"])
 
+    def test_fleet_reports_cached_revision_and_live_collector_settings(self):
+        self.collector.read.return_value = (12, {"acme/widgets": {"snap": {"version": "1.2.3"}}})
+        code, body, _ = self.request(route="/api/fleet")
+        self.assertEqual(code, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["revision"], 12)
+        self.assertEqual(payload["fleet"]["acme/widgets"]["snap"]["version"], "1.2.3")
+        self.assertEqual(payload["cache"], {
+            "runtime_interval_seconds": 2.5, "full_interval_seconds": 47,
+            "factory_timeout_seconds": 3.5, "concurrency": 6,
+            "event_limit_per_factory": dash.status.EVENT_LIMIT,
+        })
+        self.assertEqual(self.request(route="/")[0], 200)
+        self.fleet.assert_not_called()
+
     def test_cross_site_data_and_embedded_documents_are_refused_before_collection(self):
         cases = [
             ("/api/fleet", [("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")]),
@@ -83,6 +104,7 @@ class DashboardPolicyTest(unittest.TestCase):
                     self.assertEqual(self.request(route=route, headers=headers)[0], 403)
             command.assert_not_called()
         self.fleet.assert_not_called()
+        self.collector.read.assert_not_called()
         self.detect.assert_not_called()
 
     def test_ambiguous_or_rebinding_read_headers_fail_closed(self):
@@ -99,6 +121,7 @@ class DashboardPolicyTest(unittest.TestCase):
                 with self.subTest(method=method, headers=headers):
                     self.assertEqual(self.request(method=method, route="/api/fleet", headers=headers)[0], 403)
         self.fleet.assert_not_called()
+        self.collector.read.assert_not_called()
         self.detect.assert_not_called()
 
     def test_mutations_reject_missing_wrong_and_duplicate_authority_before_execution(self):
@@ -130,6 +153,7 @@ class DashboardPolicyTest(unittest.TestCase):
                         self.assertEqual(self.request(method, route, [*self.good, (key, "127.0.0.1")], b'{"args":["apply"]}')[0], 403)
             command.assert_not_called()
         self.fleet.assert_not_called()
+        self.collector.read.assert_not_called()
         self.detect.assert_not_called()
 
     def test_detect_requires_header_and_retains_optional_exact_origin(self):
