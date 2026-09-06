@@ -130,13 +130,14 @@ def select(data: dict, slug: str | None) -> dict[str, dict]:
 # ---------------------------------------------------------------- subprocess
 
 
-def run(argv: list[str], cwd: Path | None = None, check: bool = False, quiet: bool = False) -> subprocess.CompletedProcess:
-    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
-    if check and proc.returncode != 0:
-        if not quiet:
-            sys.stdout.write(proc.stdout)
-            sys.stderr.write(proc.stderr)
-        raise DistrictError(f"`{' '.join(argv)}` exited {proc.returncode}")
+def run(argv: list[str], cwd: Path | None = None, check: bool = False, quiet: bool = False,
+        timeout: float | None = None) -> subprocess.CompletedProcess:
+    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout)
+    if check and proc.returncode:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise DistrictError(detail)
+    if not quiet and proc.stderr:
+        print(proc.stderr, end="", file=sys.stderr)
     return proc
 
 

@@ -257,6 +257,50 @@ def _snapshot(raw: object) -> dict | None:
         "errors": ["snapshot unavailable or incomplete"] if raw.get("errors") else [],
     }
 
+def _activity(raw: object) -> dict:
+    raw = _dict(raw)
+    history = _dict(raw.get("history"))
+    events = []
+    for item in _list(raw.get("events"))[:512]:
+        if not isinstance(item, dict):
+            continue
+        event_id = _identity(item.get("event_id"))
+        if not event_id:
+            continue
+        events.append({
+            "event_id": event_id,
+            "execution_id": _identity(item.get("execution_id")),
+            "ticket": _number(item.get("ticket")),
+            "stage": _identity(item.get("stage")),
+            "kind": _identity(item.get("kind")),
+            "at": _stamp(item.get("at")),
+            "outcome": _identity(item.get("outcome")),
+            "reason": safe_text(item.get("reason")),
+        })
+    return {
+        "events": events,
+        "history": {
+            "source": _identity(history.get("source")),
+            "status": _choice(history.get("status"), ("empty", "available", "missing", "unreadable")),
+            "start_at": _stamp(history.get("start_at")), "end_at": _stamp(history.get("end_at")),
+            "complete": history.get("complete") if type(history.get("complete")) is bool else None,
+            "truncated": history.get("truncated") if type(history.get("truncated")) is bool else None,
+            "gaps": [_identity(gap) for gap in _list(history.get("gaps"))[:32] if _identity(gap)],
+            **{key: _number(history.get(key)) for key in (
+                "bytes_read", "byte_limit", "event_limit", "retained_events")},
+        },
+    }
+
+
+def _collection(raw: object) -> dict:
+    raw = _dict(raw)
+    return {
+        "runtime_collected_at": _stamp(raw.get("runtime_collected_at")),
+        "runtime_age_seconds": _number(raw.get("runtime_age_seconds")),
+        "full_collected_at": _stamp(raw.get("full_collected_at")),
+        "full_age_seconds": _number(raw.get("full_age_seconds")),
+    }
+
 
 def safe_fleet(fleet: dict) -> dict:
     """Bounded, allowlisted D01 semantics and project context; not another classifier."""
@@ -272,6 +316,7 @@ def safe_fleet(fleet: dict) -> dict:
                       "dashboard": {"port": port if 1 <= port <= 65535 else None}},
             "snap": _snapshot(raw.get("snap")), "metrics": _metrics(raw.get("metrics")),
             "error": "dashboard unavailable or incomplete" if raw.get("error") else None,
+            "activity": _activity(raw.get("activity")), "collection": _collection(raw.get("collection")),
             **_classification(raw),
         }
         omitted = result[slug]["projection"]["omitted"]

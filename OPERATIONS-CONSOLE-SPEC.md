@@ -321,15 +321,24 @@ Precise serialized keys within these objects and lifecycle invariants must be do
 
 ## 8. Collection and refresh
 
-D02 owns a single bounded collector/cache for all dashboard clients, not one full collection per HTTP request. Publish fresh factory results independently; a slow/hung factory has a timeout and cannot freeze the fleet. Prevent overlapping collections for one factory. Preserve source freshness and bounded last-known data through partial failures. Shut down collector work cleanly with the server.
+D02's dashboard server owns one collector and one cache for all browser clients.
+Runtime observations run every five seconds with a four-second per-factory
+timeout and at most eight concurrent subprocesses. A factory has at most one
+runtime/full collection in flight, so a slow or hung source cannot overlap or
+hold publication of other factories. Full `factory dashboard --json`
+GitHub/config observations use a separate 60-second schedule; existing hourly
+repository metrics remain outside both paths. Browser polling reads only this
+cache and never starts collection.
 
-- Runtime target: approximately five seconds, measured on the target host after F03 exists.
-- Full GitHub/config observations: slower, separately timestamped/cached; never executed merely because a browser requested a refresh.
-- Existing hourly repository metrics remain outside the runtime hot path.
-- Browser polling reads the shared cache; no WebSocket, database, or event broker requirement.
-- Ten factories and multiple tabs should not multiply underlying work by tab count.
-
-Deduplicate lifecycle events by identity, not text or wall-clock proximity. First connection establishes a baseline; reconnect gaps/truncation are visible. New completions can highlight once per client observation without implying total durable event replay. Short-lived cache/history is sufficient; no speculative persistent incident system.
+Each completed factory result increments the cache revision independently.
+The API reports the revision and configured bounds; entries expose original
+source times/ages plus separate runtime/full collection times/ages. Last-known
+data survives collection errors without renewing its source time. Each factory
+retains at most 512 producer events, deduplicated by `event_id`, together with
+the producer's declared history window, completeness, truncation and gap codes.
+This supports baselines and reconnect-gap disclosure, not durable total replay.
+Collector work stops with the server and every subprocess is bounded by its
+per-factory timeout.
 
 ## 9. Management and network safety
 
