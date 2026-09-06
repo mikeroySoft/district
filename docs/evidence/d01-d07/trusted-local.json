@@ -1,0 +1,22 @@
+[
+  {
+    "binding": "default loopback",
+    "port": 18974,
+    "unauthorized_requests_refused": 32,
+    "unauthorized_cli_invocations": 0,
+    "authorized_http": 200,
+    "actual_cli_exit": 0,
+    "cap_removed": true,
+    "cli_invocations": 1
+  },
+  {
+    "binding": "explicit 0.0.0.0 via loopback URL",
+    "port": 18976,
+    "unauthorized_requests_refused": 32,
+    "unauthorized_cli_invocations": 0,
+    "authorized_http": 200,
+    "actual_cli_exit": 0,
+    "cap_removed": true,
+    "cli_invocations": 1
+  }
+]

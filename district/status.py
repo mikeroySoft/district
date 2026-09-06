@@ -1,7 +1,7 @@
 """`district status`: one table for the fleet, from `factory dashboard --json` per repo.
 
-Exit 1 when any repo is failing (health.py), so a prompt or cron can use it as
-one exit code. `--json` adds health, reasons, and the cached metrics per slug.
+Exit 1 for operational attention, 2 for unknown observation without attention,
+0 for normal operation (including an empty fleet). JSON retains project context.
 """
 
 from __future__ import annotations
@@ -15,46 +15,60 @@ from pathlib import Path
 from district import health, host, metrics
 from district.host import run
 
-COLUMNS = ("repo", "health", "version", "next", "last", "pass", "active", "esc", "gate1", "bounce", "fails", "upstream")
+COLUMNS = ("repo", "operating", "execution", "observation", "assessment", "version", "next", "last", "pass", "esc", "gate1", "bounce", "fails", "upstream", "evidence")
 
 
 def snapshot(slug: str, table: dict) -> dict:
-    """{'slug', 'snap' | 'error'}: a nonzero exit, bad JSON, or snapshot errors mark the repo unhealthy."""
-    proc = run(["factory", "dashboard", "--json"], cwd=Path(table["path"]))
+    """Read the existing full snapshot; observation errors never imply stopped machinery."""
+    try:
+        proc = run(["factory", "dashboard", "--json"], cwd=Path(table["path"]))
+    except OSError as exc:
+        return {"slug": slug, "error": str(exc)}
+    error = None
     if proc.returncode != 0:
-        return {"slug": slug, "error": f"factory dashboard exited {proc.returncode}: {(proc.stderr.strip() or '?').splitlines()[-1]}"}
+        error = f"factory dashboard exited {proc.returncode}: {(proc.stderr.strip() or '?').splitlines()[-1]}"
     try:
         snap = json.loads(proc.stdout)
-        if snap.get("errors"):
-            return {"slug": slug, "error": "; ".join(snap["errors"]), "snap": snap}
-        snap["tickets"], snap["dispatcher"]["runs"]  # shape check
-    except (ValueError, KeyError, TypeError):
-        return {"slug": slug, "error": "malformed snapshot"}
-    return {"slug": slug, "snap": snap}
+        if not isinstance(snap, dict):
+            raise ValueError("snapshot must be an object")
+    except ValueError:
+        return {"slug": slug, "error": error or "malformed snapshot"}
+    errors = snap.get("errors") or []
+    if errors:
+        detail = "; ".join(str(e) for e in errors)
+        error = f"{error}; {detail}" if error else detail
+    return {"slug": slug, "snap": snap, "error": error}
 
 
 def rel(ts: str | None, at: datetime | None = None) -> str:
     if not ts:
         return "-"
-    delta = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) - (at or datetime.now(timezone.utc))
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return "?"
+        delta = parsed - (at or datetime.now(timezone.utc))
+    except (ValueError, TypeError, AttributeError):
+        return "?"
     s = int(abs(delta.total_seconds()))
     span = f"{s // 86400}d" if s >= 86400 else f"{s // 3600}h" if s >= 3600 else f"{s // 60}m" if s >= 60 else f"{s}s"
     return f"in {span}" if delta.total_seconds() > 0 else f"{span} ago"
 
 
 def pct(x: float | None) -> str:
-    return "-" if x is None else f"{round(100 * x)}%"
+    return "-" if not isinstance(x, (int, float)) or isinstance(x, bool) else f"{round(100 * x)}%"
 
 
 def entry(result: dict, table: dict) -> dict:
-    """One `status --json` record: registry table, snapshot (or error), health, reasons, cached metrics."""
+    """Shared classified record for CLI, Atlas and D02's normalized source transport."""
     snap = result.get("snap")
-    lvl, reasons = health.level(snap, table)
-    if snap is None:
-        reasons = [f"dashboard unreachable ({result['error']})" if r == "dashboard unreachable" else r for r in reasons]
+    sources = result.get("sources")
+    if sources is None:
+        sources = health.snapshot_sources(snap, result.get("error"))
     return {
         "table": table, "snap": snap, "error": result.get("error"),
-        "health": lvl, "reasons": reasons, "metrics": metrics.read(result["slug"]),
+        "metrics": metrics.read(result["slug"]),
+        **health.classify(result["slug"], sources, table),
     }
 
 
@@ -69,29 +83,27 @@ def fleet(data: dict) -> dict[str, dict]:
 
 
 def row(slug: str, e: dict) -> dict:
-    cells = {"repo": slug, "health": e["health"]}
-    if e["error"]:
-        return {**cells, "version": "?", "pass": "UNHEALTHY", "upstream": e["error"][:60]}
-    snap = e["snap"]
-    d = snap["dispatcher"]
-    finished = [r for r in d["runs"] if r["result"] != "running"]
-    up = snap.get("upstream") or {}
-    if snap["config"].get("upstream"):
-        upstream = f"behind {up.get('behind', '?')}" + (f", parked #{up['blocker']['number']}" if up.get("blocker") else "")
+    snap = e["snap"] or {}
+    d, up, sm, config = [snap.get(k) if isinstance(snap.get(k), dict) else {} for k in ("dispatcher", "upstream", "metrics", "config")]
+    timer = d.get("timer") if isinstance(d.get("timer"), dict) else {}
+    runs = d.get("runs") if isinstance(d.get("runs"), list) else []
+    finished = [r for r in runs if isinstance(r, dict) and r.get("result") != "running"]
+    tickets = snap.get("tickets") if isinstance(snap.get("tickets"), list) else None
+    if config.get("upstream"):
+        blocker = up.get("blocker") if isinstance(up.get("blocker"), dict) else {}
+        upstream = f"behind {up.get('behind', '?')}" + (f", parked #{blocker['number']}" if "number" in blocker else "")
     else:
         upstream = "-"
     return {
-        **cells,
-        "version": snap.get("version", "?"),
-        "next": rel(d["timer"].get("next")),
-        "last": rel(d["timer"].get("last")),
-        "pass": finished[-1]["result"] if finished else "-",
-        "active": "DISABLED" if e["table"].get("disabled_at") else ("yes" if d["timer"]["active"] else "NO"),
-        "esc": str(sum(1 for t in snap["tickets"] if t["stage"] == "escalated")),
-        "gate1": pct(snap["metrics"]["first_pass"]),
-        "bounce": pct(snap["metrics"]["bounce_rate"]),
-        "fails": str(d["consecutive_failures"]),
-        "upstream": upstream,
+        "repo": slug, "operating": e["operating_state"], "execution": e["execution_state"],
+        "observation": e["observation"], "assessment": e["assessment"],
+        "version": str(snap.get("version", "?")),
+        "next": rel(timer.get("next")), "last": rel(timer.get("last")),
+        "pass": str(finished[-1].get("result", "?")) if finished else "-",
+        "esc": str(sum(t.get("stage") == "escalated" for t in tickets if isinstance(t, dict))) if tickets is not None and not e["error"] else "?",
+        "gate1": pct(sm.get("first_pass")), "bounce": pct(sm.get("bounce_rate")),
+        "fails": str(d.get("consecutive_failures", "?")), "upstream": upstream,
+        "evidence": "; ".join(f["condition_code"] for f in e["findings"]) or e["error"] or "-",
     }
 
 
@@ -103,14 +115,16 @@ def table(rows: list[dict]) -> str:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district status", description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--json", action="store_true", help="dump snapshot, health, reasons, and metrics keyed by slug")
+    parser.add_argument("--json", action="store_true", help="dump shared operational classification, evidence, snapshot and project metrics keyed by slug")
     args = parser.parse_args(argv)
     entries = fleet(host.load())
-    if not entries:
+    if not entries and not args.json:
         print("no repositories registered (district add)")
         return 0
     if args.json:
         print(json.dumps(entries, indent=2))
     else:
         print(table([row(slug, e) for slug, e in entries.items()]))
-    return 0 if all(e["health"] != "failing" for e in entries.values()) else 1
+    if any(e["assessment"] == "attention" for e in entries.values()):
+        return 1
+    return 2 if any(e["assessment"] == "unknown" for e in entries.values()) else 0

@@ -12,7 +12,8 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
-from math import sqrt
+from html import escape
+from math import isfinite, sqrt
 from pathlib import Path
 
 TEMPLATE = Path(__file__).with_name("atlas.html")
@@ -40,7 +41,7 @@ const KIND = {
   dep:     { name: 'Config layering',  color: '#55617A', dash: '2 4', label: 'host file → effective per-repo config' },
   build:   { name: 'Fork upstream sync', color: '#9B7BD8', dash: '7 5', label: 'upstream main merged under the host gate' },
 };
-const HEALTH_COLOR = { healthy: '#4CBB6C', attention: '#E3A83B', failing: '#E8493E' };
+const ASSESSMENT_COLOR = { normal: '#4CBB6C', attention: '#E3A83B', unknown: '#8A93A5' };
 """
 
 # Buildings that describe code, not fleet state. gx,gy grid position; w,d footprint; h height px; kind = silhouette.
@@ -118,8 +119,8 @@ STATIC_BLOCKS = r"""  // GitHub (back row)
     files:[ ['mikeroySoft/factory@8f9baad/agent_factory/onboard.py',252,'unit templates'], ['mikeroySoft/district@f413e8c/district/apply.py',23,'POLICY_ENV'] ],
     conn:'Rendered by factory install; converged and capped by district apply.' },
   { id:'district', name:'district (add · apply · status · rm)', cat:'district', gx:0.6, gy:15.8, w:2.2, d:2.2, h:21, kind:'mast',
-    blurb:'The control tower: onboards a repo in one command (fork detection, gate proposal, port allocation), converges every factory to the host file, upgrades the engine fleet-wide with stop → wait → reinstall → restore, disables a timer after 10 consecutive failed passes, and prints the fleet table with a health exit code. Never commits to a factory; never imports the engine.',
-    files:[ ['mikeroySoft/district@f413e8c/district/add.py',299,'add: onboard / adopt'], ['mikeroySoft/district@f413e8c/district/apply.py',92,'upgrade(): stop → wait → reinstall'], ['mikeroySoft/district@f413e8c/district/apply.py',181,'failure cap → timer disabled'], ['mikeroySoft/district@f413e8c/district/status.py',49,'row(): health per factory'] ],
+    blurb:'The control tower: onboards a repo in one command (fork detection, gate proposal, port allocation), converges every factory to the host file, upgrades the engine fleet-wide with stop → wait → reinstall → restore, caps dispatch after 10 consecutive failed passes, and prints the shared operational assessment. Never commits to a factory; never imports the engine.',
+    files:[ ['mikeroySoft/district@f413e8c/district/add.py',299,'add: onboard / adopt'], ['mikeroySoft/district@f413e8c/district/apply.py',92,'upgrade(): stop → wait → reinstall'], ['mikeroySoft/district@f413e8c/district/apply.py',181,'failure cap → timer disabled'], ['mikeroySoft/district@f413e8c/district/status.py',49,'historical fleet row at the cited revision'] ],
     conn:'Writes the host file and drives factory; reads dashboard --json.' },
   { id:'hostcfg', name:'Host file (registry + defaults)', cat:'district', gx:0.4, gy:19.2, w:2.6, d:1.4, h:8, kind:'slab',
     blurb:'~/.config/agent-factory/config.toml — the registry is the config. Per factory only path and dashboard port; everything the fleet agrees on (triage endpoint, install cadence, bind host, policy env) is promoted into [defaults]. Nothing here is ever committed to a repo.',
@@ -224,8 +225,8 @@ STATIC_PATHS = r"""  { id:'p1', kind:'control', from:'systemd', to:'dispatch',
   { id:'p18', kind:'data', from:'dashboard', to:'district',
     label:'dashboard --json',
     pts:[[22.8,7.2],[22.8,11.7],[6.2,11.7],[3.6,15.8],[1.7,16.9]], lt:0.55, ldy:-10,
-    what:'The only thing District reads from a factory. A nonzero exit, malformed JSON, or snapshot errors mark the factory unhealthy — never “zero escalations”.',
-    cite:[[DC+'status.py',21,'snapshot()'],[DC+'status.py',49,'row(): health']],
+    what:'District reads the public Factory snapshot. Fetch errors mean observation is unavailable or partial, not proof that dispatch stopped. Operating state, execution state, findings and observation come from the same classifier used by CLI status.',
+    cite:[[DC+'status.py',21,'snapshot()'],[DC+'status.py',49,'historical fleet row at the cited revision']],
     payload:{r:2.6, dur:5.8, kind:'data'} },
 """
 
@@ -233,20 +234,38 @@ STATIC_PATHS = r"""  { id:'p1', kind:'control', from:'systemd', to:'dispatch',
 # ---------------------------------------------------------------- helpers
 
 
-def n(x: int | float | None, suffix: str = "") -> str:
-    return "?" if x is None else f"{x:,}{suffix}"
+def mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
 
 
-def pct(x: float | None) -> str:
-    return "-" if x is None else f"{round(100 * x)}%"
+def sequence(value: object) -> list:
+    return value if isinstance(value, list) else []
 
 
-def dot(level: str) -> str:
-    return f'<span class="health {level}"></span>'
+def number(value: object) -> int | float | None:
+    return value if type(value) is int or (type(value) is float and isfinite(value)) else None
 
 
-def esc(s: str) -> str:
-    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+def text(value: object) -> str:
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def n(x: object, suffix: str = "") -> str:
+    value = number(x)
+    return "?" if value is None else f"{value:,}{suffix}"
+
+
+def pct(x: object) -> str:
+    value = number(x)
+    return "unknown" if value is None else f"{round(100 * value)}%"
+
+
+def dot(assessment: str) -> str:
+    return f'<span class="assessment {esc(assessment)}" aria-hidden="true"></span>'
+
+
+def esc(s: object) -> str:
+    return escape(str(s), quote=True)
 
 
 def block_id(slug: str) -> str:
@@ -258,84 +277,154 @@ def height(loc: int, max_loc: int) -> float:
 
 
 def traffic_pair(t: dict | str | None) -> str:
-    return "n/a" if not isinstance(t, dict) else f"{n(t['count'])} ({n(t['uniques'])} unique)"
+    return "unknown" if not isinstance(t, dict) else f"{n(t.get('count'))} ({n(t.get('uniques'))} unique)"
+
+
+def total(records: list[dict], key: str) -> int | float | None:
+    """Sum known values without presenting an entirely missing metric as zero."""
+    values = [value for record in records if (value := number(record.get(key))) is not None]
+    return sum(values) if values else None
 
 
 # ---------------------------------------------------------------- factory blocks
 
 
+def projection_rows(record: dict, label: str) -> list[list[str]]:
+    projection = mapping(record.get("projection"))
+    counts = mapping(projection.get("omitted"))
+    omitted = [f"{n(count)} {key} omitted" for key, count in counts.items()
+               if key != "factories" and number(count) is not None and count > 0]
+    if not omitted and (not projection.get("truncated") or counts.get("factories")):
+        return []
+    return [[label, "truncated" + (": " + " · ".join(omitted) if omitted else "")]]
+
+
 def factory_kpis(slug: str, e: dict) -> list[list[str]]:
-    m, snap, table = e["metrics"] or {}, e["snap"], e["table"]
-    rows = [["health", dot(e["health"]) + e["health"] + (" — " + "; ".join(e["reasons"]) if e["reasons"] else "")]]
+    m, snap, table = mapping(e.get("metrics")), mapping(e.get("snap")), mapping(e["table"])
+    rows = [
+        ["assessment", e["assessment"]],
+        ["operating state", e["operating_state"]],
+        ["execution state", e["execution_state"]],
+        ["observation", e["observation"]],
+    ]
+    rows += projection_rows(e, "projection")
+    omitted = mapping(mapping(e.get("projection")).get("omitted"))
+    for finding in e["findings"]:
+        rows.append(["finding", f"{finding['condition_code']} · {finding['severity']} · {finding['id']}"])
+        rows.append(["finding factory", text(finding.get("factory"))])
+        rows.append(["finding resource", text(finding.get("resource"))])
+        rows.append(["finding scope", json.dumps(finding["scope"], ensure_ascii=False)])
+        rows.append(["finding observed", text(finding.get("observed_at"))])
+        rows.append(["finding impact", finding["impact"]])
+        rows.append(["finding cause", text(finding.get("cause"))])
+        rows += projection_rows(finding, "finding projection")
+        for evidence in finding["evidence"]:
+            rows.append(["finding evidence", json.dumps(evidence, ensure_ascii=False)])
+            rows += projection_rows(evidence, "evidence projection")
+        if finding.get("history"):
+            rows.append(["finding history", json.dumps(finding["history"], ensure_ascii=False)])
+        for key in ("first_observed_at", "last_observed_at"):
+            if key in finding:
+                rows.append([key, text(finding[key])])
+    if not e["findings"]:
+        rows.append(["findings", "none retained in this projection" if omitted.get("findings") else "none reported"])
+    for source in e["sources"]:
+        rows.append(["source", f"{source['id']} · {source['observation']} · observed_at: {text(source.get('observed_at'))} · "
+                     f"cadence_seconds: {n(source.get('cadence_seconds'))} · age_seconds: {n(source.get('age_seconds'))}"
+                     + (f" · error: {source['error']}" if source.get("error") else "")])
+        rows += projection_rows(source, "source projection")
+    if not e["sources"]:
+        rows.append(["sources", "none retained in this projection" if omitted.get("sources") else "unknown — no sources reported"])
+    for key, label in (("executions", "execution"), ("resources", "resource")):
+        records = sequence(e.get(key))
+        for record in records:
+            rows.append([label, json.dumps({k: v for k, v in record.items() if k != "projection"}, ensure_ascii=False)])
+            rows += projection_rows(record, f"{label} projection")
+        if not records:
+            rows.append([key, "none retained in this projection" if omitted.get(key)
+                         else "none reported" if key in e else "unknown — observation unavailable"])
+    for unknown in sequence(e.get("unknowns")):
+        rows.append(["unknown", text(unknown)])
     if snap:
-        d = snap["dispatcher"]
-        finished = [r["result"] for r in d["runs"] if r["result"] != "running"]
-        timer = "DISABLED by District" if table.get("disabled_at") else ("timer active" if d["timer"]["active"] else "timer INACTIVE")
-        rows.append(["engine", f"{snap.get('version', '?')} · {timer} · last pass {finished[-1] if finished else '-'} · "
-                     f"{d['consecutive_failures']} consecutive failures"])
-    else:
-        rows.append(["engine", "dashboard unreachable: " + esc(e["error"] or "?")])
+        d = mapping(snap.get("dispatcher"))
+        finished = [r["result"] for r in sequence(d.get("runs"))
+                    if isinstance(r, dict) and isinstance(r.get("result"), str) and r["result"] != "running"]
+        rows.append(["engine", f"{text(snap.get('version'))} · last reported pass {finished[-1] if finished else 'unknown'} · "
+                     f"{n(d.get('consecutive_failures'))} consecutive failures"])
+    if e.get("error"):
+        rows.append(["snapshot error", e["error"]])
     if m:
-        langs = " · ".join(f"{k} {n(v)}" for k, v in list(m["languages"].items())[:3])
+        langs = " · ".join(f"{k} {n(v)}" for k, v in list(mapping(m.get("languages")).items())[:3]) or "languages unknown"
         rows += [
-            ["codebase", f"{n(m['loc'])} LOC · {n(m['files'])} files · {langs} · tests {n(m['test_loc'])} in {n(m['test_files'])} files"],
-            ["people", f"{n(m['contributors'])} contributors · top 3 authors = {pct(m['top3_share'])} of {n(m['commits'])} commits"],
-            ["velocity", f"{n(m['commits_30d'])} commits / 30d ({n(m['commits_7d'])} / 7d) · {n(m['merged_prs_30d'])} PRs merged / 30d, "
-                         f"{n(m['agent_prs_30d'])} by agents"],
+            ["codebase", f"{n(m.get('loc'))} LOC · {n(m.get('files'))} files · {langs} · tests {n(m.get('test_loc'))} in {n(m.get('test_files'))} files"],
+            ["people", f"{n(m.get('contributors'))} contributors · top 3 authors = {pct(m.get('top3_share'))} of {n(m.get('commits'))} commits"],
+            ["velocity", f"{n(m.get('commits_30d'))} commits / 30d ({n(m.get('commits_7d'))} / 7d) · {n(m.get('merged_prs_30d'))} PRs merged / 30d, "
+                         f"{n(m.get('agent_prs_30d'))} by agents"],
         ]
-    labels = ", ".join(f"{v} {k}" for k, v in (m.get("open_by_label") or {}).items())
+    labels = ", ".join(f"{n(v)} {k}" for k, v in mapping(m.get("open_by_label")).items())
     work = f"{n(m.get('open_issues'))} open issues" + (f" ({labels})" if labels else "") + f" · {n(m.get('open_prs'))} open PRs"
-    if snap:
-        work += f" · {len(snap['tickets'])} tickets tracked"
-    rows.append(["work", work])
-    if snap:
-        sm = snap["metrics"]
-        quality = ("no gate history yet" if sm.get("first_pass") is None else f"first-gate pass {pct(sm['first_pass'])} · bounce {pct(sm['bounce_rate'])}")
-        rows.append(["quality", f"{quality} · {n(sm.get('escalations'))} escalations all-time · {n(m.get('open_bugs'))} open bug-labelled"])
+    tickets = snap.get("tickets")
+    work += f" · {n(len(tickets) if isinstance(tickets, list) else None)} tickets tracked"
+    rows.append(["project work", work])
+    sm = mapping(snap.get("metrics"))
+    rows.append(["project quality", f"first-gate pass {pct(sm.get('first_pass'))} · bounce {pct(sm.get('bounce_rate'))} · "
+                 f"{n(sm.get('escalations'))} escalations all-time · {n(m.get('open_bugs'))} open bug-labelled"])
     if m:
-        med = "" if m["median_days_to_close"] is None else f" · median {m['median_days_to_close']} days"
+        med = "" if number(m.get("median_days_to_close")) is None else f" · median {n(m['median_days_to_close'])} days"
+        traffic = mapping(m.get("traffic"))
         rows += [
-            ["resolution", f"{n(m['closed_issues_30d'])} issues closed / 30d ({n(m['closed_bugs_30d'])} bug-labelled){med}"],
-            ["traffic 14d", f"{traffic_pair(m['traffic']['clones'])} clones · {traffic_pair(m['traffic']['views'])} views · "
-                            f"{n(m['stars'])} stars · {n(m['forks'])} forks · {n(m['watchers'])} watchers"],
-            ["collected", m["collected_at"]],
+            ["resolution", f"{n(m.get('closed_issues_30d'))} issues closed / 30d ({n(m.get('closed_bugs_30d'))} bug-labelled){med}"],
+            ["traffic 14d", f"{traffic_pair(traffic.get('clones'))} clones · {traffic_pair(traffic.get('views'))} views · "
+                            f"{n(m.get('stars'))} stars · {n(m.get('forks'))} forks · {n(m.get('watchers'))} watchers"],
+            ["collected", text(m.get("collected_at"))],
         ]
     else:
         rows.append(["metrics", "not collected yet — district metrics --refresh"])
-    if snap and snap["config"].get("upstream"):
-        up = snap.get("upstream") or {}
-        parked = f" · parked on #{up['blocker']['number']}" if up.get("blocker") else ""
-        rows.append(["upstream", f"{esc(up.get('repo') or '?')}: {n(up.get('ahead'))} ahead · {n(up.get('behind'))} behind{parked}"])
-    port = table.get("dashboard", {}).get("port")
-    if port:
-        rows.append(["dashboard", f'<a href="http://127.0.0.1:{port}/" target="_blank" rel="noopener">127.0.0.1:{port}</a>'])
+    if isinstance(mapping(snap.get("config")).get("upstream"), str) and mapping(snap.get("config"))["upstream"]:
+        up = mapping(snap.get("upstream"))
+        blocker = mapping(up.get("blocker"))
+        parked = f" · parked on #{blocker['number']}" if blocker.get("number") is not None else ""
+        rows.append(["project upstream", f"{up.get('repo') or '?'}: {n(up.get('ahead'))} ahead · {n(up.get('behind'))} behind{parked}"])
+    rows = [[esc(label), esc(value)] for label, value in rows]
+    rows[0][1] = dot(e["assessment"]) + rows[0][1]
+    port = mapping(table.get("dashboard")).get("port")
+    if type(port) is int and 0 < port < 65536:
+        rows.append(["dashboard", f'<span data-factory-port="{port}">Factory link requires an HTTP browser hostname</span>'])
+    else:
+        rows.append(["dashboard", "Factory link unavailable — no registered dashboard port"])
     return rows
 
 
 def factory_block(i: int, slug: str, e: dict, max_loc: int) -> dict:
-    m, snap = e["metrics"] or {}, e["snap"]
-    loc = m.get("loc", 0)
+    m, snap = mapping(e.get("metrics")), mapping(e.get("snap"))
+    loc = max(0, number(m.get("loc")) or 0)  # Missing size uses minimum geometry, never a displayed zero.
     w = round(2.4 + 1.2 * sqrt(loc / max_loc), 2) if max_loc else 2.4
     h = height(loc, max_loc)
     gx, gy = round(FACTORY_X0 + FACTORY_STEP * i, 2), round(FACTORY_Y + (3.6 - w) / 2, 2)
-    fork = bool(snap and snap["config"].get("upstream"))
-    checks = [c for c in (snap or {}).get("config", {}).get("gate_checks", []) if c not in ("conflict-markers", "leak-scan")]
-    exclusive = set((snap or {}).get("config", {}).get("exclusive_checks", []))
-    gate = " · ".join(c + ("*" if c in exclusive else "") for c in checks) or "?"
-    ref = f"{slug}@{m['head']}/.factory.toml" if m.get("head") else f"{slug}/blob/main/.factory.toml"
+    config = mapping(snap.get("config"))
+    upstream = config.get("upstream")
+    origin_known = "upstream" in config and (upstream is None or isinstance(upstream, str))
+    fork = isinstance(upstream, str) and bool(upstream)
+    checks = [c for c in sequence(config.get("gate_checks")) if isinstance(c, str) and c not in ("conflict-markers", "leak-scan")]
+    exclusive = {c for c in sequence(config.get("exclusive_checks")) if isinstance(c, str)}
+    gate = " · ".join(c + ("*" if c in exclusive else "") for c in checks) or "unknown"
+    ref = f"{slug}@{m['head']}/.factory.toml" if isinstance(m.get("head"), str) and m["head"] else f"{slug}/blob/main/.factory.toml"
     if m:
-        top = next(iter(m["languages"].items()), ("-", 0))
-        size = f"{n(m['loc'])} tracked lines ({top[0]} {n(top[1])}), {n(m['contributors'])} contributors, {n(m['commits_30d'])} commits in 30 days"
+        top = next(iter(mapping(m.get("languages")).items()), ("unknown", None))
+        size = f"{n(m.get('loc'))} tracked lines ({top[0]} {n(top[1])}), {n(m.get('contributors'))} contributors, {n(m.get('commits_30d'))} commits in 30 days"
     else:
         size = "metrics not collected yet"
-    blurb = f"{'Fork' if fork else 'Net-new repository'}: {size}. Gate: {gate}{' (* exclusive)' if exclusive else ''}. "
-    blurb += f"{e['health'].capitalize()}" + (": " + "; ".join(esc(r) for r in e["reasons"]) + "." if e["reasons"] else ".")
+    origin = "Fork" if fork else "Net-new repository" if origin_known else "Repository origin unknown"
+    blurb = f"{origin}: {size}. Gate: {gate}{' (* exclusive)' if exclusive else ''}. "
+    blurb += f"Assessment: {e['assessment']}. Operating state: {e['operating_state']}. Execution state: {e['execution_state']}. Observation: {e['observation']}."
     return {
         "id": block_id(slug), "slug": slug, "name": slug.rsplit("/", 1)[-1], "cat": "factory",
         "gx": gx, "gy": gy, "w": w, "d": w, "h": h, "kind": "tower3" if h >= 60 else "hall", "ring": fork,
-        "health": e["health"], "blurb": blurb, "kpis": factory_kpis(slug, e),
-        "files": [[ref, 1, f"[[gate.check]] {gate}"]] + ([[ref, 1, f"upstream = \"{snap['config']['upstream']}\""]] if fork else []),
-        "conn": "Fed by its fork parent; dispatched by its own timer." if fork else "Net-new: no upstream sync loop.",
+        **{key: e[key] for key in ("schema_version", "assessment", "operating_state", "execution_state", "observation", "findings", "sources")},
+        **{key: e[key] for key in ("executions", "resources", "unknowns", "projection") if key in e},
+        "blurb": blurb, "kpis": factory_kpis(slug, e),
+        "files": [[ref, 1, f"[[gate.check]] {gate}"]] + ([[ref, 1, f"upstream = \"{config['upstream']}\""]] if fork else []),
+        "conn": "Fed by its fork parent; dispatched by its own timer." if fork else "No upstream sync configured." if origin_known else "Upstream configuration unknown.",
     }
 
 
@@ -363,29 +452,34 @@ def factory_paths(b: dict) -> list[dict]:
 
 def kpis(fleet: dict) -> list[list[str]]:
     es = list(fleet.values())
-    ms = [e["metrics"] for e in es if e["metrics"]]
-    snaps = [e["snap"] for e in es if e["snap"]]
-    tally = {lvl: sum(e["health"] == lvl for e in es) for lvl in ("healthy", "attention", "failing")}
-    versions = sorted({s.get("version", "?") for s in snaps}) or ["?"]
-    fails = sum(s["dispatcher"]["consecutive_failures"] for s in snaps)
-    human = sum((m.get("open_by_label") or {}).get("ready-for-human", 0) for m in ms)
-    clones = [m["traffic"]["clones"] for m in ms if isinstance(m["traffic"]["clones"], dict)]
-    views = [m["traffic"]["views"] for m in ms if isinstance(m["traffic"]["views"], dict)]
-    na = len(ms) - min(len(clones), len(views))
-    total = lambda key: sum(m[key] for m in ms)  # noqa: E731
+    ms = [m for e in es if (m := mapping(e.get("metrics")))]
+    snaps = [mapping(e.get("snap")) for e in es]
+    tally = {level: sum(e["assessment"] == level for e in es) for level in ("normal", "attention", "unknown")}
+    versions = sorted({text(s.get("version")) for s in snaps}) or ["unknown"]
+    fails = total([mapping(s.get("dispatcher")) for s in snaps], "consecutive_failures")
+    labels = [m.get("open_by_label") for m in ms]
+    human = total([{"count": label.get("ready-for-human", 0)} if isinstance(label, dict) else {} for label in labels], "count")
+    traffic = [mapping(m.get("traffic")) for m in ms]
+    clones = [mapping(t.get("clones")) for t in traffic]
+    views = [mapping(t.get("views")) for t in traffic]
+    unavailable_traffic = sum(not c or not v for c, v in zip(clones, views))
+    missing = len(es) - len(ms)
+    omitted = max((number(mapping(mapping(e.get("projection")).get("omitted")).get("factories")) or 0 for e in es), default=0)
     return [
-        ["factories", str(len(es)), " · ".join(s.rsplit("/", 1)[-1] for s in fleet) or "none registered"],
-        ["health", f"{dot('healthy')}{tally['healthy']} {dot('attention')}{tally['attention']} {dot('failing')}{tally['failing']}",
-         "healthy · attention · failing"],
-        ["code under management", n(total("loc")), f"tracked lines · {n(total('files'))} files · {n(total('contributors'))} contributors"
-         + (f" · {len(es) - len(ms)} not collected" if len(ms) < len(es) else "")],
-        ["engine", " / ".join(versions), f"on {len(snaps)} of {len(es)} factories · {fails} failed passes"],
-        ["velocity 30d", n(total("commits_30d")), f"commits · {n(total('merged_prs_30d'))} PRs merged, {n(total('agent_prs_30d'))} by agents"],
-        ["open work", f"{n(total('open_issues'))} / {n(total('open_prs'))}", f"issues / PRs · {human} waiting on a human"],
-        ["defects", n(total("open_bugs")), f"open bug-labelled · {n(total('closed_bugs_30d'))} closed 30d · {n(total('closed_issues_30d'))} issues closed 30d"],
-        ["traffic 14d", n(sum(c["count"] for c in clones)),
-         f"clones ({n(sum(c['uniques'] for c in clones))} unique) · {n(sum(v['count'] for v in views))} views · "
-         f"{n(total('stars'))} stars · {n(total('forks'))} forks" + (f" · {na} unavailable" if na else "")],
+        ["factories", str(len(es)), esc(" · ".join(s.rsplit("/", 1)[-1] for s in fleet) or "none registered")
+         + (f" · projection truncated: {n(omitted)} factories omitted; counts cover retained factories only" if omitted else "")],
+        ["assessment", " · ".join(f"{dot(level)}{tally[level]} {level}" for level in tally),
+         "shared operational assessment"],
+        ["code under management", n(total(ms, "loc")), f"tracked lines · {n(total(ms, 'files'))} files · {n(total(ms, 'contributors'))} contributors"
+         + (f" · {missing} not collected" if missing else "")],
+        ["engine", esc(" / ".join(versions)), f"on {sum(bool(s) for s in snaps)} of {len(es)} factories · {n(fails)} consecutive failed passes"],
+        ["velocity 30d", n(total(ms, "commits_30d")), f"commits · {n(total(ms, 'merged_prs_30d'))} PRs merged, {n(total(ms, 'agent_prs_30d'))} by agents"],
+        ["project work", f"{n(total(ms, 'open_issues'))} / {n(total(ms, 'open_prs'))}", f"issues / PRs · {n(human)} waiting on a human"],
+        ["defects", n(total(ms, "open_bugs")), f"open bug-labelled · {n(total(ms, 'closed_bugs_30d'))} closed 30d · {n(total(ms, 'closed_issues_30d'))} issues closed 30d"],
+        ["traffic 14d", n(total(clones, "count")),
+         f"clones ({n(total(clones, 'uniques'))} unique) · {n(total(views, 'count'))} views · "
+         f"{n(total(ms, 'stars'))} stars · {n(total(ms, 'forks'))} forks"
+         + (f" · {unavailable_traffic} unavailable" if unavailable_traffic else "")],
     ]
 
 
@@ -393,16 +487,15 @@ def kpis(fleet: dict) -> list[list[str]]:
 
 
 def js(obj: object) -> str:
-    return json.dumps(obj, ensure_ascii=False)
+    return json.dumps(obj, ensure_ascii=False).replace("<", "\\u003c")
 
 
 def data(fleet: dict) -> str:
     """The DATA JS block: constants, B (blocks), PLATES, P (paths), KPIS — from a `status.fleet()` dict."""
-    max_loc = max((e["metrics"] or {}).get("loc", 0) for e in fleet.values()) if fleet else 0
+    max_loc = max((max(0, number(mapping(e.get("metrics")).get("loc")) or 0) for e in fleet.values()), default=0)
     blocks = [factory_block(i, slug, e, max_loc) for i, (slug, e) in enumerate(fleet.items())]
     paths = [p for b in blocks for p in factory_paths(b)]
     x1 = max(24.5, round(max((b["gx"] + b["w"] for b in blocks), default=0) + 1.4, 2))
-    # ponytail: the engine's ground bounds (G in atlas.html) fit ~4 factories; widen G with x1 when the fleet outgrows them
     plates = [
         {"name": "GITHUB", "cat": "ext", "x0": 6, "y0": -0.8, "x1": 25, "y1": 3.4},
         {"name": "HOST RUNTIME", "cat": "runtime", "x0": 26.5, "y0": 12, "x1": 35.5, "y1": 21.5},
@@ -411,8 +504,10 @@ def data(fleet: dict) -> str:
         {"name": "DISTRICT", "cat": "district", "x0": -0.8, "y0": 11.6, "x1": 4.6, "y1": 23},
         {"name": "FACTORIES", "cat": "factory", "x0": 7, "y0": 15, "x1": x1, "y1": 22.4},
     ]
+    ground = {"x0": -1.8, "y0": -1.8, "x1": max(36.5, x1 + 1.2), "y1": 24.0}
     return (
         HEAD
+        + f"\nconst G = {js(ground)};\n"
         + "\n/* ---- Buildings ---- */\nconst B = [\n" + STATIC_BLOCKS
         + "\n  // Factories (front, LOC-scaled)\n" + "".join(f"  {js(b)},\n" for b in blocks) + "];\n"
         + "\n/* ---- Districts (ground plates) ---- */\nconst PLATES = [\n" + "".join(f"  {js(p)},\n" for p in plates) + "];\n"
@@ -427,14 +522,14 @@ def page(fleet: dict, at: datetime | None = None) -> str:
     stamp = at.strftime("%Y-%m-%d %H:%MZ")
     owners = {s.split("/", 1)[0] for s in fleet}
     owner = next(iter(owners)) if len(owners) == 1 else "District"
-    versions = sorted({e["snap"].get("version", "?") for e in fleet.values() if e["snap"]}) or ["?"]
-    max_loc = max((e["metrics"] or {}).get("loc", 0) for e in fleet.values()) if fleet else 0
-    shas = ", ".join(f"{s.rsplit('/', 1)[-1]} @ {(e['metrics'] or {}).get('head', '?')}" for s, e in fleet.items())
-    eyebrow = f"<b>{esc(owner)} District</b> · {len(fleet)} factories · engine {' / '.join(versions)} · snapshot {stamp}"
+    versions = sorted({text(mapping(e.get("snap")).get("version")) for e in fleet.values()}) or ["unknown"]
+    shas = ", ".join(f"{s.rsplit('/', 1)[-1]} @ {text(mapping(e.get('metrics')).get('head'))}" for s, e in fleet.items())
+    eyebrow = f"<b>{esc(owner)} District</b> · {len(fleet)} factories · engine {esc(' / '.join(versions))} · rendered {stamp}"
     footer = (
-        f"Derived from the local checkouts, the metrics cache, and live dashboards at {stamp}: {shas}, "
-        f"agent-factory @ {AF_SHA}, district @ {DC_SHA}. Factory heights use tracked line counts (h = 12 + 108·√(LOC/{n(max_loc)})); "
+        f"Rendered at {stamp} from the local checkouts, metrics cache and available dashboard observations: {shas}, "
+        f"agent-factory @ {AF_SHA}, district @ {DC_SHA}. Factory heights use known tracked line counts (h = 12 + 108·√(LOC / max known LOC)); unknown sizes use minimum geometry. "
         "engine blocks are sized at the cited commit; GitHub pads, host runtime, systemd, and the host file are not LOC-scaled. "
-        "Traffic is GitHub’s 14-day window; velocity is a 30-day window. Health is computed from each dashboard snapshot, not from factory notifications."
+        "Traffic is GitHub’s 14-day window; velocity is a 30-day window. Operational assessment comes from the shared CLI classifier; project analytics are context, not incidents. Source timestamps and observation quality remain in each factory inspector; render time does not renew them."
     )
-    return TEMPLATE.read_text().replace("@@DATA@@", data(fleet)).replace("@@EYEBROW@@", eyebrow).replace("@@FOOTER@@", footer)
+    sections = {"DATA": data(fleet), "EYEBROW": eyebrow, "FOOTER": esc(footer)}
+    return re.sub(r"@@(DATA|EYEBROW|FOOTER)@@", lambda match: sections[match[1]], TEMPLATE.read_text())

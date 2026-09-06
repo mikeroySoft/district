@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-09-03T03:00:52Z"
+exclude-newer = "2026-09-04T16:56:15Z"
 
 [[package]]
 name = "district"

@@ -1,7 +1,7 @@
 """`district dashboard [--host 127.0.0.1] [--port 8760] [--no-open]`: the bird's-eye page (PRD §5.6, §5.9).
 
 stdlib http.server. `/` serves the District Atlas; `/api/fleet` returns the
-`status --json` shape plus the atlas DATA blocks; `/api/act` POST runs one
+safe operational projection plus atlas DATA blocks; `/api/act` POST runs one
 `district` subcommand as a subprocess and streams its output. The page never
 mutates state itself, so the CLI stays the audited path.
 """
@@ -20,6 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from district import atlas, host, status
+from district.dashboard_read import detect, safe_fleet, safe_text
 
 DEFAULT_PORT = 8760
 ACTIONS = ("add", "apply", "rm")
@@ -30,35 +31,109 @@ def is_loopback(addr: str) -> bool:
     try:
         return ipaddress.ip_address(addr).is_loopback
     except ValueError:
-        return addr == "localhost"
+        return False
 
 
-def act_allowed(client: str, explicit_host: bool, header: str | None) -> bool:
-    """Same rule as agent-factory: actions only from loopback unless --host opened the port on purpose,
-    and only with the custom header (forces a CORS preflight a stray page cannot pass)."""
-    return (is_loopback(client) or explicit_host) and header == "1"
+def valid_destination(destination: tuple, headers, *, origin_required: bool = False,
+                      document_navigation: bool = False) -> bool:
+    """Validate the direct numeric destination; DNS names/proxy metadata grant no trust."""
+    if any(k.lower() in ("forwarded", "x-forwarded", "x-real-ip")
+           or k.lower().startswith(("forwarded-", "x-forwarded-")) for k in headers):
+        return False
+    hostnames = {destination[0]}
+    if is_loopback(destination[0]):
+        hostnames.add("localhost")
+    authorities = {f"{'[' + h + ']' if ':' in h else h}:{destination[1]}" for h in hostnames}
+    if destination[1] == 80:
+        authorities.update(hostnames)
+    hosts = headers.get_all("Host", [])
+    origins = headers.get_all("Origin", [])
+    if len(hosts) != 1 or hosts[0] not in authorities or len(origins) > 1:
+        return False
+    if origins and origins[0] != f"http://{hosts[0]}":
+        return False
+    if origin_required and not origins:
+        return False
+    sites = headers.get_all("Sec-Fetch-Site", [])
+    modes = headers.get_all("Sec-Fetch-Mode", [])
+    destinations = headers.get_all("Sec-Fetch-Dest", [])
+    if len(sites) > 1 or len(modes) > 1 or len(destinations) > 1:
+        return False
+    # External links may open the viewing document, not fetch its data or embed it.
+    # Management/detect never enable this exception; absent metadata still relies on
+    # actual peer/destination, exact Host/Origin and the independent CSRF header.
+    return (not sites or sites[0] in ("same-origin", "none")
+            or (document_navigation and sites == ["cross-site"]
+                and modes == ["navigate"] and destinations == ["document"]))
+
+
+def act_allowed(client: str, destination: tuple, headers, *, csrf: bool = True, origin_required: bool = True) -> bool:
+    """Direct loopback only; headers prove request intent, never client identity."""
+    if not is_loopback(client) or not is_loopback(destination[0]):
+        return False
+    return (valid_destination(destination, headers, origin_required=origin_required)
+            and (not csrf or headers.get_all("X-District-Act", []) == ["1"]))
 
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"  # chunked streaming for /api/act
-    explicit_host = False  # main() sets True when --host was given and is not loopback
+
+    def _allowed(self, *, csrf: bool = True, origin_required: bool = True) -> bool:
+        return act_allowed(self.client_address[0], self.connection.getsockname(), self.headers,
+                           csrf=csrf, origin_required=origin_required)
+
+    def _forbidden(self) -> None:
+        self.close_connection = True
+        self._send(403, "application/json", b'{"ok":false,"output":"Trusted-local access required."}')
+
+    def parse_request(self) -> bool:
+        if not super().parse_request():
+            return False
+        # BaseHTTPRequestHandler normalizes // before returning; validate the wire
+        # target as well so absolute/authority forms cannot reach any route.
+        target = self.requestline.split()[1]
+        if not target.startswith("/") or target.startswith("//"):
+            self._forbidden()
+            return False
+        # Authorize before method/route dispatch, including future mutation handlers.
+        if self.command not in ("GET", "HEAD", "OPTIONS") and not self._allowed():
+            self._forbidden()
+            return False
+        if self.command in ("GET", "HEAD", "OPTIONS") and not valid_destination(
+                self.connection.getsockname(), self.headers,
+                document_navigation=self.command in ("GET", "HEAD") and urlparse(self.path).path == "/"):
+            self._forbidden()
+            return False
+        return True
 
     def do_GET(self) -> None:
         url = urlparse(self.path)
+        if url.path == "/api/capabilities":
+            allowed = self._allowed(csrf=False, origin_required=False)
+            self._send(200, "application/json", json.dumps({
+                "manage": allowed, "detect": allowed,
+                "reason": "Trusted-local management" if allowed else "Read-only: direct loopback access required; proxies are not trusted.",
+            }).encode())
+            return
         if url.path == "/":
-            self._send(200, "text/html; charset=utf-8", atlas.page(status.fleet(host.load())).encode())
+            self._send(200, "text/html; charset=utf-8", atlas.page(safe_fleet(status.fleet(host.load()))).encode())
         elif url.path == "/api/fleet":
-            fleet = status.fleet(host.load())
-            self._send(200, "application/json", json.dumps({"fleet": fleet, "data": atlas.data(fleet)}).encode())
+            raw = status.fleet(host.load())
+            fleet = safe_fleet(raw)
+            self._send(200, "application/json", json.dumps({
+                "fleet": fleet, "data": atlas.data(fleet),
+                "projection": {"omitted_factories": max(0, len(raw) - len(fleet))},
+            }).encode())
         elif url.path == "/api/detect":
-            # `add --dry-run` runs gh repo view (fork parent) and the check proposal; it writes nothing
-            target = parse_qs(url.query).get("target", [""])[0].strip()
-            if not target:
-                self._send(400, "text/plain; charset=utf-8", b"target required\n")
+            if not self._allowed(origin_required=False):
+                self._forbidden()
                 return
-            proc = subprocess.run([*DISTRICT, "add", "--dry-run", target], capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            body = {"ok": proc.returncode == 0, "output": proc.stdout + proc.stderr}
-            self._send(200, "application/json", json.dumps(body).encode())
+            targets = parse_qs(url.query).get("target", [])
+            if len(targets) != 1:
+                self._send(400, "application/json", b'{"ok":false,"output":"One target required."}')
+                return
+            code, body = detect(targets[0])
+            self._send(code, "application/json", json.dumps(body).encode())
         else:
             self.send_error(404)
 
@@ -66,20 +141,25 @@ class Handler(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/api/act":
             self.send_error(404)
             return
-        if not act_allowed(self.client_address[0], self.explicit_host, self.headers.get("X-District-Act")):
-            self.send_error(403)
-            return
         try:
-            args = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}").get("args")
+            lengths = self.headers.get_all("Content-Length", [])
+            if len(lengths) != 1 or self.headers.get_all("Transfer-Encoding", []):
+                raise ValueError("one Content-Length required")
+            length = int(lengths[0])
+            if not 0 < length <= 16384:
+                raise ValueError("request body must be 1..16384 bytes")
+            payload = json.loads(self.rfile.read(length))
+            args = payload.get("args") if isinstance(payload, dict) else None
             if not (isinstance(args, list) and args and all(isinstance(a, str) for a in args) and args[0] in ACTIONS):
                 raise ValueError(f"args must start with one of {', '.join(ACTIONS)}")
         except ValueError as exc:
+            self.close_connection = True
             self._send(400, "text/plain; charset=utf-8", f"{exc}\n".encode())
             return
         self._stream([*DISTRICT, *args])
 
     def _stream(self, argv: list[str]) -> None:
-        """Run argv and relay its stdout+stderr line by line (chunked), ending with `[exit N]`."""
+        """Stream bounded sanitized diagnostics, then the child's actual `[exit N]`."""
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Transfer-Encoding", "chunked")
@@ -90,13 +170,44 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
             self.wfile.flush()
 
-        chunk(f"$ district {' '.join(argv[len(DISTRICT):])}\n".encode())
+        preview = safe_text(" ".join(argv[len(DISTRICT):])) or "[details withheld]"
+        chunk(f"$ district {preview}\n".encode())
         proc = subprocess.Popen(
             argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
-        for line in proc.stdout:
-            chunk(line)
+        # Bound retained input as well as output. Never split an oversized logical
+        # line into public fragments: a credential could straddle the read boundary.
+        # Drain excess output rather than terminating an in-flight host operation.
+        with proc.stdout:
+            count = 0
+            private_key = False
+            withhold_rest = False
+            while line := proc.stdout.readline(8193):
+                if count == 128:
+                    chunk(b"[diagnostics truncated]\n")
+                    while proc.stdout.read(8192):
+                        pass
+                    break
+                count += 1
+                if len(line) > 8192:
+                    # A hidden fragment may begin a key/config block; do not guess
+                    # where it ends. Keep draining, then report the actual exit.
+                    withhold_rest = True
+                    while line and not line.endswith(b"\n"):
+                        line = proc.stdout.readline(8193)
+                    text = "[oversized diagnostic withheld]"
+                else:
+                    decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
+                    if '"""' in decoded or "'''" in decoded:
+                        withhold_rest = True
+                    if "BEGIN " in decoded and "PRIVATE KEY" in decoded:
+                        private_key = True
+                    text = "[details withheld]" if private_key or withhold_rest else safe_text(decoded) or "[details withheld]"
+                    if "END " in decoded and "PRIVATE KEY" in decoded:
+                        private_key = False
+                # Only the server emits unprefixed exit framing, never child text.
+                chunk(f"> {text}\n".encode())
         chunk(f"[exit {proc.wait()}]\n".encode())
         self.wfile.write(b"0\r\n\r\n")
 
@@ -154,7 +265,7 @@ def install(host_arg: str | None, port: int) -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district dashboard", description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--host", default=None, help="bind address (default 127.0.0.1); anything else also opens /api/act")
+    parser.add_argument("--host", default=None, help="viewing bind address (default 127.0.0.1); LAN clients are always read-only")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
     parser.add_argument("--install", action="store_true", help="write and enable district-dashboard.service and district-metrics.timer")
@@ -162,7 +273,6 @@ def main(argv: list[str]) -> int:
     if args.install:
         return install(args.host, args.port)
     bind = args.host or "127.0.0.1"
-    Handler.explicit_host = args.host is not None and not is_loopback(args.host)
     server = ThreadingHTTPServer((bind, args.port), Handler)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"district dashboard: listening on {bind}:{args.port}", flush=True)

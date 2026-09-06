@@ -90,15 +90,21 @@ def port_rows(data: dict) -> list[dict[str, str]]:
         if proc.returncode:
             rows.append(row("FAIL", f"dashboard port {port}", f"ss -ltnp exited {proc.returncode}"))
             continue
-        listeners = re.findall(r'users:\(\("([^"\n]+)",pid=(\d+)', proc.stdout)
-        if not listeners:
+        sockets = [line for line in proc.stdout.splitlines() if line.lstrip().startswith("LISTEN ")]
+        if not sockets:
             rows.append(row("PASS", f"dashboard port {port}", "free"))
             continue
         main_pid = systemctl("show", "-p", "MainPID", "--value", unit).stdout.strip()
-        foreign = next(((process, pid) for process, pid in listeners if pid != main_pid), None)
-        if foreign:
-            process, pid = foreign
-            rows.append(row("FAIL", f"dashboard port {port}", f"held by {process} (pid {pid}), not {unit}"))
+        for socket in sockets:
+            listeners = re.findall(r'\("([^"\n]+)",pid=(\d+)', socket)
+            if not listeners:
+                rows.append(row("FAIL", f"dashboard port {port}", f"held by an unidentified process, not {unit}"))
+                break
+            foreign = next(((process, pid) for process, pid in listeners if pid != main_pid), None)
+            if foreign:
+                process, pid = foreign
+                rows.append(row("FAIL", f"dashboard port {port}", f"held by {process} (pid {pid}), not {unit}"))
+                break
         else:
             rows.append(row("PASS", f"dashboard port {port}", f"held by {unit}"))
     return rows

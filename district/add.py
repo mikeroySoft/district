@@ -239,10 +239,21 @@ def installed_units(unit: str) -> dict:
 # ---------------------------------------------------------------- main
 
 
+def clone_destination(target: str, data: dict) -> Path:
+    name = target.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    return Path(os.path.expanduser(host.default(data, "clone_dir"))) / name
+
+
+def dashboard_port(slug: str, existing: dict, data: dict) -> int:
+    registered = host.repos(data)
+    used = {t.get("dashboard", {}).get("port") for s, t in registered.items() if s != slug}
+    port = registered.get(slug, {}).get("dashboard", {}).get("port") or existing.get("dashboard", {}).get("port")
+    return port if port and port not in used else host.next_port(data)
+
+
 def resolve_target(arg: str, data: dict) -> Path:
     if "://" in arg or arg.startswith("git@"):
-        name = arg.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-        dest = Path(os.path.expanduser(host.default(data, "clone_dir"))) / name
+        dest = clone_destination(arg, data)
         if not dest.exists():
             run(["gh", "repo", "clone", arg, str(dest)], check=True)
             print(f"cloned {arg} -> {dest}")
@@ -302,7 +313,7 @@ def dry_run(target: str, args: argparse.Namespace, data: dict) -> int:
     """Print what `add` would do — slug, port, fork parent, checks or lifted keys — and write nothing."""
     print("dry run: nothing written")
     if "://" in target or target.startswith("git@"):
-        dest = Path(os.path.expanduser(host.default(data, "clone_dir"))) / target.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        dest = clone_destination(target, data)
         if not dest.exists():
             slug = remote_slug(target)
             if not slug:
@@ -318,10 +329,8 @@ def dry_run(target: str, args: argparse.Namespace, data: dict) -> int:
     repo_file = root / CONFIG_NAME
     adopt = repo_file.exists()
     existing = tomllib.loads(repo_file.read_text()) if adopt else {}
-    table = host.repos(data).get(slug, {})
-    used = {t.get("dashboard", {}).get("port") for s, t in host.repos(data).items() if s != slug}
-    port = table.get("dashboard", {}).get("port") or existing.get("dashboard", {}).get("port")
-    print(f"repo: {slug} ({'adopt' if adopt else 'onboard'})\npath: {root}\ndashboard port: {port if port and port not in used else host.next_port(data)}")
+    port = dashboard_port(slug, existing, data)
+    print(f"repo: {slug} ({'adopt' if adopt else 'onboard'})\npath: {root}\ndashboard port: {port}")
     parent = fork_parent(slug)
     print(f"fork of: {parent}" if parent else "not a fork")
     if adopt:
@@ -369,10 +378,7 @@ def main(argv: list[str]) -> int:
     # 1. registry entry first: both paths depend on the port and path being persisted
     table = host.repo_table(data, slug)
     table["path"] = str(root)
-    used = {t.get("dashboard", {}).get("port") for s, t in registered.items() if s != slug}
-    port = table.get("dashboard", {}).get("port") or existing.get("dashboard", {}).get("port")
-    if not port or port in used:
-        port = host.next_port(data)
+    port = dashboard_port(slug, existing, data)
     table.setdefault("dashboard", {})["port"] = port
     host.save(data)
     print(f"registered {slug} at {root} (dashboard port {port})")
