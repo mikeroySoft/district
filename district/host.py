@@ -1,6 +1,6 @@
-"""The host file `$XDG_CONFIG_HOME/agent-factory/config.toml` is the registry.
+"""The host file `$XDG_CONFIG_HOME/factory/config.toml` is the registry.
 
-agent-factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
+Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
 clone_dir / factory_source / min_package_age / max_failed_passes, and per repo
 `path`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
@@ -32,7 +32,7 @@ class DistrictError(SystemExit):
 
 def path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
-    return Path(base) / "agent-factory" / "config.toml"
+    return Path(base) / "factory" / "config.toml"
 
 
 def unit_dir() -> Path:

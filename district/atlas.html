@@ -55,10 +55,10 @@
   .kpi .k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--faint); }
   .kpi .v { font-size: 20px; font-weight: 600; color: var(--ink); line-height: 1.2; margin-top: 2px; }
   .kpi .s { font-size: 11px; color: var(--muted); }
-  .health { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
-  .health.healthy { background: #4CBB6C; } .health.attention { background: #E3A83B; } .health.failing { background: #E8493E; }
+  .assessment { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .assessment.normal { background: #4CBB6C; } .assessment.attention { background: #E3A83B; } .assessment.unknown { background: #8A93A5; }
   #inspector table.kv { width: 100%; border-collapse: collapse; font-size: 12px; margin: 10px 0 4px; }
-  #inspector table.kv td { padding: 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+  #inspector table.kv td { padding: 3px 0; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
   #inspector table.kv td:first-child { color: var(--muted); width: 38%; font-family: var(--mono); font-size: 11px; }
   .thesis code, p code, li code, td code {
     font-family: var(--mono); font-size: 0.86em; color: var(--ink);
@@ -149,7 +149,7 @@
   }
   #manage button:hover { border-color: var(--muted); }
   #manage button.danger { color: var(--cli); }
-  #manage button:disabled { opacity: 0.5; cursor: wait; }
+  #manage button:disabled, #manage input:disabled, #manage select:disabled { opacity: 0.5; cursor: not-allowed; }
   #manage pre {
     font-family: var(--mono); font-size: 11px; line-height: 1.45; color: var(--muted); white-space: pre-wrap;
     background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 8px; margin: 8px 0 0;
@@ -157,6 +157,7 @@
   }
   #manage pre:empty { display: none; }
   #manage .note { font-size: 11px; color: var(--faint); margin: 8px 0 0; }
+  #manage .capability { font-size: 12px; color: var(--ink); margin: 0 0 12px; }
 
   section.deep { margin-top: 48px; }
   section.deep > h2 {
@@ -270,7 +271,7 @@
       Every tall building is a managed repository — a <em>factory</em> — with height proportional to its
       lines of code. The low-rise blocks are the shared engine (agent-factory) and the District control
       tower that keeps every factory on the same rails. Roads are real control and data paths, cited to
-      the line that implements them. Click a factory for its health rollup and delivery metrics.
+      the line that implements them. Click a factory for its operational assessment, evidence and project metrics.
     </p>
     <div class="kpis" id="kpis"></div>
   </div>
@@ -311,37 +312,38 @@
           <div id="legend-paths"></div>
           <p class="legend-note">Moving dots are payloads: timer ticks, claimed tickets, gate reports, review verdicts, merges, and dashboard snapshots in transit.</p>
         </div>
-        <div class="scene-hint">hover a road or building = isolate its connections · click = inspect · drag = pan · scroll = zoom · factory height ∝ LOC · ● health: green healthy · amber attention · red failing</div>
+        <div class="scene-hint">hover a road or building = isolate its connections · click = inspect · drag = pan · scroll = zoom · factory height ∝ LOC · assessment: green normal · amber attention · gray unknown</div>
       </div>
     </div>
     <aside>
       <div class="box" id="inspector" aria-live="polite"></div>
       <div class="box" id="manage">
         <h2>Manage</h2>
+        <p class="capability" id="capability" role="status">Read-only — checking trusted-local access…</p>
         <form id="f-add">
           <h3>Add a repository</h3>
-          <label>Path or GitHub URL <input name="target" required placeholder="~/dev/org/repo or https://github.com/org/repo"></label>
-          <div class="row"><button type="button" id="detect">Detect</button></div>
-          <pre id="detect-out"></pre>
-          <label>Checks needing single-tenant hardware (comma-separated names) <input name="exclusive" placeholder="tests,clippy"></label>
-          <div class="row"><button type="submit">Add / adopt</button></div>
+          <label>Path or GitHub URL <input name="target" required disabled placeholder="~/dev/org/repo or https://github.com/org/repo"></label>
+          <div class="row"><button type="button" id="detect" disabled>Detect</button></div>
+          <pre id="detect-out" aria-live="polite"></pre>
+          <label>Checks needing single-tenant hardware (comma-separated names) <input name="exclusive" disabled placeholder="tests,clippy"></label>
+          <div class="row"><button type="submit" disabled>Add / adopt</button></div>
         </form>
         <h3>Fleet</h3>
         <div class="row">
-          <button type="button" data-act='["apply"]'>Apply</button>
-          <button type="button" data-act='["apply","--upgrade"]'>Upgrade engine</button>
+          <button type="button" data-act='["apply"]' disabled>Apply</button>
+          <button type="button" data-act='["apply","--upgrade"]' disabled>Upgrade engine</button>
         </div>
         <form id="f-one">
           <h3>One factory</h3>
-          <label>Factory <select name="slug"></select></label>
+          <label>Factory <select name="slug" disabled></select></label>
           <div class="row">
-            <button type="button" data-op="apply">Apply</button>
-            <button type="button" data-op="reset">Reset capped timer</button>
-            <button type="button" data-op="rm" class="danger">Remove</button>
+            <button type="button" data-op="apply" disabled>Apply</button>
+            <button type="button" data-op="reset" disabled>Reset capped timer</button>
+            <button type="button" data-op="rm" class="danger" disabled>Remove</button>
           </div>
         </form>
         <pre id="act-out" aria-live="polite"></pre>
-        <p class="note">Every action runs the <code>district</code> CLI on the host and streams its output; this page never changes state itself.</p>
+        <p class="note">LAN URLs are read-only, even on this host. Manage or detect only through direct HTTP to numeric loopback or localhost with the actual server port; reverse proxies and forwarded headers are unsupported. Authorized actions run the <code>district</code> CLI on the host.</p>
       </div>
     </aside>
   </div>
@@ -562,6 +564,7 @@ function drawPayloads(svg) {
   }
 }
 function wireNode(svg, g, b) {
+  if (b.assessment) g.setAttribute('aria-label', b.name + ': ' + b.assessment + '; operating state: ' + b.operating_state + '; execution state: ' + b.execution_state + '; observation: ' + b.observation);
   g.addEventListener('click', () => select(b.id));
   g.addEventListener('keydown', e => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); select(b.id); }
@@ -575,17 +578,20 @@ function nodeLabel(x, y, b) {
                          fill: shade(c, 1.55),
                          'font-family': 'ui-monospace, SF Mono, Menlo, Consolas, monospace',
                          'paint-order': 'stroke', stroke: '#0E1219' }, BLDG_LABELS);
-  if (b.health) {
+  if (b.assessment) {
     const dot = document.createElementNS(SVGNS, 'tspan');
-    dot.setAttribute('fill', HEALTH_COLOR[b.health]); dot.setAttribute('stroke', 'none');
+    dot.setAttribute('fill', ASSESSMENT_COLOR[b.assessment]); dot.setAttribute('stroke', 'none');
     dot.textContent = '\u25CF ';
     t.appendChild(dot);
     const nm = document.createElementNS(SVGNS, 'tspan'); nm.textContent = b.name; t.appendChild(nm);
+    const title = el('title', {}, t); title.textContent = b.assessment;
   } else t.textContent = b.name;
 }
-function finishScene(svg, key) {
-  const bb = svg.getBBox();
-  let box = [bb.x - 16, bb.y - 16, bb.width + 32, bb.height + 32];
+function finishScene(svg, key, ground) {
+  const bb = svg.getBBox(), xs = ground.map(p => p[0]), ys = ground.map(p => p[1]);
+  const x0 = Math.min(bb.x, ...xs), y0 = Math.min(bb.y, ...ys);
+  const x1 = Math.max(bb.x + bb.width, ...xs), y1 = Math.max(bb.y + bb.height, ...ys);
+  let box = [x0 - 16, y0 - 16, x1 - x0 + 32, y1 - y0 + 32];
   if (key && ISO_BOX[key]) {
     const o = ISO_BOX[key];
     const x0 = Math.min(box[0], o[0]), y0 = Math.min(box[1], o[1]);
@@ -848,7 +854,6 @@ function drawBuilding(svg, b) {
   return g;
 }
 function buildIso(svg) {
-  const G = { x0: -1.8, y0: -1.8, x1: 36.5, y1: 24.0 };
   const corners = [[G.x0, G.y0], [G.x1, G.y0], [G.x1, G.y1], [G.x0, G.y1]];
   el('polygon', { points: pts(corners.map(q => isoP(q[0], q[1], 0))),
                   fill: '#0E1219', stroke: '#202836', 'stroke-width': 1 }, svg);
@@ -888,12 +893,11 @@ function buildIso(svg) {
   svg.appendChild(labelLayer);
   svg.appendChild(BLDG_LABELS);
   drawPayloads(svg);
-  finishScene(svg, 'iso');
+  finishScene(svg, 'iso', corners.map(q => isoP(q[0], q[1], 0)));
 }
 
 /* ================= Theme 2: flat map (dark chart) ================= */
 function buildMap(svg) {
-  const G = { x0: -1.8, y0: -1.8, x1: 36.5, y1: 24.0 };
   el('rect', { x: G.x0 * FS, y: G.y0 * FS, width: (G.x1 - G.x0) * FS, height: (G.y1 - G.y0) * FS,
                fill: '#0A141E', stroke: '#202836', 'stroke-width': 1 }, svg);
   const grat = el('g', { stroke: '#FFFFFF', 'stroke-opacity': 0.04, 'stroke-width': 1 }, svg);
@@ -933,12 +937,11 @@ function buildMap(svg) {
   svg.appendChild(labelLayer);
   svg.appendChild(BLDG_LABELS);
   drawPayloads(svg);
-  finishScene(svg, null);
+  finishScene(svg, null, [[G.x0, G.y0], [G.x1, G.y0], [G.x1, G.y1], [G.x0, G.y1]].map(q => flat(q[0], q[1])));
 }
 
 /* ================= Theme 3: deep space ================= */
 function buildSpace(svg) {
-  const G = { x0: -1.8, y0: -1.8, x1: 36.5, y1: 24.0 };
   const corners = [[G.x0, G.y0], [G.x1, G.y0], [G.x1, G.y1], [G.x0, G.y1]];
   el('polygon', { points: pts(corners.map(q => isoP(q[0], q[1], 0))),
                   fill: '#05070D', stroke: '#1A2334', 'stroke-width': 1 }, svg);
@@ -1010,7 +1013,7 @@ function buildSpace(svg) {
   svg.appendChild(labelLayer);
   svg.appendChild(BLDG_LABELS);
   drawPayloads(svg);
-  finishScene(svg, 'space');
+  finishScene(svg, 'space', corners.map(q => isoP(q[0], q[1], 0)));
 }
 
 /* ================= Theme switching + view widget ================= */
@@ -1106,13 +1109,29 @@ function buildLegend() {
 }
 
 /* ================= Inspector ================= */
+function escapeHTML(value) {
+  return String(value).replace(/[&<>"']/g, ch => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[ch]));
+}
+function factoryURL(port) {
+  const hostname = location.hostname;
+  if (!['http:', 'https:'].includes(location.protocol) || !Number.isInteger(port) || port < 1 || port > 65535 ||
+      !/^(?:[A-Za-z0-9.-]+|\[[A-Fa-f0-9:.]+\])$/.test(hostname)) return null;
+  try {
+    const url = new URL('http://' + hostname + '/');
+    if (url.hostname !== hostname) return null;
+    url.port = String(port);
+    url.hash = 'ops';
+    return url.href;
+  } catch (_) { return null; }
+}
 function ghLink(f) {
   // f[0] = 'owner/repo@sha/path' → github.com/owner/repo/blob/sha/path; display = repo/path
   const m = /^([^@]+)@([0-9a-f]+)\/(.+)$/.exec(f[0]);
-  const href = m ? GH + m[1] + '/blob/' + m[2] + '/' + m[3] + '#L' + f[1] : GH + f[0] + '#L' + f[1];
+  const path = m ? m[1] + '/blob/' + m[2] + '/' + m[3] : f[0];
+  const href = GH + path.split('/').map(encodeURIComponent).join('/') + '#L' + encodeURIComponent(f[1]);
   const shown = m ? m[1].split('/')[1] + '/' + m[3] : f[0];
-  return '<a href="' + href + '" target="_blank" rel="noopener">' + shown + ':' + f[1] + '</a>' +
-         (f[2] ? ' <span style="color:var(--faint)">— ' + f[2] + '</span>' : '');
+  return '<a href="' + escapeHTML(href) + '" target="_blank" rel="noopener">' + escapeHTML(shown + ':' + f[1]) + '</a>' +
+         (f[2] ? ' <span style="color:var(--faint)">— ' + escapeHTML(f[2]) + '</span>' : '');
 }
 function select(id) {
   selectedId = id;
@@ -1133,12 +1152,22 @@ function select(id) {
   insp.innerHTML =
     '<h2>Inspector</h2>' +
     '<span class="cat-chip" style="background:' + c.color + '">' + c.name + '</span>' +
-    '<h3>' + b.name + '</h3>' +
-    '<p>' + b.blurb + '</p>' +
+    '<h3>' + escapeHTML(b.name) + '</h3>' +
+    '<p>' + escapeHTML(b.blurb) + '</p>' +
     (b.kpis ? '<table class="kv">' + b.kpis.map(k => '<tr><td>' + k[0] + '</td><td>' + k[1] + '</td></tr>').join('') + '</table>' : '') +
     (b.conn ? '<p style="color:var(--muted)">' + b.conn + '</p>' : '') +
     '<ul class="files">' + b.files.map(f => '<li>' + ghLink(f) + '</li>').join('') + '</ul>' +
     conn;
+  for (const placeholder of insp.querySelectorAll('[data-factory-port]')) {
+    const href = factoryURL(Number(placeholder.dataset.factoryPort));
+    if (!href) continue;
+    const link = document.createElement('a');
+    link.href = href;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.textContent = 'Open Factory operations · ' + new URL(href).host;
+    placeholder.replaceWith(link);
+  }
 }
 function defaultInspector() {
   document.getElementById('inspector').innerHTML =
@@ -1152,11 +1181,12 @@ function defaultInspector() {
     '<li>Next pass, the merge stage lands one PR when gate PASS, approval, green CI, and a head containing main all agree — <code>dispatch.py:632</code>. Anything else becomes <code>ready-for-human</code> — <code>:289</code>.</li>' +
     '</ol>' +
     '<h3>What District sees</h3>' +
-    '<p>None of those notifications. District reads one document per factory — <code>factory dashboard --json</code> — and rolls it up: ' +
-    '<span class="health failing"></span><b>failing</b> = timer inactive or District-disabled, last pass failed, snapshot errors, or any consecutive failed passes; ' +
-    '<span class="health attention"></span><b>attention</b> = open <code>ready-for-human</code> tickets, a parked upstream sync, bounce rate over 33%, or doctor warnings; ' +
-    '<span class="health healthy"></span><b>healthy</b> = none of the above.</p>' +
-    '<p style="color:var(--muted)">Click a factory for its health signals, codebase size, velocity, defect resolution, and traffic. The lower panels list every citation.</p>';
+    '<p>Atlas displays the same classification as CLI status: operating state, execution state, observation quality and evidence-backed findings. ' +
+    '<span class="assessment normal" aria-hidden="true"></span><b>normal</b>, ' +
+    '<span class="assessment attention" aria-hidden="true"></span><b>attention</b> and ' +
+    '<span class="assessment unknown" aria-hidden="true"></span><b>unknown</b> are shared classifier assessments, not separate Atlas rules.</p>' +
+    '<p>Missing execution telemetry stays unknown. Fetch failures do not prove dispatch stopped; source times, not page render time, determine freshness. Project work and quality metrics remain context, not operational findings.</p>' +
+    '<p style="color:var(--muted)">Click a factory for operating and execution state, observation sources, finding evidence and impact, then codebase size, velocity, defect resolution and traffic. The lower panels retain the code citations.</p>';
 }
 
 /* ================= Deep sections ================= */
@@ -1171,7 +1201,7 @@ function buildDistricts() {
     const members = B.filter(b => b.cat === catKey);
     html += '<p class="d-sub">' + members.length + ' building' + (members.length > 1 ? 's' : '') + '</p>';
     for (const b of members) {
-      html += '<div class="bldg"><h4>' + b.name + '</h4><p>' + b.blurb + '</p>' +
+      html += '<div class="bldg"><h4>' + escapeHTML(b.name) + '</h4><p>' + escapeHTML(b.blurb) + '</p>' +
               '<div class="cites">' + b.files.map(f => ghLink(f)).join('<br>') + '</div></div>';
     }
     card.innerHTML = html;
@@ -1217,15 +1247,44 @@ buildKpis();
     const o = document.createElement('option'); o.value = b.slug; o.textContent = b.slug; sel.appendChild(o);
   }
   const out = document.getElementById('act-out');
-  const buttons = () => document.querySelectorAll('#manage button');
+  const capability = document.getElementById('capability');
+  let access = { manage: false, detect: false, reason: 'Checking trusted-local access.' };
+  let busy = false;
+  function updateControls() {
+    document.querySelectorAll('#manage button, #manage input, #manage select').forEach(control => {
+      const allowed = control.id === 'detect' ? access.detect :
+        control.name === 'target' ? access.manage || access.detect : access.manage;
+      control.disabled = busy || !allowed;
+    });
+    capability.textContent = (access.manage ? 'Trusted-local — ' : 'Read-only — ') + access.reason;
+  }
+  function refuse(reason) {
+    access = { manage: false, detect: false, reason };
+    updateControls();
+  }
+  fetch('/api/capabilities').then(async r => {
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if (typeof j.manage !== 'boolean' || typeof j.detect !== 'boolean' || typeof j.reason !== 'string') {
+      throw new Error('invalid capability response');
+    }
+    access = j;
+    updateControls();
+  }).catch(e => refuse('Access check failed: ' + e.message + '. Reload to retry.'));
   async function act(args) {
+    if (busy || !access.manage) return;
     if (!confirm('Run on this host:\n\n  district ' + args.join(' ') + '\n\nContinue?')) return;
-    buttons().forEach(b => b.disabled = true);
+    busy = true;
+    updateControls();
     out.textContent = '';
     try {
       const r = await fetch('/api/act', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-District-Act': '1' },
                                           body: JSON.stringify({ args }) });
-      if (!r.ok) { out.textContent = 'refused: HTTP ' + r.status + ' ' + (await r.text()); return; }
+      if (!r.ok) {
+        out.textContent = 'refused: HTTP ' + r.status + ' ' + (await r.text());
+        if (r.status === 403) refuse('Management was refused. Reload to check trusted-local access.');
+        return;
+      }
       const reader = r.body.getReader(); const dec = new TextDecoder();
       for (;;) {
         const { value, done } = await reader.read();
@@ -1234,16 +1293,28 @@ buildKpis();
       }
       out.textContent += '\nreload the page to see the new fleet state.';
     } catch (e) { out.textContent += '\nerror: ' + e.message; }
-    finally { buttons().forEach(b => b.disabled = false); }
+    finally { busy = false; updateControls(); }
   }
   document.getElementById('detect').addEventListener('click', async () => {
+    if (busy || !access.detect) return;
     const target = document.querySelector('#f-add input[name=target]').value.trim();
     const det = document.getElementById('detect-out');
     if (!target) { det.textContent = 'enter a path or URL first'; return; }
     det.textContent = 'detecting…';
-    const r = await fetch('/api/detect?target=' + encodeURIComponent(target));
-    const j = await r.json();
-    det.textContent = j.output;
+    busy = true;
+    updateControls();
+    try {
+      const r = await fetch('/api/detect?target=' + encodeURIComponent(target), { headers: { 'X-District-Act': '1' } });
+      const text = await r.text();
+      let message = text;
+      try {
+        const j = JSON.parse(text);
+        message = [j.output, j.error, j.reason].find(value => typeof value === 'string') || text;
+      } catch (_) { /* A refusal may be plain text rather than JSON. */ }
+      det.textContent = r.ok ? message : 'refused: HTTP ' + r.status + ' ' + message;
+      if (r.status === 403) refuse('Detection was refused. Reload to check trusted-local access.');
+    } catch (e) { det.textContent = 'error: ' + e.message; }
+    finally { busy = false; updateControls(); }
   });
   document.getElementById('f-add').addEventListener('submit', ev => {
     ev.preventDefault();

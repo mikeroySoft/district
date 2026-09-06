@@ -99,13 +99,13 @@ def upgrade(data: dict, active_timers: list[str]) -> None:
         systemctl("disable", "--now", timer)
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
     wait_inactive([t.removesuffix(".timer") + ".service" for t in active_timers], SERVICE_WAIT)
-    proc = run(["uv", "tool", "install", "--reinstall", "--from", str(src), "agent-factory"])
+    proc = run(["uv", "tool", "install", "--reinstall", "--from", str(src), "factory"])
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         raise DistrictError("uv tool install failed")
     version = run(["factory", "--version"], check=True).stdout.strip()
-    print(f"installed agent-factory {version} from {src}")
+    print(f"installed factory {version} from {src}")
     for slug in host.repos(data):
         dash = f"{host.unit_name(slug)}-dashboard.service"
         if (host.unit_dir() / dash).exists():
@@ -207,7 +207,7 @@ def line(row: dict, status: str) -> str:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district apply", description=__doc__.split("\n", 1)[0])
     parser.add_argument("slug", nargs="?", help="one repo (owner/name or basename); default all")
-    parser.add_argument("--upgrade", action="store_true", help="reinstall agent-factory from [defaults].factory_source first")
+    parser.add_argument("--upgrade", action="store_true", help="reinstall factory from [defaults].factory_source first")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
     args = parser.parse_args(argv)
     from district import metrics

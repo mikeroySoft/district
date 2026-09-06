@@ -1,0 +1,6 @@
+{
+  "source": "original controlled ten-scenario adapter, unchanged source clock",
+  "api_status": 200,
+  "classifications_match_cli_receipt": 10,
+  "credential_canary_absent": true
+}
