@@ -132,7 +132,7 @@ def _runtime_error(data: dict) -> str | None:
 
 def runtime_source(data: dict, slug: str, cadence: float = RUNTIME_INTERVAL) -> tuple[dict, dict]:
     """Adapt the pinned Factory schema-1 wire contract to D01 observations."""
-    if data.get("schema_version") != 1:
+    if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
         raise UnsupportedRuntime(f"unsupported schema {data.get('schema_version')!r}")
     required = ("generated_at", "repo", "dispatcher", "executions", "resources", "events", "history", "errors")
     if any(key not in data for key in required) or data["repo"] != slug:

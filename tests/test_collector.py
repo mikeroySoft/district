@@ -123,7 +123,7 @@ class FleetCollectorTest(unittest.TestCase):
             malformed_entry = collector.fleet()["acme/fast"]
             self.assertEqual(malformed_entry["observation"], "stale")
             self.assertIn("runtime history malformed", malformed_entry["sources"][0]["error"])
-            collector.accept_runtime("acme/fast", runtime("acme/fast", schema=2))
+            collector.accept_runtime("acme/fast", runtime("acme/fast", schema=True))
             self.assertEqual(collector.fleet()["acme/fast"]["observation"], "unavailable")
             self.assertIn("unsupported schema", collector.fleet()["acme/fast"]["sources"][0]["error"])
 
