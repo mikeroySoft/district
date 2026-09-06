@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>District — fleet manager for agent-factory</title>
-<meta name="description" content="District runs many agent-factory pipelines on one host: registry, ports, host config, upgrades, failure caps, and one bird's-eye dashboard.">
+<title>District — fleet manager for mikeroySoft/factory</title>
+<meta name="description" content="District runs many mikeroySoft/factory pipelines on one host: registry, ports, host config, upgrades, failure caps, and one bird's-eye dashboard.">
 <link rel="stylesheet" href="mikeroysoft.css">
 <style>
   * { box-sizing: border-box; }
@@ -113,7 +113,7 @@
   <header class="hero">
     <div>
       <h1>One host.<br>Many factories.<br><em>Shared infrastructure.</em></h1>
-      <p><a href="https://github.com/mikeroySoft/factory">agent-factory</a> runs an autonomous ticket pipeline for one repository. District runs the fleet: the registry, ports, host config, engine upgrades, failure caps, and a single bird's-eye view — so no factory has to manage the roads and power itself.</p>
+      <p><a href="https://github.com/mikeroySoft/factory">mikeroySoft/factory</a> runs an autonomous ticket pipeline for one repository. District runs the fleet: the registry, ports, host config, engine upgrades, failure caps, and a single bird's-eye view — so no factory has to manage the roads and power itself.</p>
       <div class="actions">
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
@@ -152,7 +152,7 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
       <div class="card">
         <h3><span class="dot" style="background:var(--accent)"></span>District owns — host-side, never committed</h3>
         <ul>
-          <li>agent-factory install and upgrade</li>
+          <li>mikeroySoft/factory install and upgrade</li>
           <li>triage endpoint and model</li>
           <li>worker / reviewer argv defaults</li>
           <li>dashboard port allocation, timer cadence, bind host</li>
@@ -184,11 +184,12 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
 
   <section id="commands">
     <div class="kicker">Commands</div>
-    <h2>Six verbs. Each one shells out to <code>factory</code>, <code>gh</code>, and <code>git</code>.</h2>
-    <p class="lede">District uses only the public agent-factory CLI and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
+    <h2>Seven verbs. Each one shells out to the host tools it checks or manages.</h2>
+    <p class="lede">District never imports from mikeroySoft/factory and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
       <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
       <div class="k">district apply</div><div class="v">Reconcile the host to the registry. Re-renders units, ensures labels, runs <code>doctor</code>, enforces the failure cap and supply-chain policy. <code>--upgrade</code> reinstalls the engine so every timer picks it up on the next tick.</div>
+      <div class="k">district doctor</div><div class="v">Check District's host prerequisites, registered repository remotes, dashboard ports, package policy, and units. Reports every check as <code>PASS</code>, <code>WARN</code>, or <code>FAIL</code>.</div>
       <div class="k">district status</div><div class="v">One table, one screen, one exit code. Version, timer, last pass, tickets in flight, escalations, first-gate pass %, bounce rate, upstream drift.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
       <div class="k">district dashboard</div><div class="v">Serve the District Atlas. <code>--host 0.0.0.0</code> enables read-only LAN viewing at a numeric-IP URL with the actual port, never remote management; a LAN URL stays read-only even on the host. Manage and detect require direct HTTP to numeric loopback or <code>localhost</code> with the actual server port (default <code>http://127.0.0.1:8760</code>). DNS aliases and reverse proxies are unsupported; forwarded headers fail closed. Authorized actions run the CLI as a subprocess with bounded sanitized diagnostics.</div>
@@ -291,21 +292,21 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
   <section id="install">
     <div class="kicker">Install</div>
     <h2>Python 3.11+, one dependency, a stdlib HTTP server.</h2>
-    <p class="lede">Requires <a href="https://github.com/mikeroySoft/factory">agent-factory</a> on the host and the <code>gh</code> CLI authenticated.</p>
+    <p class="lede">Requires <a href="https://github.com/mikeroySoft/factory">mikeroySoft/factory</a> on the host and the <code>gh</code> CLI authenticated.</p>
     <div class="term">
       <div class="bar"><span>shell</span><span></span></div>
 <pre><span class="p">$</span> npx skills add mikeroysoft/district
 <span class="p">$</span> uv tool install git+https://github.com/mikeroySoft/district
 <span class="p">$</span> district add ~/dev/owner/repo        <span class="c"># or a GitHub URL; adopts an existing .factory.toml</span>
 <span class="p">$</span> district apply                        <span class="c"># reconcile units, labels, doctor, caps, policy</span>
-<span class="p">$</span> district dashboard --install          <span class="c"># district-dashboard.service + hourly metrics timer</span>
+<span class="p">$</span> district dashboard --install          <span class="c"># dashboard + hourly metrics and apply timers</span>
 <span class="p">$</span> district status</pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/agent-factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
   </section>
 
   <footer>
-    <span>District — fleet manager for agent-factory installs on one host.</span>
+    <span>District — fleet manager for mikeroySoft/factory installs on one host.</span>
     <span><a href="https://github.com/mikeroySoft/district">github.com/mikeroySoft/district</a></span>
   </footer>
 </div>

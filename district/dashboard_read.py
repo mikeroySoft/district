@@ -2,7 +2,7 @@
 
 `safe_fleet` retains Atlas's operational fields, not arbitrary snapshot/config keys.
 `detect` is for an already-authorized local operator: it reads Git metadata and
-bounded repository markers, never clones, runs doctor, or executes gate commands.
+bounded repository markers and workflows, never clones, runs doctor, or executes gate commands.
 Its text contains only repository identity, onboarding mode, check names/sources,
 exclusivity and host-owned key names. Paths, commands and configuration values
 are deliberately withheld. CLI/status consumers keep their existing full data.
@@ -356,10 +356,10 @@ def _probe(argv: list[str], cwd: Path | None = None) -> str:
     return proc.stdout.strip()
 
 
-def _marker(path: Path) -> str | None:
+def _marker(path: Path, *, dir_fd: int | None = None) -> str | None:
     """Read a small regular file only; reject symlinks, devices and oversized markers."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dir_fd)
     except FileNotFoundError:
         return None
     with os.fdopen(fd, "rb") as stream:
@@ -370,6 +370,36 @@ def _marker(path: Path) -> str | None:
     if len(data) > LIMIT:
         raise ValueError("oversized marker")
     return data.decode("utf-8")
+
+
+def _copy_workflows(root: Path, markers: Path) -> None:
+    """Copy bounded workflow inputs without following directory or file symlinks."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        github_fd = os.open(root / ".github", flags)
+    except FileNotFoundError:
+        return
+    try:
+        try:
+            workflows_fd = os.open("workflows", flags, dir_fd=github_fd)
+        except FileNotFoundError:
+            return
+        try:
+            with os.scandir(workflows_fd) as entries:
+                names = [entry.name for entry in islice(entries, 65)]
+            if len(names) > 64:
+                raise ValueError("too many workflow entries")
+            destination = markers / ".github" / "workflows"
+            destination.mkdir(parents=True)
+            for name in sorted(names):
+                if name.endswith((".yml", ".yaml")):
+                    content = _marker(Path(name), dir_fd=workflows_fd)
+                    if content is not None:
+                        (destination / name).write_text(content)
+        finally:
+            os.close(workflows_fd)
+    finally:
+        os.close(github_fd)
 
 
 def detect(target: str) -> tuple[int, dict]:
@@ -414,6 +444,7 @@ def detect(target: str) -> tuple[int, dict]:
                         content = _marker(root / name)
                         if content is not None:
                             (markers / name).write_text(content)
+                    _copy_workflows(root, markers)
                     checks = add.propose_checks(markers)
         lines = ["read-only preview: nothing written", f"repo: {slug} ({mode})"]
         port = add.dashboard_port(slug, existing, data)
@@ -437,7 +468,13 @@ def detect(target: str) -> tuple[int, dict]:
             for check in checks[:64]:
                 check = _dict(check)
                 name = _match(check.get("name"), LABEL) or "name withheld"
-                source = f" from {check['source']}" if mode == "onboard" else ""
+                source = ""
+                if mode == "onboard":
+                    origin = check["source"]
+                    if origin.startswith(".github/workflows/"):
+                        filename, _, line = origin.removeprefix(".github/workflows/").rpartition(":")
+                        origin = f".github/workflows/{filename}:{line}" if _match(filename, LABEL) and line.isdecimal() else "workflow source withheld"
+                    source = f" from {origin}"
                 lines.append(f"  {name}{' (exclusive)' if check.get('exclusive') is True else ''}{source}")
             if not checks:
                 lines.append("  none detected" if mode == "onboard" else "  none committed")
