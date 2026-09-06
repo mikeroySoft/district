@@ -169,6 +169,97 @@ class FleetCollectorTest(unittest.TestCase):
                          ["factory.runtime", "factory.snapshot"])
 
 
+    def test_nonzero_and_malformed_runtime_preserve_evidence_until_explicitly_unsupported(self):
+        collector = status.FleetCollector({"repo": self.tables})
+        event = {"event_id": "retained", "sequence": 1}
+        collector.accept_runtime("acme/fast", runtime("acme/fast", events=[event]))
+        for code, output, stderr in [
+                (1, "", "git probe timed out"),
+                (2, "", "another usage failure"),
+                (0, "{", ""),
+                (0, '{"schema_version": 1}', "")]:
+            with mock.patch.object(status, "run", return_value=subprocess.CompletedProcess(
+                    [], code, output, stderr)), mock.patch.object(status.metrics, "read", return_value=None):
+                collector.collect_runtime("acme/fast")
+                item = collector.read()[1]["acme/fast"]
+            self.assertEqual(item["executions"][0]["id"], "acme/fast/worker")
+            self.assertEqual(item["sources"][0]["observed_at"], STAMP)
+            self.assertEqual(item["activity"]["events"], [event])
+            self.assertIsNotNone(item["sources"][0]["error"])
+        with mock.patch.object(status, "run", return_value=subprocess.CompletedProcess(
+                [], 2, "", "factory: error: unrecognized arguments: --runtime-json")), \
+             mock.patch.object(status.metrics, "read", return_value=None):
+            collector.collect_runtime("acme/fast")
+            item = collector.read()[1]["acme/fast"]
+        self.assertEqual(item["observation"], "unavailable")
+        self.assertEqual(item["executions"], [])
+        self.assertEqual(item["activity"]["events"], [])
+
+    def test_registry_changes_update_caps_membership_and_discard_removed_inflight_result(self):
+        collector = status.FleetCollector({"repo": self.tables})
+        collector.accept_runtime("acme/fast", runtime("acme/fast"))
+        started, release = threading.Event(), threading.Event()
+
+        def run(*args, **kwargs):
+            started.set()
+            release.wait(2)
+            return subprocess.CompletedProcess([], 0, json.dumps(runtime("acme/slow")), "")
+
+        with mock.patch.object(status, "run", side_effect=run), \
+             mock.patch.object(status.metrics, "read", return_value=None):
+            worker = threading.Thread(target=collector.collect_runtime, args=("acme/slow",))
+            worker.start()
+            self.assertTrue(started.wait(1))
+            updated = {"repo": {
+                "acme/fast": {**self.tables["acme/fast"], "disabled_at": STAMP},
+                "acme/new": {"path": "/new"},
+            }}
+            with mock.patch.object(status.host, "load", return_value=updated):
+                collector.refresh_registry()
+            item = collector.read()[1]
+            self.assertEqual(set(item), {"acme/fast", "acme/new"})
+            self.assertEqual(item["acme/fast"]["operating_state"], "capped")
+            self.assertEqual(item["acme/fast"]["executions"][0]["id"], "acme/fast/worker")
+            updated["repo"]["acme/fast"] = self.tables["acme/fast"]
+            updated["repo"]["acme/slow"] = self.tables["acme/slow"]
+            with mock.patch.object(status.host, "load", return_value=updated):
+                collector.refresh_registry()
+            release.set()
+            worker.join(2)
+            item = collector.read()[1]
+            self.assertEqual(item["acme/fast"]["operating_state"], "running")
+            self.assertEqual(item["acme/slow"]["executions"], [])
+
+    def test_slow_reader_does_not_block_publication_and_keeps_coherent_revision(self):
+        collector = status.FleetCollector({"repo": {"acme/fast": self.tables["acme/fast"]}})
+        collector.accept_runtime("acme/fast", runtime("acme/fast"))
+        reading, release, published = threading.Event(), threading.Event(), threading.Event()
+        result = []
+
+        def metrics_read(*args):
+            reading.set()
+            release.wait(2)
+
+        def publish():
+            collector.accept_runtime("acme/fast", runtime("acme/fast", stamp="2026-09-05T12:00:05Z"))
+            published.set()
+
+        with mock.patch.object(status.metrics, "read", side_effect=metrics_read):
+            reader = threading.Thread(target=lambda: result.append(collector.read()))
+            reader.start()
+            self.assertTrue(reading.wait(1))
+            writer = threading.Thread(target=publish)
+            writer.start()
+            try:
+                self.assertTrue(published.wait(1), "reader held publication lock")
+            finally:
+                release.set()
+                reader.join(2)
+                writer.join(2)
+        self.assertEqual(result[0][0], 1)
+        self.assertEqual(result[0][1]["acme/fast"]["sources"][0]["observed_at"], STAMP)
+        self.assertEqual(collector.revision, 2)
+
     def test_dashboard_requests_share_one_revision_without_collecting(self):
         from district import dashboard
 
