@@ -94,12 +94,18 @@ def _runtime_error(data: dict) -> str | None:
         else:
             details.append("malformed structured error")
     history = data.get("history")
-    if isinstance(history, dict):
+    if not isinstance(history, dict):
+        details.append("runtime history malformed")
+    else:
         gaps = history.get("gaps")
         if isinstance(gaps, list):
             details.extend(f"history:{gap}" for gap in gaps if isinstance(gap, str))
+        elif gaps is not None:
+            details.append("runtime history gaps malformed")
         if history.get("truncated") is True:
             details.append("history:truncated")
+    if not isinstance(data.get("events"), list):
+        details.append("runtime events malformed")
     return "; ".join(dict.fromkeys(details)) or None
 
 
@@ -123,18 +129,19 @@ def runtime_source(data: dict, slug: str) -> tuple[dict, dict]:
         state = item.get("state")
         wait = item.get("wait")
         if state == "active":
-            state = "blocked" if isinstance(wait, dict) and wait.get("blocking") is True else (
+            state = "blocked" if isinstance(wait, dict) and wait.get("mode") == "blocking" else (
                 "known wait" if isinstance(wait, dict) else "stage-active")
         elif state not in ("completed", "failed", "interrupted", "unknown"):
             state = "unknown"
         outcome = item.get("outcome")
         kind = ("mechanism" if outcome == "mechanism_failure" else
-                "product" if outcome in ("product_feedback", "project_escalation") else
-                "unknown" if state in ("failed", "blocked") else None)
+                "product" if outcome in ("product_feedback", "project_escalation") or state in ("blocked", "known wait") else
+                "unknown" if state == "failed" else None)
         normalized_executions.append({
             "id": item["execution_id"], "state": state, "stage": item.get("stage"),
             "observed_at": item.get("observed_at"), "entered_at": item.get("entered_at"),
-            "reason": item.get("reason"), "outcome_kind": kind,
+            "reason": item.get("reason") or (wait.get("reason") if isinstance(wait, dict) else None),
+            "outcome_kind": kind,
             "reference": item.get("latest_event_id"),
         })
 

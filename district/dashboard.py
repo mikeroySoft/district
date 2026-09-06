@@ -13,6 +13,7 @@ import contextlib
 import ipaddress
 import json
 import os
+import signal
 import subprocess
 import sys
 import webbrowser
@@ -296,12 +297,19 @@ def main(argv: list[str]) -> int:
     url = f"http://127.0.0.1:{args.port}/"
     print(f"district dashboard: listening on {bind}:{args.port}", flush=True)
     server.collector.start()
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def stop_signal(*_: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_signal)
     try:
         if not args.no_open:
             webbrowser.open(url)
         with contextlib.suppress(KeyboardInterrupt):
             server.serve_forever()
     finally:
+        signal.signal(signal.SIGTERM, previous)
         server.server_close()
         server.collector.stop()
     return 0

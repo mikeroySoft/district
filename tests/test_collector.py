@@ -117,9 +117,57 @@ class FleetCollectorTest(unittest.TestCase):
             self.assertEqual([e["event_id"] for e in public["activity"]["events"]], ["event-1"])
             self.assertTrue(public["activity"]["history"]["truncated"])
             self.assertIn("invalid_json", public["sources"][0]["error"])
+            malformed = runtime("acme/fast")
+            malformed.update(history=[], events={})
+            collector.accept_runtime("acme/fast", malformed)
+            malformed_entry = collector.fleet()["acme/fast"]
+            self.assertEqual(malformed_entry["observation"], "stale")
+            self.assertIn("runtime history malformed", malformed_entry["sources"][0]["error"])
             collector.accept_runtime("acme/fast", runtime("acme/fast", schema=2))
             self.assertEqual(collector.fleet()["acme/fast"]["observation"], "unavailable")
             self.assertIn("unsupported schema", collector.fleet()["acme/fast"]["sources"][0]["error"])
+
+    def test_f03_waits_outcomes_and_ownership_keep_their_meaning(self):
+        data = runtime("acme/fast")
+        data["executions"] = [
+            {**data["executions"][0], "wait": {"reason": "exclusive_resource", "mode": "blocking"}},
+            {**data["executions"][0], "execution_id": "product", "state": "failed",
+             "outcome": "product_feedback", "reason": "configured_check_failed"},
+            {**data["executions"][0], "execution_id": "mechanism", "state": "failed",
+             "outcome": "mechanism_failure", "reason": "command_unavailable"},
+        ]
+        data["resources"] = [
+            {"resource": {"id": "gate-lock"}, "state": "held", "ownership": "confirmed",
+             "owner": {"execution_id": "acme/fast/worker"}, "observed_at": STAMP},
+            {"resource": {"id": "external-lock"}, "state": "held", "ownership": "unknown",
+             "owner": None, "observed_at": STAMP},
+        ]
+        collector = status.FleetCollector(
+            {"repo": {"acme/fast": self.tables["acme/fast"]}}, runtime_interval=5)
+        with mock.patch.object(status.metrics, "read", return_value=None):
+            collector.accept_runtime("acme/fast", data)
+            entry = collector.fleet()["acme/fast"]
+        self.assertEqual(entry["execution_state"], "blocked")
+        self.assertEqual([item["state"] for item in entry["executions"]],
+                         ["blocked", "failed", "failed"])
+        self.assertEqual([item["ownership"] for item in entry["resources"]], ["known", "unknown"])
+        self.assertEqual([finding["condition_code"] for finding in entry["findings"]],
+                         ["runtime.mechanism_unavailable"])
+
+    def test_full_snapshot_failure_does_not_erase_fresh_runtime(self):
+        table = {"repo": {"acme/fast": self.tables["acme/fast"]}}
+        collector = status.FleetCollector(table)
+        collector.accept_runtime("acme/fast", runtime("acme/fast"))
+        with mock.patch.object(status, "snapshot", return_value={
+                "slug": "acme/fast", "error": "github unavailable"}), \
+             mock.patch.object(status.metrics, "read", return_value=None):
+            collector.collect_full("acme/fast")
+            entry = collector.fleet()["acme/fast"]
+        self.assertEqual(entry["execution_state"], "stage-active")
+        self.assertEqual(entry["executions"][0]["id"], "acme/fast/worker")
+        self.assertEqual([source["id"] for source in entry["sources"]],
+                         ["factory.runtime", "factory.snapshot"])
+
 
     def test_dashboard_requests_share_one_revision_without_collecting(self):
         from district import dashboard
