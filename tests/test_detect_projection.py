@@ -64,6 +64,7 @@ class DetectProjectionTest(DistrictCase):
             "        name: Build\n"
         )
         code, cli = self.district("add", "--dry-run", str(repo))
+        calls_before_detect = self.calls("factory")
         http_code, public = detect(str(repo))
         self.assertEqual((code, http_code, public["ok"]), (0, 200, True))
         for source in (".github/workflows/ci.yaml:4", ".github/workflows/ci.yaml:6", "Cargo.toml"):
@@ -76,7 +77,7 @@ class DetectProjectionTest(DistrictCase):
             self.assertNotIn(private, public["output"])
         self.assertLess(public["output"].index("build from"), public["output"].index("fmt from"))
         self.assertFalse((repo / ".factory.toml").exists())
-        self.assertEqual(self.calls("factory"), [])
+        self.assertEqual(self.calls("factory"), calls_before_detect)
 
     def test_workflow_files_and_parent_directories_must_be_bounded_and_regular(self):
         for unsafe in ("file-link", "github-link", "workflows-link", "fifo", "oversized", "too-many"):

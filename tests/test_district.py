@@ -337,6 +337,9 @@ class AddTest(DistrictCase):
             "          echo nope\n"
             "          cargo test ${{ matrix.os }}\n"
             "          cargo fmt && cargo test\n"
+            "          pytest --cov | tee coverage.txt\n"
+            "          make test > output.log\n"
+            "          python - <<PY\n"
         )
         (workflows / "lint.yaml").write_text(
             "steps:\n"

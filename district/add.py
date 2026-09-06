@@ -248,7 +248,7 @@ def workflow_runs(root: Path) -> list[tuple[Path, int, str, str]]:
                 if uses:
                     continue
                 for line_number, command in commands:
-                    if "${{" in command or any(joiner in command for joiner in ("&&", "||", ";")):
+                    if "${{" in command or any(joiner in command for joiner in ("&&", "||", ";", "|", ">", "<")):
                         continue
                     try:
                         argv = shlex.split(command)
