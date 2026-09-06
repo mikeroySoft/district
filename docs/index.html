@@ -184,11 +184,12 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
 
   <section id="commands">
     <div class="kicker">Commands</div>
-    <h2>Six verbs. Each one shells out to <code>factory</code>, <code>gh</code>, and <code>git</code>.</h2>
+    <h2>Seven verbs. Each one shells out to the host tools it checks or manages.</h2>
     <p class="lede">District never imports from mikeroySoft/factory and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
       <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
       <div class="k">district apply</div><div class="v">Reconcile the host to the registry. Re-renders units, ensures labels, runs <code>doctor</code>, enforces the failure cap and supply-chain policy. <code>--upgrade</code> reinstalls the engine so every timer picks it up on the next tick.</div>
+      <div class="k">district doctor</div><div class="v">Check District's host prerequisites, registered repository remotes, dashboard ports, package policy, and units. Reports every check as <code>PASS</code>, <code>WARN</code>, or <code>FAIL</code>.</div>
       <div class="k">district status</div><div class="v">One table, one screen, one exit code. Version, timer, last pass, tickets in flight, escalations, first-gate pass %, bounce rate, upstream drift.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
       <div class="k">district dashboard</div><div class="v">Serve the District Atlas. <code>--host 0.0.0.0</code> enables read-only LAN viewing at a numeric-IP URL with the actual port, never remote management; a LAN URL stays read-only even on the host. Manage and detect require direct HTTP to numeric loopback or <code>localhost</code> with the actual server port (default <code>http://127.0.0.1:8760</code>). DNS aliases and reverse proxies are unsupported; forwarded headers fail closed. Authorized actions run the CLI as a subprocess with bounded sanitized diagnostics.</div>
