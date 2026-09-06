@@ -325,8 +325,9 @@ Precise serialized keys within these objects and lifecycle invariants must be do
 ## 8. Collection and refresh
 
 D02's dashboard server owns one collector and one cache for all browser clients.
-Runtime observations run every five seconds with a four-second per-factory
-timeout and at most eight concurrent subprocesses. A factory has at most one
+Runtime observations are due five seconds after their previous collection ends,
+with a four-second command deadline and at most eight concurrent Factory command
+groups. A factory has at most one
 runtime/full collection in flight, so a slow or hung source cannot overlap or
 hold publication of other factories. Full `factory dashboard --json`
 GitHub/config observations use a separate schedule (60 seconds by default), whose
@@ -342,6 +343,12 @@ A failed registry read preserves the last valid registry. The worker bound is
 the configured concurrency capped at eight, independent of initial registry size,
 so newly registered factories can use the same capacity.
 
+F03 dispatcher/execution/resource quality flags and incomplete history remain
+authoritative even when `errors` is empty. A partial or unavailable member makes
+the single normalized runtime source conservatively partial (or stale by age),
+without discarding its usable facts or renewing source timestamps. An unknown
+resource owner therefore cannot become fresh/normal merely through adaptation.
+
 Each completed factory result increments the cache revision independently.
 The API reports the revision and configured bounds; entries expose original
 source times/ages plus separate runtime/full collection times/ages. Last-known
@@ -353,8 +360,11 @@ Each factory retains at most 512 producer events, deduplicated by `event_id`,
 together with the producer's declared history window, completeness, truncation
 and gap codes. This supports baselines and reconnect-gap disclosure, not durable
 total replay.
-Collector work stops with the server and every subprocess is bounded by its
-per-factory timeout.
+Collector work stops with the server. A command deadline kills its process group,
+including inherited-output descendants, and reaps the direct child. Shutdown
+waits only for the remaining command deadlines; a hung factory may retry about
+nine seconds apart (four-second timeout plus five-second interval), without
+delaying the other factories' runtime cadence.
 
 ## 9. Management and network safety
 

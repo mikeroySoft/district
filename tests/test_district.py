@@ -16,6 +16,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -130,6 +131,30 @@ class HostRunTest(unittest.TestCase):
     def test_timeout_still_bounds_the_subprocess(self) -> None:
         with self.assertRaises(subprocess.TimeoutExpired):
             host.run([sys.executable, "-c", "import time; time.sleep(1)"], timeout=0.01)
+
+    def test_timeout_stops_descendants_with_inherited_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = (
+                "import time; from pathlib import Path; "
+                f"root = Path({directory!r}); "
+                "(root / 'ready').touch(); "
+                "deadline = time.monotonic() + 2\n"
+                "while not (root / 'trigger').exists() and time.monotonic() < deadline:\n"
+                "    time.sleep(0.01)\n"
+                "if (root / 'trigger').exists():\n"
+                "    (root / 'survived').touch()\n"
+            )
+            parent = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(3)"
+            )
+            with self.assertRaises(subprocess.TimeoutExpired):
+                host.run([sys.executable, "-c", parent], timeout=0.5)
+            self.assertTrue((root / "ready").exists(), "child never started")
+            (root / "trigger").touch()
+            time.sleep(0.3)
+            self.assertFalse((root / "survived").exists(), "child kept working after timeout")
 
 
 class DistrictCase(unittest.TestCase):

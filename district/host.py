@@ -9,6 +9,7 @@ clone_dir / factory_source / min_package_age / max_failed_passes, and per repo
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import tomllib
@@ -132,7 +133,23 @@ def select(data: dict, slug: str | None) -> dict[str, dict]:
 
 def run(argv: list[str], cwd: Path | None = None, check: bool = False, quiet: bool = False,
         timeout: float | None = None) -> subprocess.CompletedProcess:
-    proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout)
+    if timeout is None:
+        proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+    else:
+        # Collector deadlines cover the command's process group, not just its
+        # Python wrapper: inherited output pipes can belong to a surviving child.
+        with subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, start_new_session=True) as child:
+            try:
+                stdout, stderr = child.communicate(timeout=timeout)
+            except BaseException:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                child.wait()
+                raise
+            proc = subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
     if check and proc.returncode != 0:
         if not quiet:
             sys.stdout.write(proc.stdout)

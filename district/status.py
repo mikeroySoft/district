@@ -111,6 +111,20 @@ def _runtime_error(data: dict) -> str | None:
             details.append("runtime history gaps malformed")
         if history.get("truncated") is True:
             details.append("history:truncated")
+        if history.get("complete") is not True:
+            details.append("history:incomplete")
+    # F03's per-observation quality is authoritative even without an error row
+    # (for example, a held lock whose owner cannot be confirmed).
+    for scope, records in (
+        ("dispatcher", [data.get("dispatcher")]),
+        ("executions", data.get("executions", [])),
+        ("resources", data.get("resources", [])),
+    ):
+        for record in records:
+            quality = record.get("observation") if isinstance(record, dict) else None
+            if quality != "fresh":
+                quality = quality if quality in ("partial", "unavailable") else "unknown"
+                details.append(f"{scope}:observation_{quality}")
     if not isinstance(data.get("events"), list):
         details.append("runtime events malformed")
     return "; ".join(dict.fromkeys(details)) or None

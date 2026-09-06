@@ -154,6 +154,23 @@ class FleetCollectorTest(unittest.TestCase):
         self.assertEqual([finding["condition_code"] for finding in entry["findings"]],
                          ["runtime.mechanism_unavailable"])
 
+    def test_producer_partial_quality_survives_normalization(self):
+        data = runtime("acme/fast")
+        data["resources"] = [{
+            "resource": {"id": "external-lock"}, "state": "held", "ownership": "unknown",
+            "owner": None, "observed_at": STAMP, "observation": "partial",
+        }]
+        source, _ = status.runtime_source(data, "acme/fast")
+        entry = health.classify("acme/fast", [source], self.tables["acme/fast"],
+                                at=datetime.fromisoformat(STAMP.replace("Z", "+00:00")))
+        self.assertEqual(entry["observation"], "partial")
+        self.assertEqual(entry["assessment"], "unknown")
+        self.assertEqual(entry["resources"][0]["observation"], "partial")
+        self.assertTrue(entry["resources"][0]["held"])
+        self.assertEqual(entry["resources"][0]["ownership"], "unknown")
+        self.assertEqual(entry["execution_state"], "stage-active")
+        self.assertEqual(entry["sources"][0]["observed_at"], STAMP)
+
     def test_full_snapshot_failure_does_not_erase_fresh_runtime(self):
         table = {"repo": {"acme/fast": self.tables["acme/fast"]}}
         collector = status.FleetCollector(table)
