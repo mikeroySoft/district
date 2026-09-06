@@ -16,6 +16,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -98,6 +99,62 @@ model = "ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M"
 port = 8766
 theme = ".factory-dashboard.css"
 '''
+
+
+class HostRunTest(unittest.TestCase):
+    def test_captured_output_is_not_logged_without_a_checked_failure(self) -> None:
+        for check, code in ((False, 0), (True, 0), (False, 7)):
+            with self.subTest(check=check, code=code):
+                out, err = io.StringIO(), io.StringIO()
+                argv = [sys.executable, "-c",
+                        f"import sys; print('result'); print('producer diagnostic', file=sys.stderr); sys.exit({code})"]
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    proc = host.run(argv, check=check)
+                self.assertEqual((proc.returncode, proc.stdout, proc.stderr), (code, "result\n", "producer diagnostic\n"))
+                self.assertEqual((out.getvalue(), err.getvalue()), ("", ""))
+
+    def test_checked_failure_reports_command_and_exit_with_optional_output(self) -> None:
+        argv = [sys.executable, "-c",
+                "import sys; print('result'); print('producer diagnostic', file=sys.stderr); sys.exit(7)"]
+        for quiet in (False, True):
+            with self.subTest(quiet=quiet):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    with self.assertRaises(host.DistrictError) as raised:
+                        host.run(argv, check=True, quiet=quiet)
+                self.assertIn(" ".join(argv), str(raised.exception))
+                self.assertIn("exited 7", str(raised.exception))
+                self.assertIsInstance(raised.exception.code, str)
+                self.assertEqual((out.getvalue(), err.getvalue()),
+                                 ("", "") if quiet else ("result\n", "producer diagnostic\n"))
+
+    def test_timeout_still_bounds_the_subprocess(self) -> None:
+        with self.assertRaises(subprocess.TimeoutExpired):
+            host.run([sys.executable, "-c", "import time; time.sleep(1)"], timeout=0.01)
+
+    def test_timeout_stops_descendants_with_inherited_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            child = (
+                "import time; from pathlib import Path; "
+                f"root = Path({directory!r}); "
+                "(root / 'ready').touch(); "
+                "deadline = time.monotonic() + 2\n"
+                "while not (root / 'trigger').exists() and time.monotonic() < deadline:\n"
+                "    time.sleep(0.01)\n"
+                "if (root / 'trigger').exists():\n"
+                "    (root / 'survived').touch()\n"
+            )
+            parent = (
+                "import subprocess, sys, time; "
+                f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(3)"
+            )
+            with self.assertRaises(subprocess.TimeoutExpired):
+                host.run([sys.executable, "-c", parent], timeout=0.5)
+            self.assertTrue((root / "ready").exists(), "child never started")
+            (root / "trigger").touch()
+            time.sleep(0.3)
+            self.assertFalse((root / "survived").exists(), "child kept working after timeout")
 
 
 class DistrictCase(unittest.TestCase):
@@ -1046,6 +1103,10 @@ class DashboardTest(DistrictCase):
 
         for bind in ("127.0.0.1", "0.0.0.0"):
             with ThreadingHTTPServer((bind, 0), dash.Handler) as server:
+                server.collector = mock.Mock(
+                    read=mock.Mock(return_value=(0, {})),
+                    runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+                )
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 port = server.server_port
                 good = {"Host": f"127.0.0.1:{port}", "Origin": f"http://127.0.0.1:{port}", "X-District-Act": "1"}
@@ -1093,6 +1154,10 @@ class DashboardTest(DistrictCase):
         self.stub("factory", ("dashboard --json", json.dumps(dashboard(errors=[secret]))),
                   ("doctor --json", secret))
         with ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler) as server:
+            server.collector = mock.Mock(
+                read=mock.Mock(return_value=(1, status.fleet(host.load()))),
+                runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+            )
             threading.Thread(target=server.serve_forever, daemon=True).start()
             base = f"http://127.0.0.1:{server.server_port}"
             try:
@@ -1132,6 +1197,10 @@ class DashboardTest(DistrictCase):
         os.environ["PYTHONPATH"] = str(ROOT)
         self.addCleanup(os.environ.pop, "PYTHONPATH", None)
         server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
+        server.collector = mock.Mock(
+            read=mock.Mock(return_value=(1, status.fleet(host.load()))),
+            runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+        )
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)

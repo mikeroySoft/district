@@ -345,6 +345,16 @@ def factory_kpis(slug: str, e: dict) -> list[list[str]]:
                          else "none reported" if key in e else "unknown — observation unavailable"])
     for unknown in sequence(e.get("unknowns")):
         rows.append(["unknown", text(unknown)])
+    activity = mapping(e.get("activity"))
+    history = mapping(activity.get("history"))
+    events = sequence(activity.get("events"))
+    if history:
+        rows.append(["runtime history", json.dumps(history, ensure_ascii=False)])
+    if events:
+        rows.append(["latest transition", json.dumps(events[-1], ensure_ascii=False)])
+    collection = mapping(e.get("collection"))
+    if collection:
+        rows.append(["collection", json.dumps(collection, ensure_ascii=False)])
     if snap:
         d = mapping(snap.get("dispatcher"))
         finished = [r["result"] for r in sequence(d.get("runs"))
@@ -421,7 +431,7 @@ def factory_block(i: int, slug: str, e: dict, max_loc: int) -> dict:
         "id": block_id(slug), "slug": slug, "name": slug.rsplit("/", 1)[-1], "cat": "factory",
         "gx": gx, "gy": gy, "w": w, "d": w, "h": h, "kind": "tower3" if h >= 60 else "hall", "ring": fork,
         **{key: e[key] for key in ("schema_version", "assessment", "operating_state", "execution_state", "observation", "findings", "sources")},
-        **{key: e[key] for key in ("executions", "resources", "unknowns", "projection") if key in e},
+        **{key: e[key] for key in ("executions", "resources", "unknowns", "activity", "collection", "projection") if key in e},
         "blurb": blurb, "kpis": factory_kpis(slug, e),
         "files": [[ref, 1, f"[[gate.check]] {gate}"]] + ([[ref, 1, f"upstream = \"{config['upstream']}\""]] if fork else []),
         "conn": "Fed by its fork parent; dispatched by its own timer." if fork else "No upstream sync configured." if origin_known else "Upstream configuration unknown.",

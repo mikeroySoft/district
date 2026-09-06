@@ -13,6 +13,7 @@ import contextlib
 import ipaddress
 import json
 import os
+import signal
 import subprocess
 import sys
 import webbrowser
@@ -106,6 +107,9 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _fleet(self) -> tuple[int, dict]:
+        return self.server.collector.read()
+
     def do_GET(self) -> None:
         url = urlparse(self.path)
         if url.path == "/api/capabilities":
@@ -116,12 +120,21 @@ class Handler(BaseHTTPRequestHandler):
             }).encode())
             return
         if url.path == "/":
-            self._send(200, "text/html; charset=utf-8", atlas.page(safe_fleet(status.fleet(host.load()))).encode())
+            _, raw = self._fleet()
+            self._send(200, "text/html; charset=utf-8", atlas.page(safe_fleet(raw)).encode())
         elif url.path == "/api/fleet":
-            raw = status.fleet(host.load())
+            revision, raw = self._fleet()
             fleet = safe_fleet(raw)
             self._send(200, "application/json", json.dumps({
                 "fleet": fleet, "data": atlas.data(fleet),
+                "revision": revision,
+                "cache": {
+                    "runtime_interval_seconds": self.server.collector.runtime_interval,
+                    "full_interval_seconds": self.server.collector.full_interval,
+                    "factory_timeout_seconds": self.server.collector.timeout,
+                    "concurrency": self.server.collector.concurrency,
+                    "event_limit_per_factory": status.EVENT_LIMIT,
+                },
                 "projection": {"omitted_factories": max(0, len(raw) - len(fleet))},
             }).encode())
         elif url.path == "/api/detect":
@@ -271,6 +284,12 @@ def install(host_arg: str | None, port: int) -> int:
     return 0
 
 
+class DashboardServer(ThreadingHTTPServer):
+    def __init__(self, address: tuple[str, int], data: dict):
+        self.collector = status.FleetCollector(data)
+        super().__init__(address, Handler)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district dashboard", description=__doc__.split("\n", 1)[0])
     parser.add_argument("--host", default=None, help="viewing bind address (default 127.0.0.1); LAN clients are always read-only")
@@ -281,11 +300,23 @@ def main(argv: list[str]) -> int:
     if args.install:
         return install(args.host, args.port)
     bind = args.host or "127.0.0.1"
-    server = ThreadingHTTPServer((bind, args.port), Handler)
+    server = DashboardServer((bind, args.port), host.load())
     url = f"http://127.0.0.1:{args.port}/"
     print(f"district dashboard: listening on {bind}:{args.port}", flush=True)
-    if not args.no_open:
-        webbrowser.open(url)
-    with contextlib.suppress(KeyboardInterrupt):
-        server.serve_forever()
+    server.collector.start()
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def stop_signal(*_: object) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_signal)
+    try:
+        if not args.no_open:
+            webbrowser.open(url)
+        with contextlib.suppress(KeyboardInterrupt):
+            server.serve_forever()
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+        server.server_close()
+        server.collector.stop()
     return 0

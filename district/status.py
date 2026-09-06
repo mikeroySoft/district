@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from concurrent.futures import ThreadPoolExecutor
+import subprocess
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,12 +21,14 @@ from district.host import run
 COLUMNS = ("repo", "operating", "execution", "observation", "assessment", "version", "next", "last", "pass", "esc", "gate1", "bounce", "fails", "upstream", "evidence")
 
 
-def snapshot(slug: str, table: dict) -> dict:
+def snapshot(slug: str, table: dict, timeout: float | None = None) -> dict:
     """Read the existing full snapshot; observation errors never imply stopped machinery."""
     try:
-        proc = run(["factory", "dashboard", "--json"], cwd=Path(table["path"]))
-    except OSError as exc:
-        return {"slug": slug, "error": str(exc)}
+        proc = run(["factory", "dashboard", "--json"], cwd=Path(table["path"]), timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"slug": slug, "error": (
+            f"factory dashboard timed out after {timeout:g}s"
+            if isinstance(exc, subprocess.TimeoutExpired) and timeout is not None else str(exc))}
     error = None
     if proc.returncode != 0:
         error = f"factory dashboard exited {proc.returncode}: {(proc.stderr.strip() or '?').splitlines()[-1]}"
@@ -70,6 +75,342 @@ def entry(result: dict, table: dict) -> dict:
         "metrics": metrics.read(result["slug"]),
         **health.classify(result["slug"], sources, table),
     }
+
+RUNTIME_INTERVAL = 5.0
+FULL_INTERVAL = 60.0
+COLLECTION_TIMEOUT = 4.0
+COLLECTION_CONCURRENCY = 8
+EVENT_LIMIT = 512
+
+
+def _utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class UnsupportedRuntime(ValueError):
+    """The installed producer explicitly lacks the supported runtime contract."""
+
+def _runtime_error(data: dict) -> str | None:
+    errors = data.get("errors")
+    if not isinstance(errors, list):
+        return "runtime errors malformed"
+    details = []
+    for error in errors:
+        if isinstance(error, dict) and all(isinstance(error.get(key), str) for key in ("source", "scope", "code")):
+            details.append(f"{error['source']}/{error['scope']}:{error['code']}")
+        else:
+            details.append("malformed structured error")
+    history = data.get("history")
+    if not isinstance(history, dict):
+        details.append("runtime history malformed")
+    else:
+        gaps = history.get("gaps")
+        if isinstance(gaps, list):
+            details.extend(f"history:{gap}" for gap in gaps if isinstance(gap, str))
+        elif gaps is not None:
+            details.append("runtime history gaps malformed")
+        if history.get("truncated") is True:
+            details.append("history:truncated")
+        if history.get("complete") is not True:
+            details.append("history:incomplete")
+    # F03's per-observation quality is authoritative even without an error row
+    # (for example, a held lock whose owner cannot be confirmed).
+    for scope, records in (
+        ("dispatcher", [data.get("dispatcher")]),
+        ("executions", data.get("executions", [])),
+        ("resources", data.get("resources", [])),
+    ):
+        for record in records:
+            quality = record.get("observation") if isinstance(record, dict) else None
+            if quality != "fresh":
+                quality = quality if quality in ("partial", "unavailable") else "unknown"
+                details.append(f"{scope}:observation_{quality}")
+    if not isinstance(data.get("events"), list):
+        details.append("runtime events malformed")
+    return "; ".join(dict.fromkeys(details)) or None
+
+
+def runtime_source(data: dict, slug: str, cadence: float = RUNTIME_INTERVAL) -> tuple[dict, dict]:
+    """Adapt the pinned Factory schema-1 wire contract to D01 observations."""
+    if type(data.get("schema_version")) is not int or data["schema_version"] != 1:
+        raise UnsupportedRuntime(f"unsupported schema {data.get('schema_version')!r}")
+    required = ("generated_at", "repo", "dispatcher", "executions", "resources", "events", "history", "errors")
+    if any(key not in data for key in required) or data["repo"] != slug:
+        raise ValueError("malformed schema 1 runtime observation")
+    dispatcher = data["dispatcher"]
+    executions = data["executions"]
+    resources = data["resources"]
+    if not isinstance(dispatcher, dict) or not isinstance(executions, list) or not isinstance(resources, list):
+        raise ValueError("malformed schema 1 runtime observation")
+
+    normalized_executions = []
+    for item in executions:
+        if not isinstance(item, dict) or not isinstance(item.get("execution_id"), str):
+            continue
+        state = item.get("state")
+        wait = item.get("wait")
+        if state == "active":
+            state = "blocked" if isinstance(wait, dict) and wait.get("mode") == "blocking" else (
+                "known wait" if isinstance(wait, dict) else "stage-active")
+        elif state not in ("completed", "failed", "interrupted", "unknown"):
+            state = "unknown"
+        outcome = item.get("outcome")
+        kind = ("mechanism" if outcome == "mechanism_failure" else
+                "product" if outcome in ("product_feedback", "project_escalation") or state in ("blocked", "known wait") else
+                "unknown" if state == "failed" else None)
+        normalized_executions.append({
+            "id": item["execution_id"], "state": state, "stage": item.get("stage"),
+            "observed_at": item.get("observed_at"), "entered_at": item.get("entered_at"),
+            "reason": item.get("reason") or (wait.get("reason") if isinstance(wait, dict) else None),
+            "outcome_kind": kind,
+            "reference": item.get("latest_event_id"),
+        })
+
+    normalized_resources = []
+    for item in resources:
+        descriptor = item.get("resource") if isinstance(item, dict) else None
+        if not isinstance(descriptor, dict) or not isinstance(descriptor.get("id"), str):
+            continue
+        owner = item.get("owner")
+        confirmed = item.get("ownership") == "confirmed" and isinstance(owner, dict)
+        normalized_resources.append({
+            "id": descriptor["id"],
+            "held": True if item.get("state") == "held" else False if item.get("state") == "free" else None,
+            "owner": {"factory": slug, "execution_id": owner.get("execution_id")} if confirmed else None,
+            "observed_at": item.get("observed_at"),
+        })
+    history = data["history"]
+    normalized = {
+        "dispatcher": {
+            "service_active": dispatcher.get("service_active"),
+            "timer_active": dispatcher.get("timer_active"),
+            "next_dispatch_at": dispatcher.get("next_at"),
+            "expected_enabled": True,
+        },
+        "executions": normalized_executions,
+        "resources": normalized_resources,
+    }
+    if isinstance(history, dict):
+        normalized["history"] = {
+            "start": history.get("start_at"), "end": history.get("end_at"),
+            "complete": history.get("complete"), "truncated": history.get("truncated"),
+        }
+    source = {
+        "id": "factory.runtime", "observed_at": data.get("generated_at"),
+        "cadence_seconds": cadence, "data": normalized, "error": _runtime_error(data),
+    }
+    seen = set()
+    events = []
+    for event in data["events"] if isinstance(data["events"], list) else []:
+        identity = event.get("event_id") if isinstance(event, dict) else None
+        if isinstance(identity, str) and identity not in seen:
+            seen.add(identity)
+            events.append(event)
+    activity = {
+        "events": events[-EVENT_LIMIT:],
+        "history": history if isinstance(history, dict) else {},
+    }
+    return source, activity
+
+
+class FleetCollector:
+    """One server-owned bounded cache; HTTP reads never collect."""
+
+    def __init__(self, data: dict, *, runtime_interval: float = RUNTIME_INTERVAL,
+                 full_interval: float = FULL_INTERVAL, timeout: float = COLLECTION_TIMEOUT,
+                 concurrency: int = COLLECTION_CONCURRENCY):
+        self.repos = host.repos(data)
+        self.runtime_interval = runtime_interval
+        self.full_interval = full_interval
+        self.timeout = timeout
+        self.concurrency = max(1, min(concurrency, COLLECTION_CONCURRENCY))
+        self.revision = 0
+        self._records = {slug: self._new_record() for slug in self.repos}
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._pool: ThreadPoolExecutor | None = None
+        self._running: dict[str, Future] = {}
+
+
+    @staticmethod
+    def _new_record() -> dict:
+        return {"runtime": None, "activity": {"events": [], "history": {}},
+                "snap": None, "runtime_error": None, "full_error": None,
+                # First collection is due immediately, even just after host boot.
+                "runtime_at": float("-inf"), "full_at": float("-inf"),
+                "runtime_collected_at": None, "full_collected_at": None}
+
+    def refresh_registry(self) -> None:
+        repos = host.repos(host.load())
+        with self._lock:
+            if repos == self.repos:
+                return
+            self._records = {
+                slug: self._records[slug]
+                if slug in self.repos and table["path"] == self.repos[slug]["path"]
+                else self._new_record()
+                for slug, table in repos.items()
+            }
+            self.repos = repos
+            self.revision += 1
+    def start(self) -> None:
+        if self._thread:
+            return
+        self._pool = ThreadPoolExecutor(max_workers=self.concurrency, thread_name_prefix="district-collector")
+        self._thread = threading.Thread(target=self._loop, name="district-collector", daemon=True)
+        self._thread.start()
+
+    def _loop(self) -> None:
+        registry_at = time.monotonic()
+        while not self._stop.is_set():
+            now = time.monotonic()
+            if now - registry_at >= self.runtime_interval:
+                try:
+                    self.refresh_registry()
+                except (OSError, host.DistrictError):
+                    # Keep the last valid registry through a failed local read.
+                    pass
+                registry_at = now
+            with self._lock:
+                running = set(self._running)
+                due = [
+                    (slug, "runtime" if now - record["runtime_at"] >= self.runtime_interval else "full")
+                    for slug, record in self._records.items()
+                    if slug not in running and (
+                        now - record["runtime_at"] >= self.runtime_interval or
+                        now - record["full_at"] >= self.full_interval)
+                ]
+                for slug, kind in due:
+                    future = self._pool.submit(
+                        self.collect_runtime if kind == "runtime" else self.collect_full, slug)
+                    self._running[slug] = future
+                    future.add_done_callback(lambda _future, slug=slug: self._finished(slug))
+            self._stop.wait(0.05)
+
+    def _finished(self, slug: str) -> None:
+        with self._lock:
+            self._running.pop(slug, None)
+
+    def _runtime_failure(self, slug: str, record: dict, error: str, unsupported: bool = False) -> None:
+        with self._lock:
+            if self._records.get(slug) is not record:
+                return
+            source = record["runtime"]
+            if source is None or unsupported:
+                source = {"id": "factory.runtime", "observed_at": None,
+                          "cadence_seconds": self.runtime_interval, "data": None}
+            if unsupported:
+                record["activity"] = {"events": [], "history": {}}
+            record.update(runtime={**source, "error": error}, runtime_error=error,
+                          runtime_at=time.monotonic(), runtime_collected_at=_utcnow())
+            self.revision += 1
+
+    def collect_runtime(self, slug: str) -> None:
+        with self._lock:
+            record = self._records.get(slug)
+            if record is None:
+                return
+            path = self.repos[slug]["path"]
+        try:
+            proc = run(["factory", "dashboard", "--runtime-json"], cwd=Path(path),
+                       timeout=self.timeout)
+            if proc.returncode:
+                if proc.returncode == 2 and "unrecognized arguments: --runtime-json" in proc.stderr:
+                    raise UnsupportedRuntime("unsupported runtime command")
+                raise ValueError(f"runtime command exited {proc.returncode}")
+            data = json.loads(proc.stdout)
+            if not isinstance(data, dict):
+                raise ValueError("malformed runtime observation")
+            self.accept_runtime(slug, data, record=record)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            error = (f"runtime timeout after {self.timeout:g}s"
+                     if isinstance(exc, subprocess.TimeoutExpired) else str(exc))
+            self._runtime_failure(slug, record, error, isinstance(exc, UnsupportedRuntime))
+
+    def accept_runtime(self, slug: str, data: dict, *, record: dict | None = None) -> None:
+        with self._lock:
+            if record is None:
+                record = self._records.get(slug)
+            if record is None or self._records.get(slug) is not record:
+                return
+        try:
+            source, activity = runtime_source(data, slug, self.runtime_interval)
+        except ValueError as exc:
+            self._runtime_failure(slug, record, str(exc), isinstance(exc, UnsupportedRuntime))
+            return
+        with self._lock:
+            if self._records.get(slug) is not record:
+                return
+            record.update(runtime=source, activity=activity, runtime_error=source["error"],
+                          runtime_at=time.monotonic(), runtime_collected_at=_utcnow())
+            self.revision += 1
+
+    def collect_full(self, slug: str) -> None:
+        with self._lock:
+            record = self._records.get(slug)
+            if record is None:
+                return
+            table = self.repos[slug]
+        result = snapshot(slug, table, timeout=self.timeout)
+        with self._lock:
+            if self._records.get(slug) is not record:
+                return
+            if result.get("snap") is not None:
+                record["snap"] = result["snap"]
+            record.update(full_error=result.get("error"), full_at=time.monotonic(),
+                          full_collected_at=_utcnow())
+            self.revision += 1
+
+    def fleet(self) -> dict[str, dict]:
+        return self.read()[1]
+
+    def read(self) -> tuple[int, dict[str, dict]]:
+        with self._lock:
+            revision = self.revision
+            repos = dict(self.repos)
+            records = {
+                slug: {**record, "runtime": dict(record["runtime"]) if record["runtime"] else None,
+                       "activity": {"events": list(record["activity"]["events"]),
+                                    "history": dict(record["activity"]["history"])}}
+                for slug, record in self._records.items()
+            }
+        result = {}
+        now = datetime.now(timezone.utc)
+        for slug, record in records.items():
+            sources = [record["runtime"]] if record["runtime"] else [{
+                "id": "factory.runtime", "observed_at": None, "cadence_seconds": self.runtime_interval,
+                "data": None, "error": "runtime observation pending",
+            }]
+            if record["snap"] is not None or record["full_error"]:
+                full_sources = health.snapshot_sources(record["snap"], record["full_error"])
+                for source in full_sources:
+                    source["cadence_seconds"] = self.full_interval
+                sources.extend(full_sources)
+            item = entry({"slug": slug, "snap": record["snap"], "error": record["full_error"],
+                          "sources": sources}, repos[slug])
+            item["activity"] = record["activity"]
+            item["collection"] = {
+                "runtime_collected_at": record["runtime_collected_at"],
+                "runtime_age_seconds": (
+                    (now - datetime.fromisoformat(record["runtime_collected_at"].replace("Z", "+00:00"))).total_seconds()
+                    if record["runtime_collected_at"] else None),
+                "full_collected_at": record["full_collected_at"],
+                "full_age_seconds": (
+                    (now - datetime.fromisoformat(record["full_collected_at"].replace("Z", "+00:00"))).total_seconds()
+                    if record["full_collected_at"] else None),
+            }
+            result[slug] = item
+        return revision, result
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(self.timeout + 1)
+        if self._pool:
+            self._pool.shutdown(wait=True, cancel_futures=True)
+        self._thread = None
+        self._pool = None
 
 
 def fleet(data: dict) -> dict[str, dict]:

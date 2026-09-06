@@ -213,12 +213,15 @@ Reported last-known states remain visible with their observation quality.
 or unresolved operational meaning means `unknown`; otherwise `normal`.
 Unknown lock ownership remains explicit but is not independently an incident.
 
-Current transport remains `factory dashboard --json`, adapted by
+The full-snapshot transport is `factory dashboard --json`, adapted by
 `health.snapshot_sources(snap, error)`. Its `generated_at` is retained as source
-time. It has no documented periodic District collection cadence, so cadence is
-null, and it lacks confirmed execution telemetry: normally partial/unknown,
-even when running or scheduled. Positive service/timer observations are usable;
-legacy false booleans also encode failed probes and cannot prove a stop.
+time. Direct CLI snapshots have unknown cadence (`cadence_seconds: null`);
+server-collected snapshots use the configured full-snapshot interval (60 seconds
+by default) without replacing the source timestamp with collection time. The
+full snapshot lacks confirmed execution telemetry: by itself it normally remains
+partial/unknown, even when running or scheduled. Positive service/timer
+observations are usable; legacy false booleans also encode failed probes and
+cannot prove a stop.
 GitHub failure preserves local runtime evidence. Failed dispatcher-unit runs and
 configured triage probes are scoped findings with unknown cause; ordinary gate
 verdicts, review revisions, escalations, bounce and parked project work are not.
@@ -272,8 +275,10 @@ not zero. Project feedback and upstream blockers remain labeled context.
 The browser receives at most 64 factories; each retains at most 32 findings,
 sources, executions, resources and unknown messages, with eight evidence records
 per finding. Snapshot context retains at most 128 tickets, 32 recent unit runs,
-64 gate/exclusive check names and 64 labels per ticket. Identifier/number
-allowlists bound the other project fields. Omitted counts are reported through
+64 gate/exclusive check names and 64 labels per ticket. Runtime activity retains
+at most 512 events and 32 history gaps; dropped records are disclosed as
+`projection.omitted.events` and `projection.omitted.history_gaps`.
+Identifier/number allowlists bound the other project fields. Omitted counts are reported through
 entry `projection: {truncated, omitted}` and per-finding evidence projection;
 `/api/fleet` also returns top-level `projection.omitted_factories`. Atlas labels
 the visible subset and omissions. Truncation never recomputes a verdict from the
@@ -321,15 +326,47 @@ Precise serialized keys within these objects and lifecycle invariants must be do
 
 ## 8. Collection and refresh
 
-D02 owns a single bounded collector/cache for all dashboard clients, not one full collection per HTTP request. Publish fresh factory results independently; a slow/hung factory has a timeout and cannot freeze the fleet. Prevent overlapping collections for one factory. Preserve source freshness and bounded last-known data through partial failures. Shut down collector work cleanly with the server.
+D02's dashboard server owns one collector and one cache for all browser clients.
+Runtime observations are due five seconds after their previous collection ends,
+with a four-second command deadline and at most eight concurrent Factory command
+groups. A factory has at most one
+runtime/full collection in flight, so a slow or hung source cannot overlap or
+hold publication of other factories. Full `factory dashboard --json`
+GitHub/config observations use a separate schedule (60 seconds by default), whose
+configured interval supplies their source freshness cadence. Direct CLI snapshots
+have no periodic schedule and retain null cadence. Neither collection nor rereads
+replace the producer's `generated_at`. Existing hourly repository metrics remain
+outside both paths. Browser polling reads only this cache and never starts collection.
 
-- Runtime target: approximately five seconds, measured on the target host after F03 exists.
-- Full GitHub/config observations: slower, separately timestamped/cached; never executed merely because a browser requested a refresh.
-- Existing hourly repository metrics remain outside the runtime hot path.
-- Browser polling reads the shared cache; no WebSocket, database, or event broker requirement.
-- Ten factories and multiple tabs should not multiply underlying work by tab count.
+The collector reloads the host registry on the configured runtime interval
+(five seconds by default), updating membership and recorded caps. Results from
+in-flight work are discarded when its factory was removed or its path changed.
+A failed registry read preserves the last valid registry. The worker bound is
+the configured concurrency capped at eight, independent of initial registry size,
+so newly registered factories can use the same capacity.
 
-Deduplicate lifecycle events by identity, not text or wall-clock proximity. First connection establishes a baseline; reconnect gaps/truncation are visible. New completions can highlight once per client observation without implying total durable event replay. Short-lived cache/history is sufficient; no speculative persistent incident system.
+F03 dispatcher/execution/resource quality flags and incomplete history remain
+authoritative even when `errors` is empty. A partial or unavailable member makes
+the single normalized runtime source conservatively partial (or stale by age),
+without discarding its usable facts or renewing source timestamps. An unknown
+resource owner therefore cannot become fresh/normal merely through adaptation.
+
+Each completed factory result increments the cache revision independently.
+The API reports the revision and configured bounds; entries expose original
+source times/ages plus separate runtime/full collection times/ages. Last-known
+data survives transient collection failures, including nonzero exits and malformed
+payloads, without renewing its source time. Explicitly unsupported runtime schemas
+or an unrecognized `--runtime-json` command instead clear the runtime observation
+to unavailable; obsolete telemetry does not masquerade as supported observation.
+Each factory retains at most 512 producer events, deduplicated by `event_id`,
+together with the producer's declared history window, completeness, truncation
+and gap codes. This supports baselines and reconnect-gap disclosure, not durable
+total replay.
+Collector work stops with the server. A command deadline kills its process group,
+including inherited-output descendants, and reaps the direct child. Shutdown
+waits only for the remaining command deadlines; a hung factory may retry about
+nine seconds apart (four-second timeout plus five-second interval), without
+delaying the other factories' runtime cadence.
 
 ## 9. Management and network safety
 
