@@ -52,6 +52,8 @@ class FleetCollectorTest(unittest.TestCase):
     def test_runtime_results_publish_independently_and_reads_do_no_work(self):
         release = threading.Event()
         calls = []
+        monotonic = time.monotonic
+        started = monotonic()
 
         def run(argv, cwd=None, **kwargs):
             calls.append((tuple(argv), str(cwd)))
@@ -61,7 +63,8 @@ class FleetCollectorTest(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
 
         with mock.patch.object(status, "run", side_effect=run), \
-             mock.patch.object(status.metrics, "read", return_value=None):
+             mock.patch.object(status.metrics, "read", return_value=None), \
+             mock.patch.object(time, "monotonic", side_effect=lambda: monotonic() - started):
             collector = status.FleetCollector({"repo": self.tables}, runtime_interval=60,
                                                full_interval=3600, timeout=0.2, concurrency=2)
             self.addCleanup(collector.stop)

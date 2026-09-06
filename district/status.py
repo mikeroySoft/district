@@ -237,7 +237,8 @@ class FleetCollector:
     def _new_record() -> dict:
         return {"runtime": None, "activity": {"events": [], "history": {}},
                 "snap": None, "runtime_error": None, "full_error": None,
-                "runtime_at": 0.0, "full_at": 0.0,
+                # First collection is due immediately, even just after host boot.
+                "runtime_at": float("-inf"), "full_at": float("-inf"),
                 "runtime_collected_at": None, "full_collected_at": None}
 
     def refresh_registry(self) -> None:
