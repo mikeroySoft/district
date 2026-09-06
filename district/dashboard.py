@@ -1,9 +1,9 @@
 """`district dashboard [--host 127.0.0.1] [--port 8760] [--no-open]`: the bird's-eye page (PRD §5.6, §5.9).
 
-stdlib http.server. `/` serves the District Atlas; `/api/fleet` returns the
-safe operational projection plus atlas DATA blocks; `/api/act` POST runs one
-`district` subcommand as a subprocess and streams its output. The page never
-mutates state itself, so the CLI stays the audited path.
+stdlib http.server. `/` serves the District Atlas until cutover, while
+`/?view=overview|flows|brief` serves the operations console and `/legacy`
+retains Atlas access. `/api/fleet` returns the safe cached operational
+projection; `/api/act` runs one audited `district` subcommand.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import subprocess
 import sys
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from district import atlas, host, status
@@ -26,6 +27,8 @@ from district.dashboard_read import detect, safe_fleet, safe_text
 DEFAULT_PORT = 8760
 ACTIONS = ("add", "apply", "rm")
 DISTRICT = [sys.executable, "-m", "district"]
+CONSOLE = Path(__file__).with_name("console.html")
+VIEWS = frozenset(("overview", "flows", "brief"))
 
 
 def is_loopback(addr: str) -> bool:
@@ -119,7 +122,11 @@ class Handler(BaseHTTPRequestHandler):
                 "reason": "Trusted-local management" if allowed else "Read-only: direct loopback access required; proxies are not trusted.",
             }).encode())
             return
-        if url.path == "/":
+        if url.path == "/" and parse_qs(url.query).get("view", [None])[0] in VIEWS:
+            view = parse_qs(url.query)["view"][0]
+            page = CONSOLE.read_text().replace("@@VIEW@@", view)
+            self._send(200, "text/html; charset=utf-8", page.encode())
+        elif url.path in ("/", "/legacy"):
             _, raw = self._fleet()
             self._send(200, "text/html; charset=utf-8", atlas.page(safe_fleet(raw)).encode())
         elif url.path == "/api/fleet":

@@ -85,6 +85,17 @@ class DashboardPolicyTest(unittest.TestCase):
         })
         self.assertEqual(self.request(route="/")[0], 200)
         self.fleet.assert_not_called()
+        for route, view in (("/?view=overview", "Overview"), ("/?view=flows&factory=acme%2Fwidgets&stage=gate", "Flows"),
+                            ("/?view=brief&factory=acme%2Fwidgets", "Brief")):
+            code, body, _ = self.request(route=route)
+            self.assertEqual(code, 200)
+            page = body.decode()
+            self.assertIn("<title>District operations console</title>", page)
+            self.assertIn(f'data-view="{view.lower()}"', page)
+        code, body, _ = self.request(route="/legacy")
+        self.assertEqual(code, 200)
+        self.assertNotIn("<title>District operations console</title>", body.decode())
+
 
     def test_cross_site_data_and_embedded_documents_are_refused_before_collection(self):
         cases = [

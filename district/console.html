@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en" data-view="@@VIEW@@">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>District operations console</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg:#0a0d12; --panel:#121722; --panel2:#171e2b; --line:#303b4d;
+  --text:#eef2f7; --muted:#aab4c3; --normal:#58c58b; --attention:#ffb454;
+  --unknown:#aab4c3; --error:#ff7474; --accent:#70b7ff;
+  --s1:.375rem; --s2:.75rem; --s3:1rem; --s4:1.5rem; --s5:2rem;
+  font: 16px/1.5 system-ui, "Segoe UI", sans-serif;
+}
+* { box-sizing:border-box }
+html { background:var(--bg); color:var(--text); scroll-behavior:auto }
+body { margin:0; min-width:18rem }
+a { color:var(--accent) }
+a:focus-visible, button:focus-visible, select:focus-visible { outline:3px solid var(--accent); outline-offset:3px }
+header { position:sticky; top:0; z-index:2; background:rgba(10,13,18,.97); border-bottom:1px solid var(--line) }
+.header { max-width:80rem; margin:auto; padding:var(--s3) var(--s4); display:grid; grid-template-columns:auto 1fr auto; gap:var(--s4); align-items:center }
+.brand { color:var(--text); font-weight:750; text-decoration:none; letter-spacing:.02em }
+nav { display:flex; gap:var(--s1) }
+nav a { color:var(--muted); padding:.45rem .7rem; border-radius:.35rem; text-decoration:none; font-weight:650 }
+nav a[aria-current="page"] { color:var(--text); background:var(--panel2) }
+.scope { display:flex; align-items:center; gap:var(--s2); color:var(--muted) }
+select { max-width:18rem; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:.35rem; padding:.5rem }
+main { max-width:80rem; margin:auto; padding:var(--s5) var(--s4) 8rem }
+.eyebrow { color:var(--accent); font:700 .75rem/1.2 ui-monospace, monospace; letter-spacing:.12em; text-transform:uppercase }
+h1 { margin:var(--s1) 0; font-size:clamp(1.8rem,4vw,3rem); line-height:1.1 }
+.intro { max-width:48rem; margin:0 0 var(--s4); color:var(--muted) }
+.notice { margin:var(--s4) 0; padding:var(--s3); border-left:4px solid var(--attention); background:var(--panel) }
+.hidden { display:none }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(20rem,1fr)); gap:var(--s3) }
+.factory { min-width:0; padding:var(--s4); border:1px solid var(--line); border-radius:.5rem; background:var(--panel) }
+.factory h2 { margin:0; font-size:1.15rem; overflow-wrap:anywhere }
+.factory-head { display:flex; justify-content:space-between; gap:var(--s3); align-items:start }
+.status { display:inline-flex; gap:.45rem; align-items:center; white-space:nowrap; font-size:.85rem; font-weight:750 }
+.status::before { content:""; width:.65rem; height:.65rem; border-radius:50%; background:var(--unknown) }
+.status.normal::before { background:var(--normal) }
+.status.attention::before { background:var(--attention) }
+.facts { display:grid; grid-template-columns:max-content 1fr; gap:var(--s1) var(--s3); margin:var(--s3) 0 }
+.facts dt { color:var(--muted) }
+.facts dd { margin:0; overflow-wrap:anywhere }
+.findings { margin:var(--s3) 0; padding:0; list-style:none }
+.findings li { margin-top:var(--s1); padding:var(--s2); background:var(--panel2); border-left:3px solid var(--error) }
+.sources { color:var(--muted); font-size:.9rem }
+.actions { display:flex; flex-wrap:wrap; gap:var(--s3); margin-top:var(--s3) }
+.empty { padding:var(--s5); border:1px dashed var(--line); color:var(--muted) }
+footer { border-top:1px solid var(--line); padding:var(--s4); color:var(--muted); text-align:center }
+@media (max-width:42rem) {
+  .header { grid-template-columns:1fr; gap:var(--s2) }
+  nav { overflow-x:auto }
+  .scope { display:grid; grid-template-columns:auto 1fr }
+  select { width:100%; max-width:none }
+  main { padding:var(--s4) var(--s3) 6rem }
+  .grid { grid-template-columns:1fr }
+  .factory-head { display:block }
+  .status { margin-top:var(--s2) }
+}
+</style>
+</head>
+<body>
+<header><div class="header">
+  <a class="brand" href="/?view=overview">District</a>
+  <nav aria-label="Primary"><a data-view-link="overview" href="/?view=overview">Overview</a><a data-view-link="flows" href="/?view=flows">Flows</a><a data-view-link="brief" href="/?view=brief">Brief</a></nav>
+  <label class="scope">Factory scope <select id="scope"><option value="">All factories</option></select></label>
+</div></header>
+<main id="main" tabindex="-1">
+  <div class="eyebrow" id="scope-label">All factories</div>
+  <h1 id="heading">Overview</h1>
+  <p class="intro" id="intro"></p>
+  <div id="notice" class="notice hidden" role="status"></div>
+  <section id="factories" class="grid" aria-live="polite" aria-busy="true"></section>
+</main>
+<footer><a href="/legacy">Legacy Atlas and management</a> · cached fleet observation <span id="revision">not loaded</span></footer>
+<script>
+'use strict';
+const VIEWS = {
+  overview:['Overview','Current operating state across the selected real cached fleet observation.'],
+  flows:['Flows','Current execution and finding state for investigation; detailed evidence arrives in D05.'],
+  brief:['Brief','Current deterministic fleet facts; the authored reading narrative arrives in D06.']
+};
+const $ = id => document.getElementById(id);
+const state = {fleet:{}, revision:null, restoreScroll:true};
+const params = () => new URLSearchParams(location.search);
+const view = () => VIEWS[params().get('view')] ? params().get('view') : 'overview';
+const selectionKeys = ['stage','execution','panel'];
+function urlFor(nextView=view(), factory=params().get('factory')) {
+  const p = new URLSearchParams(params());
+  p.set('view', nextView);
+  if (factory) p.set('factory', factory); else p.delete('factory');
+  return '/?' + p.toString();
+}
+function saveScroll() {
+  history.replaceState({...history.state, scrollY:scrollY}, '', location.href);
+}
+function navigate(url) {
+  saveScroll();
+  history.pushState({scrollY:0}, '', url);
+  state.restoreScroll = true;
+  render();
+}
+function factoryURL(record) {
+  const port = record?.table?.dashboard?.port;
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !/^https?:$/.test(location.protocol)) return null;
+  return `${location.protocol}//${location.hostname.includes(':') ? '['+location.hostname.replace(/^\[|\]$/g,'')+']' : location.hostname}:${port}/#ops`;
+}
+function age(value) {
+  if (!Number.isFinite(value)) return 'age unavailable';
+  if (value < 60) return `${Math.round(value)}s old`;
+  if (value < 3600) return `${Math.round(value/60)}m old`;
+  return `${Math.round(value/3600)}h old`;
+}
+function el(tag, text, className) {
+  const node=document.createElement(tag); if (text !== undefined) node.textContent=text; if (className) node.className=className; return node;
+}
+function fact(list, label, value) { list.append(el('dt',label),el('dd',value ?? 'unknown')); }
+function factoryCard(slug, record) {
+  const card=el('article',undefined,'factory'); card.dataset.factory=slug;
+  const head=el('div',undefined,'factory-head'), title=el('h2',slug), status=el('span',`${record.assessment || 'unknown'} status`,`status ${record.assessment || 'unknown'}`);
+  head.append(title,status); card.append(head);
+  const facts=el('dl',undefined,'facts');
+  fact(facts,'Operating',record.operating_state); fact(facts,'Execution',record.execution_state); fact(facts,'Observation',record.observation);
+  const collection=record.collection || {};
+  fact(facts,'Runtime cache',age(collection.runtime_age_seconds)); fact(facts,'Full cache',age(collection.full_age_seconds));
+  card.append(facts);
+  const findings=el('ul',undefined,'findings');
+  for (const finding of record.findings || []) findings.append(el('li',`${finding.severity || 'unknown'} — ${finding.condition_code || 'unknown'}: ${finding.impact || 'impact unknown'}`));
+  if (!findings.children.length) findings.append(el('li','No supported operational findings in this observation'));
+  card.append(findings);
+  const sources=el('p',undefined,'sources');
+  sources.textContent=(record.sources || []).length ? 'Sources: '+record.sources.map(s=>`${s.id || 'unknown'} ${s.observation || 'unknown'}, ${age(s.age_seconds)}`).join(' · ') : 'Sources: unavailable';
+  card.append(sources);
+  const actions=el('div',undefined,'actions'), inspect=el('a','Open in Flows'); inspect.href=urlFor('flows',slug); inspect.dataset.nav=''; actions.append(inspect);
+  const destination=factoryURL(record); if (destination) { const link=el('a','Open Factory'); link.href=destination; link.target='_blank'; link.rel='noopener'; actions.append(link); }
+  card.append(actions); return card;
+}
+function validateSelection(selected, record) {
+  const p=params(), messages=[];
+  const execution=p.get('execution'), stage=p.get('stage'), panel=p.get('panel');
+  if (execution && !(record?.executions || []).some(item=>item.id===execution)) messages.push(`Execution ${execution} is no longer in the cached evidence window.`);
+  if (stage && record && !(record.executions || []).some(item=>item.stage===stage)) messages.push(`Stage ${stage} has no current execution evidence; the filter remains visible.`);
+  if (panel && !(record?.findings || []).some(item=>item.id===panel)) messages.push(`Evidence panel ${panel} has expired.`);
+  return messages;
+}
+function render() {
+  const p=params(), current=view(), selected=p.get('factory');
+  document.documentElement.dataset.view=current; document.title=`District ${VIEWS[current][0]}`;
+  $('heading').textContent=VIEWS[current][0]; $('intro').textContent=VIEWS[current][1];
+  document.querySelectorAll('[data-view-link]').forEach(link=>{ link.href=urlFor(link.dataset.viewLink,selected); link.setAttribute('aria-current',link.dataset.viewLink===current?'page':'false'); });
+  $('scope-label').textContent=selected || 'All factories';
+  const select=$('scope'), active=document.activeElement===select;
+  const values=['',...Object.keys(state.fleet).sort()]; if (selected && !values.includes(selected)) values.push(selected);
+  if (Array.from(select.options).map(o=>o.value).join('\n')!==values.join('\n')) {
+    select.replaceChildren(...values.map(slug=>{const option=el('option',slug || 'All factories'); option.value=slug; return option;}));
+  }
+  select.value=selected || '';
+  const notice=$('notice'), messages=[];
+  let entries=Object.entries(state.fleet);
+  if (selected) {
+    if (state.fleet[selected]) entries=[[selected,state.fleet[selected]]];
+    else { entries=[]; messages.push(`Factory ${selected} was removed or is not present in the current cached fleet. No other factory's facts are substituted.`); }
+  }
+  if (selected && state.fleet[selected]) messages.push(...validateSelection(selected,state.fleet[selected]));
+  notice.replaceChildren(...messages.map(message=>el('p',message))); notice.classList.toggle('hidden',!messages.length);
+  const region=$('factories'); region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
+  if (!entries.length && !messages.length) region.append(el('p','No factories are present in the current cached fleet observation.','empty'));
+  region.setAttribute('aria-busy','false'); $('revision').textContent=state.revision===null?'not loaded':`revision ${state.revision}`;
+  region.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
+  if (active) select.focus({preventScroll:true});
+  if (state.restoreScroll) { const y=history.state?.scrollY || 0; requestAnimationFrame(()=>scrollTo(0,y)); state.restoreScroll=false; }
+}
+async function poll() {
+  try { const response=await fetch('/api/fleet',{cache:'no-store'}); if (!response.ok) throw new Error(); const payload=await response.json(); state.fleet=payload.fleet || {}; state.revision=payload.revision; render(); }
+  catch { $('notice').textContent='Cached fleet observation is currently unavailable.'; $('notice').classList.remove('hidden'); $('factories').setAttribute('aria-busy','false'); }
+}
+document.querySelectorAll('[data-view-link],.brand').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
+$('scope').addEventListener('change',event=>{ const p=new URLSearchParams(params()); p.set('view',view()); if(event.target.value)p.set('factory',event.target.value);else p.delete('factory'); for(const key of selectionKeys)p.delete(key); navigate('/?'+p.toString()); });
+addEventListener('popstate',()=>{state.restoreScroll=true; render(); poll();});
+history.replaceState({...history.state,scrollY:history.state?.scrollY ?? scrollY},'',location.href);
+render(); poll(); setInterval(poll,5000);
+</script>
+</body>
+</html>
