@@ -83,10 +83,16 @@ class DashboardPolicyTest(unittest.TestCase):
             "factory_timeout_seconds": 3.5, "concurrency": 6,
             "event_limit_per_factory": dash.status.EVENT_LIMIT,
         })
+
+    def test_console_and_legacy_routes_remain_reachable(self):
         self.assertEqual(self.request(route="/")[0], 200)
         self.fleet.assert_not_called()
-        for route, view in (("/?view=overview", "Overview"), ("/?view=flows&factory=acme%2Fwidgets&stage=gate", "Flows"),
-                            ("/?view=brief&factory=acme%2Fwidgets", "Brief")):
+        routes = (
+            ("/?view=overview", "Overview"),
+            ("/?view=flows&factory=acme%2Fwidgets&stage=gate", "Flows"),
+            ("/?view=brief&factory=acme%2Fwidgets", "Brief"),
+        )
+        for route, view in routes:
             code, body, _ = self.request(route=route)
             self.assertEqual(code, 200)
             page = body.decode()

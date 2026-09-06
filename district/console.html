@@ -83,8 +83,8 @@ const VIEWS = {
   flows:['Flows','Current execution and finding state for investigation; detailed evidence arrives in D05.'],
   brief:['Brief','Current deterministic fleet facts; the authored reading narrative arrives in D06.']
 };
-const $ = id => document.getElementById(id);
-const state = {fleet:{}, revision:null, restoreScroll:true};
+const byId = id => document.getElementById(id);
+const state = {fleet:{}, revision:null, restoreScroll:false};
 const params = () => new URLSearchParams(location.search);
 const view = () => VIEWS[params().get('view')] ? params().get('view') : 'overview';
 const selectionKeys = ['stage','execution','panel'];
@@ -149,16 +149,18 @@ function validateSelection(selected, record) {
 function render() {
   const p=params(), current=view(), selected=p.get('factory');
   document.documentElement.dataset.view=current; document.title=`District ${VIEWS[current][0]}`;
-  $('heading').textContent=VIEWS[current][0]; $('intro').textContent=VIEWS[current][1];
+  byId('heading').textContent=VIEWS[current][0]; byId('intro').textContent=VIEWS[current][1];
   document.querySelectorAll('[data-view-link]').forEach(link=>{ link.href=urlFor(link.dataset.viewLink,selected); link.setAttribute('aria-current',link.dataset.viewLink===current?'page':'false'); });
-  $('scope-label').textContent=selected || 'All factories';
-  const select=$('scope'), active=document.activeElement===select;
+  byId('scope-label').textContent=selected || 'All factories';
+  const select=byId('scope'), active=document.activeElement;
+  const focusedCard=active.closest?.('[data-factory]');
+  const focusedLink=focusedCard && active.matches('a') ? [focusedCard.dataset.factory,Array.from(focusedCard.querySelectorAll('a')).indexOf(active)] : null;
   const values=['',...Object.keys(state.fleet).sort()]; if (selected && !values.includes(selected)) values.push(selected);
   if (Array.from(select.options).map(o=>o.value).join('\n')!==values.join('\n')) {
     select.replaceChildren(...values.map(slug=>{const option=el('option',slug || 'All factories'); option.value=slug; return option;}));
   }
   select.value=selected || '';
-  const notice=$('notice'), messages=[];
+  const notice=byId('notice'), messages=[];
   let entries=Object.entries(state.fleet);
   if (selected) {
     if (state.fleet[selected]) entries=[[selected,state.fleet[selected]]];
@@ -166,21 +168,22 @@ function render() {
   }
   if (selected && state.fleet[selected]) messages.push(...validateSelection(selected,state.fleet[selected]));
   notice.replaceChildren(...messages.map(message=>el('p',message))); notice.classList.toggle('hidden',!messages.length);
-  const region=$('factories'); region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
+  const region=byId('factories'); region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
   if (!entries.length && !messages.length) region.append(el('p','No factories are present in the current cached fleet observation.','empty'));
-  region.setAttribute('aria-busy','false'); $('revision').textContent=state.revision===null?'not loaded':`revision ${state.revision}`;
+  region.setAttribute('aria-busy','false'); byId('revision').textContent=state.revision===null?'not loaded':`revision ${state.revision}`;
   const selectedContext=selectionKeys.filter(key=>p.get(key)).map(key=>`${key}: ${p.get(key)}`);
-  $('selection').textContent=selectedContext.join(' · '); $('selection').classList.toggle('hidden',!selectedContext.length);
+  byId('selection').textContent=selectedContext.join(' · '); byId('selection').classList.toggle('hidden',!selectedContext.length);
   region.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
-  if (active) select.focus({preventScroll:true});
+  if (active===select) select.focus({preventScroll:true});
+  else if (focusedLink) region.querySelector(`[data-factory="${CSS.escape(focusedLink[0])}"]`)?.querySelectorAll('a')[focusedLink[1]]?.focus({preventScroll:true});
   if (state.restoreScroll) { const y=history.state?.scrollY || 0; requestAnimationFrame(()=>scrollTo(0,y)); state.restoreScroll=false; }
 }
 async function poll() {
   try { const response=await fetch('/api/fleet',{cache:'no-store'}); if (!response.ok) throw new Error(); const payload=await response.json(); state.fleet=payload.fleet || {}; state.revision=payload.revision; render(); }
-  catch { $('notice').textContent='Cached fleet observation is currently unavailable.'; $('notice').classList.remove('hidden'); $('factories').setAttribute('aria-busy','false'); }
+  catch { byId('notice').textContent='Cached fleet observation is currently unavailable.'; byId('notice').classList.remove('hidden'); byId('factories').setAttribute('aria-busy','false'); }
 }
 document.querySelectorAll('[data-view-link],.brand').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
-$('scope').addEventListener('change',event=>{ const p=new URLSearchParams(params()); p.set('view',view()); if(event.target.value)p.set('factory',event.target.value);else p.delete('factory'); for(const key of selectionKeys)p.delete(key); navigate('/?'+p.toString()); });
+byId('scope').addEventListener('change',event=>{ const p=new URLSearchParams(params()), target=event.target.value; p.set('view',view()); if(target)p.set('factory',target);else p.delete('factory'); p.delete('execution'); p.delete('panel'); const records=target?[state.fleet[target]]:Object.values(state.fleet); if(!records.some(record=>(record?.executions || []).some(item=>item.stage===p.get('stage'))))p.delete('stage'); navigate('/?'+p.toString()); });
 addEventListener('popstate',()=>{state.restoreScroll=true; render(); poll();});
 history.replaceState({...history.state,scrollY:history.state?.scrollY ?? scrollY},'',location.href);
 render(); poll(); setInterval(poll,5000);

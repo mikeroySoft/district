@@ -122,9 +122,9 @@ class Handler(BaseHTTPRequestHandler):
                 "reason": "Trusted-local management" if allowed else "Read-only: direct loopback access required; proxies are not trusted.",
             }).encode())
             return
-        if url.path == "/" and parse_qs(url.query).get("view", [None])[0] in VIEWS:
-            view = parse_qs(url.query)["view"][0]
-            page = CONSOLE.read_text().replace("@@VIEW@@", view)
+        query = parse_qs(url.query)
+        if url.path == "/" and query.get("view", [None])[0] in VIEWS:
+            page = CONSOLE.read_text().replace("@@VIEW@@", query["view"][0])
             self._send(200, "text/html; charset=utf-8", page.encode())
         elif url.path in ("/", "/legacy"):
             _, raw = self._fleet()
