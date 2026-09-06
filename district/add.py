@@ -175,9 +175,104 @@ def fork_parent(slug: str) -> str | None:
     return parent.get("nameWithOwner") or (f"{parent['owner']['login']}/{parent['name']}" if parent.get("owner") else None)
 
 
+WORKFLOW_COMMANDS = {
+    "cargo", "npm", "pnpm", "yarn", "bun", "pytest", "ruff", "uv", "python",
+    "python3", "make", "go", "mvn", "gradle", "./gradlew", "dotnet", "ctest",
+    "cmake", "tox", "nox", "mypy", "pyright", "eslint", "prettier", "tsc",
+    "black", "flake8", "pylint",
+}
+
+
+def workflow_runs(root: Path) -> list[tuple[Path, int, str, str]]:
+    """Allowed commands from GitHub Actions run steps."""
+    runs = []
+    workflows = root / ".github" / "workflows"
+    paths = sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml"))) if workflows.is_dir() else []
+    for path in paths:
+        lines = path.read_text().splitlines()
+        i = 0
+        while i < len(lines):
+            steps_match = re.fullmatch(r"(\s*)steps:\s*(?:#.*)?", lines[i])
+            i += 1
+            if not steps_match:
+                continue
+            steps_indent = len(steps_match.group(1))
+            step_indent = None
+            while i < len(lines):
+                line = lines[i]
+                if not line.strip() or line.lstrip().startswith("#"):
+                    i += 1
+                    continue
+                indent = len(line) - len(line.lstrip())
+                item = re.match(r"\s*-\s+", line)
+                if indent < steps_indent or (indent == steps_indent and not item):
+                    break
+                if step_indent is None:
+                    if not item:
+                        break
+                    step_indent = indent
+                if indent != step_indent or not item:
+                    break
+                # Collect a complete step: name may follow run, and nested mappings
+                # (env/with) must not be mistaken for step keys.
+                key_indent = item.end()
+                step_name = ""
+                commands = []
+                uses = False
+                while i < len(lines):
+                    line = lines[i]
+                    indent = len(line) - len(line.lstrip())
+                    if line.strip() and not line.lstrip().startswith("#") and indent < key_indent and not item:
+                        break
+                    key = re.match(r"(name|run|uses):\s*(.*?)\s*$", line[key_indent:]) if item or indent == key_indent else None
+                    item = None
+                    i += 1
+                    if not key:
+                        continue
+                    field, value = key.groups()
+                    if field == "name":
+                        step_name = value.strip("\"'")
+                    elif field == "uses":
+                        uses = True
+                    elif value not in {"|", ">"}:
+                        commands.append((i, value))
+                    if value in {"|", ">"}:
+                        while i < len(lines):
+                            block_line = lines[i]
+                            block_indent = len(block_line) - len(block_line.lstrip())
+                            if block_line.strip() and block_indent <= key_indent:
+                                break
+                            if field == "run" and block_line.strip():
+                                commands.append((i + 1, block_line.strip()))
+                            i += 1
+                if uses:
+                    continue
+                for line_number, command in commands:
+                    if "${{" in command or any(joiner in command for joiner in ("&&", "||", ";", "|", ">", "<")):
+                        continue
+                    try:
+                        argv = shlex.split(command)
+                    except ValueError:
+                        continue
+                    if not argv or argv[0] not in WORKFLOW_COMMANDS:
+                        continue
+                    raw_name = step_name or "-".join(argv[:2])
+                    name = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
+                    runs.append((path.relative_to(root), line_number, name, command))
+    return runs
+
+
 def propose_checks(root: Path) -> list[dict]:
-    """Gate checks derivable from marker files; each names its source. Nothing is invented."""
+    """Gate checks derivable from CI and marker files; each names its source."""
     checks = []
+    seen_runs: set[tuple[str, ...]] = set()
+    for path, line, name, command in workflow_runs(root):
+        argv = shlex.split(command)
+        key = tuple(argv)
+        if key not in seen_runs:
+            checks.append({"name": name, "run": argv, "source": f"{path}:{line}"})
+            seen_runs.add(key)
+    workflow_count = len(checks)
     if (root / "Cargo.toml").exists():
         checks += [
             {"name": "fmt", "run": ["cargo", "fmt", "--check"], "source": "Cargo.toml"},
@@ -210,8 +305,12 @@ def propose_checks(root: Path) -> list[dict]:
     if (root / "Makefile").exists():
         if re.search(r"^test\s*:", (root / "Makefile").read_text(), re.M):
             checks.append({"name": "tests", "run": ["make", "test"], "source": "Makefile target `test`"})
-    seen: set[str] = set()
-    return [c for c in checks if not (c["name"] in seen or seen.add(c["name"]))]
+    seen_names = {c["name"] for c in checks[:workflow_count]}
+    marker_checks = [
+        c for c in checks[workflow_count:]
+        if not (c["name"] in seen_names or seen_names.add(c["name"]))
+    ]
+    return checks[:workflow_count] + marker_checks
 
 
 def parse_check(spec: str) -> dict:
