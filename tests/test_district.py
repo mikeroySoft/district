@@ -105,7 +105,7 @@ class DistrictCase(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
-        self.env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.tmp / "xdg"), "PATH": f"{self.bin}:{os.environ['PATH']}"})
+        self.env = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.tmp / "xdg"), "XDG_CACHE_HOME": str(self.tmp / "cache"), "PATH": f"{self.bin}:{os.environ['PATH']}"})
         self.env.start()
         self.addCleanup(self.env.stop)
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))
@@ -435,6 +435,22 @@ class ApplyTest(DistrictCase):
         host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}, **extra}}})
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard(failures))))
         return repo
+    def test_concurrent_apply_exits_before_running_commands(self) -> None:
+        import fcntl
+
+        self.register()
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.tmp / "cache")}):
+            lock_path = metrics.cache_dir().parent / "apply.lock"
+            lock_path.parent.mkdir(parents=True)
+            with lock_path.open("w") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(apply.main([]), 1)
+        self.assertEqual(stderr.getvalue(), f"district apply: another apply is running ({lock_path})\n")
+        self.assertEqual(self.calls("factory"), [])
+        self.assertEqual(self.calls("systemctl"), [])
+
 
     def test_registry_uses_current_factory_configuration(self) -> None:
         base = Path(os.environ["XDG_CONFIG_HOME"])
@@ -1143,16 +1159,35 @@ class DashboardTest(DistrictCase):
         code, out = self.district("dashboard", "--install", "--port", "8761")
         self.assertEqual(code, 0, out)
         names = sorted(p.name for p in host.unit_dir().iterdir())
-        self.assertEqual(names, ["district-dashboard.service", "district-metrics.service", "district-metrics.timer"])
-        service = (host.unit_dir() / "district-dashboard.service").read_text()
-        self.assertIn(f"Environment=PATH={os.environ['PATH']}", service)
-        self.assertIn(f"ExecStart={sys.executable} -m district dashboard --port 8761 --no-open", service)
+        self.assertEqual(
+            names,
+            [
+                "district-apply.service",
+                "district-apply.timer",
+                "district-dashboard.service",
+                "district-metrics.service",
+                "district-metrics.timer",
+            ],
+        )
+        dashboard_service = (host.unit_dir() / "district-dashboard.service").read_text()
+        self.assertIn(f"Environment=PATH={os.environ['PATH']}", dashboard_service)
+        self.assertIn(f"ExecStart={sys.executable} -m district dashboard --port 8761 --no-open", dashboard_service)
+        apply_service = (host.unit_dir() / "district-apply.service").read_text()
+        self.assertIn("Type=oneshot", apply_service)
+        self.assertIn(f"Environment=PATH={os.environ['PATH']}", apply_service)
+        self.assertIn(f"ExecStart={sys.executable} -m district apply\n", apply_service)
+        self.assertNotIn("--upgrade", apply_service)
+        apply_timer = (host.unit_dir() / "district-apply.timer").read_text()
+        self.assertIn("OnBootSec=10min", apply_timer)
+        self.assertIn("OnUnitActiveSec=1h", apply_timer)
+        self.assertIn("WantedBy=timers.target", apply_timer)
         self.assertIn("OnUnitActiveSec=1h", (host.unit_dir() / "district-metrics.timer").read_text())
         self.assertIn("metrics --refresh", (host.unit_dir() / "district-metrics.service").read_text())
         calls = self.calls("systemctl")
         self.assertIn("enable --now district-dashboard.service", calls)
+        self.assertIn("enable --now district-apply.timer", calls)
         self.assertIn("enable --now district-metrics.timer", calls)
-        self.assertLess(calls.index("daemon-reload"), calls.index("enable --now district-metrics.timer"))
+        self.assertLess(calls.index("daemon-reload"), calls.index("enable --now district-apply.timer"))
 
 
 class DryRunTest(DistrictCase):

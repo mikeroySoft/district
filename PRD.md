@@ -153,6 +153,8 @@ active.
 
 Reconcile the host to the registry. Idempotent; safe to run any time.
 
+`district-apply.timer` runs `apply` hourly.
+
 - `--upgrade`: reinstall agent-factory from its source (the local checkout
   today; a git ref later) so every timer picks up the new code on its next tick.
   The install is an explicit snapshot — not editable — so an in-progress edit in

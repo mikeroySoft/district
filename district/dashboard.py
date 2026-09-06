@@ -224,7 +224,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def units(host_arg: str | None, port: int) -> dict[str, str]:
-    """district-dashboard.service + district-metrics.{service,timer}; PATH carried like the factory units."""
+    """District dashboard, metrics, and apply services and timers."""
     exe = f"{sys.executable} -m district"
     env = f"Environment=PATH={os.environ['PATH']}\n"
     bind = f" --host {host_arg}" if host_arg else ""
@@ -242,6 +242,14 @@ def units(host_arg: str | None, port: int) -> dict[str, str]:
             "[Unit]\nDescription=Refresh District metrics hourly\n\n"
             "[Timer]\nOnBootSec=5min\nOnUnitActiveSec=1h\n\n[Install]\nWantedBy=timers.target\n"
         ),
+        "district-apply.service": (
+            "[Unit]\nDescription=Reconcile District factories\n\n"
+            f"[Service]\nType=oneshot\n{env}ExecStart={exe} apply\n"
+        ),
+        "district-apply.timer": (
+            "[Unit]\nDescription=Apply District configuration hourly\n\n"
+            "[Timer]\nOnBootSec=10min\nOnUnitActiveSec=1h\n\n[Install]\nWantedBy=timers.target\n"
+        ),
     }
 
 
@@ -255,11 +263,11 @@ def install(host_arg: str | None, port: int) -> int:
             path.write_text(body)
             print(f"wrote {path}")
     host.systemctl("daemon-reload")
-    for unit in ("district-dashboard.service", "district-metrics.timer"):
+    for unit in ("district-dashboard.service", "district-metrics.timer", "district-apply.timer"):
         host.systemctl("enable", "--now", unit)
     host.systemctl("restart", "district-dashboard.service")
-    print("started district-dashboard.service and district-metrics.timer (hourly district metrics --refresh)")
-    print("stop with: systemctl --user disable --now district-dashboard.service district-metrics.timer")
+    print("started district-dashboard.service, district-metrics.timer, and district-apply.timer")
+    print("stop with: systemctl --user disable --now district-dashboard.service district-metrics.timer district-apply.timer")
     return 0
 
 
@@ -268,7 +276,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--host", default=None, help="viewing bind address (default 127.0.0.1); LAN clients are always read-only")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--no-open", action="store_true", help="do not open a browser")
-    parser.add_argument("--install", action="store_true", help="write and enable district-dashboard.service and district-metrics.timer")
+    parser.add_argument("--install", action="store_true", help="write and enable District dashboard, metrics, and apply units")
     args = parser.parse_args(argv)
     if args.install:
         return install(args.host, args.port)
