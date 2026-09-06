@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>District — fleet manager for agent-factory</title>
-<meta name="description" content="District runs many agent-factory pipelines on one host: registry, ports, host config, upgrades, failure caps, and one bird's-eye dashboard.">
+<title>District — fleet manager for mikeroySoft/factory</title>
+<meta name="description" content="District runs many mikeroySoft/factory pipelines on one host: registry, ports, host config, upgrades, failure caps, and one bird's-eye dashboard.">
 <link rel="stylesheet" href="mikeroysoft.css">
 <style>
   * { box-sizing: border-box; }
@@ -113,7 +113,7 @@
   <header class="hero">
     <div>
       <h1>One host.<br>Many factories.<br><em>Shared infrastructure.</em></h1>
-      <p><a href="https://github.com/mikeroySoft/factory">agent-factory</a> runs an autonomous ticket pipeline for one repository. District runs the fleet: the registry, ports, host config, engine upgrades, failure caps, and a single bird's-eye view — so no factory has to manage the roads and power itself.</p>
+      <p><a href="https://github.com/mikeroySoft/factory">mikeroySoft/factory</a> runs an autonomous ticket pipeline for one repository. District runs the fleet: the registry, ports, host config, engine upgrades, failure caps, and a single bird's-eye view — so no factory has to manage the roads and power itself.</p>
       <div class="actions">
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
@@ -152,7 +152,7 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
       <div class="card">
         <h3><span class="dot" style="background:var(--accent)"></span>District owns — host-side, never committed</h3>
         <ul>
-          <li>agent-factory install and upgrade</li>
+          <li>mikeroySoft/factory install and upgrade</li>
           <li>triage endpoint and model</li>
           <li>worker / reviewer argv defaults</li>
           <li>dashboard port allocation, timer cadence, bind host</li>
@@ -185,7 +185,7 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
   <section id="commands">
     <div class="kicker">Commands</div>
     <h2>Six verbs. Each one shells out to <code>factory</code>, <code>gh</code>, and <code>git</code>.</h2>
-    <p class="lede">District never imports agent-factory internals and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
+    <p class="lede">District never imports from mikeroySoft/factory and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
       <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
       <div class="k">district apply</div><div class="v">Reconcile the host to the registry. Re-renders units, ensures labels, runs <code>doctor</code>, enforces the failure cap and supply-chain policy. <code>--upgrade</code> reinstalls the engine so every timer picks it up on the next tick.</div>
@@ -290,7 +290,7 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
   <section id="install">
     <div class="kicker">Install</div>
     <h2>Python 3.11+, one dependency, a stdlib HTTP server.</h2>
-    <p class="lede">Requires <a href="https://github.com/mikeroySoft/factory">agent-factory</a> on the host and the <code>gh</code> CLI authenticated.</p>
+    <p class="lede">Requires <a href="https://github.com/mikeroySoft/factory">mikeroySoft/factory</a> on the host and the <code>gh</code> CLI authenticated.</p>
     <div class="term">
       <div class="bar"><span>shell</span><span></span></div>
 <pre><span class="p">$</span> npx skills add mikeroysoft/district
@@ -304,7 +304,7 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
   </section>
 
   <footer>
-    <span>District — fleet manager for agent-factory installs on one host.</span>
+    <span>District — fleet manager for mikeroySoft/factory installs on one host.</span>
     <span><a href="https://github.com/mikeroySoft/district">github.com/mikeroySoft/district</a></span>
   </footer>
 </div>
