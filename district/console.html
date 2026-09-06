@@ -71,6 +71,7 @@ footer { border-top:1px solid var(--line); padding:var(--s4); color:var(--muted)
   <div class="eyebrow" id="scope-label">All factories</div>
   <h1 id="heading">Overview</h1>
   <p class="intro" id="intro"></p>
+  <p id="selection" class="intro hidden"></p>
   <div id="notice" class="notice hidden" role="status"></div>
   <section id="factories" class="grid" aria-live="polite" aria-busy="true"></section>
 </main>
@@ -168,6 +169,8 @@ function render() {
   const region=$('factories'); region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
   if (!entries.length && !messages.length) region.append(el('p','No factories are present in the current cached fleet observation.','empty'));
   region.setAttribute('aria-busy','false'); $('revision').textContent=state.revision===null?'not loaded':`revision ${state.revision}`;
+  const selectedContext=selectionKeys.filter(key=>p.get(key)).map(key=>`${key}: ${p.get(key)}`);
+  $('selection').textContent=selectedContext.join(' · '); $('selection').classList.toggle('hidden',!selectedContext.length);
   region.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
   if (active) select.focus({preventScroll:true});
   if (state.restoreScroll) { const y=history.state?.scrollY || 0; requestAnimationFrame(()=>scrollTo(0,y)); state.restoreScroll=false; }
