@@ -14,6 +14,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 import tempfile
 import tomllib
 import unittest
@@ -56,9 +57,10 @@ DOCTOR = {"ok": True, "version": "0.2.0", "repo": "acme/widgets", "root": "", "r
 
 def dashboard(failures: int = 0, last: str = "done", version: str = "0.2.0", errors: list | None = None) -> dict:
     return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "version": version, "errors": errors or [], "config": {"upstream": None},
         "dispatcher": {
-            "timer": {"next": "2026-09-03T20:10:00Z", "last": "2026-09-03T20:00:00Z", "active": True},
+            "timer": {"next": (datetime.now(timezone.utc) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"), "last": "2026-09-03T20:00:00Z", "active": True},
             "service_active": False, "consecutive_failures": failures, "runs": [{"result": last}],
         },
         "upstream": {}, "metrics": {"first_pass": 0.5, "bounce_rate": 0.25}, "tickets": [],
@@ -362,6 +364,49 @@ class AddTest(DistrictCase):
             ],
         )
 
+    def test_workflow_names_follow_run_without_leaking_across_steps(self) -> None:
+        repo = self.repo()
+        workflows = repo / ".github" / "workflows"
+        workflows.mkdir(parents=True)
+        (repo / "Cargo.toml").write_text("[package]\nname='w'\n")
+        (workflows / "ci.yml").write_text(
+            "on:\n"
+            "  push:\n"
+            "    branches:\n"
+            "    - main\n"
+            "run: cargo outside\n"
+            "jobs:\n"
+            "  check:\n"
+            "    steps:\n"
+            "      - run: cargo test\n"
+            "        name: Tests\n"
+            "      - run: cargo build --workspace\n"
+            "      - run: >\n"
+            "          ruff check .\n"
+            "        name: Lint Check!\n"
+            "      - uses: actions/example@v1\n"
+            "        with:\n"
+            "          run: cargo nested\n"
+            "          name: Not a step\n"
+            "      - run: cargo test\n"
+            "        name: Duplicate\n"
+            "  other:\n"
+            "    run: cargo outside-job\n"
+            "    steps:\n"
+            "    - run: python -m compileall .\n"
+            "      env:\n"
+            "        name: Not the step name\n"
+        )
+        checks = add.propose_checks(repo)
+        self.assertEqual(checks[:4], [
+            {"name": "tests", "run": ["cargo", "test"], "source": ".github/workflows/ci.yml:9"},
+            {"name": "cargo-build", "run": ["cargo", "build", "--workspace"], "source": ".github/workflows/ci.yml:11"},
+            {"name": "lint-check", "run": ["ruff", "check", "."], "source": ".github/workflows/ci.yml:13"},
+            {"name": "python-m", "run": ["python", "-m", "compileall", "."], "source": ".github/workflows/ci.yml:24"},
+        ])
+        self.assertEqual([(check["name"], check["source"]) for check in checks[4:]],
+                         [("fmt", "Cargo.toml"), ("clippy", "Cargo.toml")])
+
     def test_factory_failure_keeps_registry_for_resume(self) -> None:
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("install", "boom\n", 1))
         repo = self.repo(toml="")
@@ -387,6 +432,14 @@ class ApplyTest(DistrictCase):
         host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}, **extra}}})
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard(failures))))
         return repo
+
+    def test_registry_uses_current_factory_configuration(self) -> None:
+        base = Path(os.environ["XDG_CONFIG_HOME"])
+        for name in ("factory", "agent-factory"):
+            registry = base / name / "config.toml"
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            registry.write_text(f'[repo."acme/{name}"]\npath = "/tmp/{name}"\n')
+        self.assertEqual(set(host.repos(host.load())), {"acme/factory"})
 
     def test_npm_day_conversion_and_policy_env(self) -> None:
         self.assertEqual((apply.npm_days("24h"), apply.npm_days("36h"), apply.npm_days("1h"), apply.npm_days("3d")), (1, 2, 1, 3))
@@ -494,47 +547,75 @@ class ApplyTest(DistrictCase):
 
 
 class StatusTest(DistrictCase):
-    def test_malformed_snapshot_is_unhealthy(self) -> None:
+    def test_failed_observation_preserves_runtime_and_project_context(self) -> None:
         repo = self.repo(toml="")
         host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}}}})
         self.stub("factory", ("dashboard --json", "{not json"))
+        code, out = self.district("status", "--json")
+        e = json.loads(out)["acme/widgets"]
+        self.assertEqual((code, e["operating_state"], e["observation"], e["findings"]), (2, "unknown", "unavailable", []))
+        partial = dashboard(errors=["github: rate limited"])
+        partial["dispatcher"]["service_active"] = True
+        self.stub("factory", ("dashboard --json", json.dumps(partial)))
+        code, out = self.district("status", "--json")
+        e = json.loads(out)["acme/widgets"]
+        self.assertEqual((code, e["operating_state"], e["observation"], e["findings"]), (2, "running", "partial", []))
         code, out = self.district("status")
-        self.assertEqual(code, 1)
-        self.assertIn("UNHEALTHY", out)
-        self.stub("factory", ("dashboard --json", json.dumps(dashboard(errors=["github: rate limited"]))))
-        code, out = self.district("status")
-        self.assertEqual((code, "UNHEALTHY" in out, "rate limited" in out), (1, True, True))
-        self.stub("factory", ("dashboard --json", json.dumps(dashboard())))
-        code, out = self.district("status")
-        self.assertEqual(code, 0, out)
-        self.assertIn("50%", out)
-        self.assertIn("25%", out)
-        self.stub("factory", ("dashboard --json", json.dumps(dashboard(last="failed"))))
-        self.assertEqual(self.district("status")[0], 1)
+        self.assertEqual(code, 2, out)
+        self.assertIn("running", out)
+        self.assertIn("rate limited", out)
 
     def test_rel_time(self) -> None:
-        from datetime import datetime, timezone
-
         at = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
         self.assertEqual(status.rel("2026-09-03T12:07:00Z", at), "in 7m")
         self.assertEqual(status.rel("2026-09-03T09:00:00Z", at), "3h ago")
         self.assertEqual(status.rel(None, at), "-")
 
-    def test_health_column_and_json(self) -> None:
+    def test_operational_columns_and_json_cap(self) -> None:
         repo = self.repo(toml="")
-        host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}}}})
+        table = {"path": str(repo), "dashboard": {"port": 8765}}
+        host.save({"repo": {"acme/widgets": table}})
         code, out = self.district("status")
-        self.assertEqual(code, 0, out)
-        self.assertIn("health", out.splitlines()[0])
-        self.assertIn("acme/widgets  healthy", out)
+        self.assertEqual(code, 2, out)  # Legacy snapshots lack execution telemetry.
+        self.assertIn("operating", out.splitlines()[0])
+        self.assertIn("execution", out.splitlines()[0])
         code, out = self.district("status", "--json")
         e = json.loads(out)["acme/widgets"]
-        self.assertEqual((e["health"], e["reasons"], e["metrics"], e["error"]), ("healthy", [], None, None))
-        self.assertEqual(e["snap"]["version"], "0.2.0")
-        self.stub("factory", ("dashboard --json", json.dumps(dashboard(failures=1))))
-        code, out = self.district("status")
-        self.assertEqual(code, 1)
-        self.assertIn("acme/widgets  failing", out)
+        self.assertEqual((e["assessment"], e["execution_state"], e["metrics"], e["error"]), ("unknown", "unknown", None, None))
+        self.assertNotIn("health", e)
+        self.assertNotIn("reasons", e)
+        table.update(disabled_at="2026-09-03T00:00:00Z", disabled_reason="10 consecutive failed passes (cap 10)")
+        host.save({"repo": {"acme/widgets": table}})
+        code, out = self.district("status", "--json")
+        e = json.loads(out)["acme/widgets"]
+        self.assertEqual((code, e["operating_state"], e["assessment"]), (1, "capped", "attention"))
+
+    def test_empty_json_is_machine_readable(self) -> None:
+        code, out = self.district("status", "--json")
+        self.assertEqual((code, json.loads(out)), (0, {}))
+
+    def test_nonzero_snapshot_with_usable_local_facts(self) -> None:
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        snap = dashboard(errors=["github: unavailable"])
+        snap["dispatcher"]["service_active"] = True
+        self.stub("factory", ("dashboard --json", json.dumps(snap), 1))
+        code, out = self.district("status", "--json")
+        e = json.loads(out)["acme/widgets"]
+        self.assertEqual((code, e["operating_state"], e["findings"]), (2, "running", []))
+
+    def test_partial_snapshot_and_missing_factory_are_observation_gaps(self) -> None:
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        for snap in ({}, {"dispatcher": None, "config": [], "metrics": None, "tickets": None}):
+            self.stub("factory", ("dashboard --json", json.dumps(snap)))
+            code, out = self.district("status")
+            self.assertEqual(code, 2, out)
+            self.assertIn("unknown", out)
+        with mock.patch("district.status.run", side_effect=FileNotFoundError("factory missing")):
+            code, out = self.district("status", "--json")
+        e = json.loads(out)["acme/widgets"]
+        self.assertEqual((code, e["operating_state"], e["observation"], e["findings"]), (2, "unknown", "unavailable", []))
 
 
 class RmTest(DistrictCase):
@@ -554,53 +635,6 @@ class RmTest(DistrictCase):
         self.assertTrue((repo / ".factory.toml").exists())
         calls = self.calls("systemctl")
         self.assertLess(calls.index("disable --now factory-widgets.timer"), calls.index("daemon-reload"))
-
-
-class HealthTest(unittest.TestCase):
-    """One case per row of the PRD §5.7 table."""
-
-    def level(self, snap="fresh", table=None, doctor_rows=None, **snap_kw):
-        return health.level(dashboard(**snap_kw) if snap == "fresh" else snap, table or {}, doctor_rows)
-
-    def test_failing_rows(self) -> None:
-        self.assertEqual(self.level(table={"disabled_at": "2026-09-03T00:00:00Z", "disabled_reason": "cap"})[0], "failing")
-        self.assertEqual(self.level(snap=None), ("failing", ["dashboard unreachable"]))
-        inactive = dashboard()
-        inactive["dispatcher"]["timer"]["active"] = False
-        self.assertEqual(self.level(snap=inactive), ("failing", ["timer inactive"]))
-        lvl, reasons = self.level(last="failed", failures=1)
-        self.assertEqual(lvl, "failing")
-        self.assertEqual(reasons, ["last pass failed", "1 consecutive failed pass(es)"])
-        self.assertEqual(self.level(errors=["github: rate limited"]), ("failing", ["snapshot errors: github: rate limited"]))
-        self.assertEqual(self.level(failures=2)[1], ["2 consecutive failed pass(es)"])
-        # a pass still running does not hide a failed last pass
-        running = dashboard(last="failed")
-        running["dispatcher"]["runs"].append({"result": "running"})
-        self.assertEqual(self.level(snap=running)[0], "failing")
-
-    def test_attention_rows(self) -> None:
-        snap = dashboard()
-        snap["tickets"] = [
-            {"number": 7, "state": "OPEN", "labels": ["ready-for-human"], "stage": "escalated"},
-            {"number": 8, "state": "CLOSED", "labels": ["ready-for-human"], "stage": "escalated"},
-        ]
-        self.assertEqual(self.level(snap=snap), ("attention", ["1 open ready-for-human (#7)"]))
-        snap = dashboard()
-        snap["upstream"] = {"blocker": {"number": 31}}
-        self.assertEqual(self.level(snap=snap), ("attention", ["upstream sync parked on #31"]))
-        snap = dashboard()
-        snap["metrics"]["bounce_rate"] = 0.34
-        self.assertEqual(self.level(snap=snap), ("attention", ["bounce rate 34%"]))
-        snap["metrics"]["bounce_rate"] = 0.33
-        self.assertEqual(self.level(snap=snap)[0], "healthy")
-        self.assertEqual(self.level(doctor_rows=DOCTOR["rows"]), ("attention", ["doctor WARN: .github/ISSUE_TEMPLATE/agent_task.md"]))
-        # failing outranks attention; both lists are not merged
-        snap = dashboard(failures=1)
-        snap["upstream"] = {"blocker": {"number": 31}}
-        self.assertEqual(self.level(snap=snap), ("failing", ["1 consecutive failed pass(es)"]))
-
-    def test_healthy(self) -> None:
-        self.assertEqual(self.level(), ("healthy", []))
 
 
 GH_METRICS = [
@@ -671,7 +705,7 @@ class MetricsTest(DistrictCase):
             self.assertIsNone(metrics.read("acme/nothing"))
 
 
-def fleet_entry(loc: int | None, level: str = "healthy", upstream: str | None = None, **snap_kw) -> dict:
+def fleet_entry(loc: int | None, assessment: str = "unknown", upstream: str | None = None, **snap_kw) -> dict:
     snap = dashboard(**snap_kw)
     snap["config"] = {"upstream": upstream, "gate_checks": ["conflict-markers", "fmt", "tests", "leak-scan"], "exclusive_checks": ["tests"]}
     snap["metrics"] = {"first_pass": None, "bounce_rate": None, "escalations": 0}
@@ -682,53 +716,209 @@ def fleet_entry(loc: int | None, level: str = "healthy", upstream: str | None = 
         "open_prs": 0, "merged_prs_30d": 1, "agent_prs_30d": 1, "closed_issues_30d": 0, "closed_bugs_30d": 0,
         "median_days_to_close": None, "traffic": {"views": "unavailable", "clones": {"count": 4, "uniques": 2}},
     }
-    return {"table": {"path": "/x", "dashboard": {"port": 8765}}, "snap": snap, "error": None, "health": level,
-            "reasons": [] if level == "healthy" else ["why"], "metrics": m}
+    table = {"path": "/x", "dashboard": {"port": 8765}}
+    if assessment == "attention":
+        table.update(disabled_at="2026-09-03T00:00:00Z", disabled_reason="cap")
+    return {"table": table, "snap": snap, "error": None, "metrics": m,
+            **health.classify("acme/widgets", health.snapshot_sources(snap), table)}
 
 
 class AtlasTest(unittest.TestCase):
-    FLEET = {"acme/big": fleet_entry(400, "attention", upstream="upstream"), "acme/small": fleet_entry(100), "acme/new": fleet_entry(None, "failing")}
+    FLEET = {"acme/big": fleet_entry(400, "attention", upstream="upstream"), "acme/small": fleet_entry(100), "acme/new": fleet_entry(None)}
 
     def test_heights_scale_to_max_loc(self) -> None:
         data = atlas.data(self.FLEET)
         blocks = {b["id"]: b for b in (json.loads(l.rstrip(",")) for l in data.splitlines() if l.startswith('  {"id": "f_'))}
         self.assertEqual({b["h"] for b in blocks.values()}, {120.0, 66.0, 12.0})
-        self.assertEqual((blocks["f_big"]["h"], blocks["f_big"]["ring"], blocks["f_big"]["health"]), (120.0, True, "attention"))
+        self.assertEqual((blocks["f_big"]["h"], blocks["f_big"]["ring"], blocks["f_big"]["assessment"]), (120.0, True, "attention"))
         self.assertEqual((blocks["f_small"]["h"], blocks["f_small"]["ring"]), (66.0, False))
         self.assertEqual(blocks["f_new"]["h"], 12.0)
-        self.assertIn("not collected yet", data)
+        self.assertIn("not collected", dict(blocks["f_new"]["kpis"])["metrics"])
         roads = [l for l in data.splitlines() if l.startswith('  {"id": "p')]
         self.assertEqual(len(roads), 4)  # one dispatch road per factory + one upstream road for the fork
-        self.assertIn('"upstream = \\"upstream\\""', data)
-        self.assertIn('["factories", "3", "big · small · new"]', data)
-        self.assertIn("2 unavailable", data)
         self.assertEqual(atlas.data({}).count('"id": "f_'), 0)
+
+    def test_partial_fleet_metrics_keep_known_totals(self) -> None:
+        rows = {label: (value, detail) for label, value, detail in atlas.kpis(self.FLEET)}
+        self.assertEqual(rows["factories"], ("3", "big · small · new"))
+        self.assertEqual(rows["code under management"][0], "500")
+        self.assertIn("20 files", rows["code under management"][1])
+        self.assertIn("4 contributors", rows["code under management"][1])
+        self.assertIn("1 not collected", rows["code under management"][1])
+        self.assertEqual(rows["velocity 30d"][0], "10")
+        self.assertIn("2 PRs merged", rows["velocity 30d"][1])
+        self.assertIn("2 by agents", rows["velocity 30d"][1])
+        self.assertEqual(rows["project work"][0], "2 / 0")
+        self.assertIn("2 waiting on a human", rows["project work"][1])
+        self.assertEqual(rows["defects"][0], "0")
+        self.assertIn("0 closed 30d", rows["defects"][1])
+        self.assertIn("0 issues closed 30d", rows["defects"][1])
+        self.assertEqual(rows["traffic 14d"][0], "8")
+        self.assertIn("4 unique", rows["traffic 14d"][1])
+        self.assertIn("? views", rows["traffic 14d"][1])
+        self.assertIn("2 unavailable", rows["traffic 14d"][1])
+        self.assertIn("0 stars", rows["traffic 14d"][1])
+        self.assertIn("0 forks", rows["traffic 14d"][1])
+        unknown = {label: value for label, value, _ in atlas.kpis({"acme/new": self.FLEET["acme/new"]})}
+        self.assertEqual(unknown["code under management"], "?")
+        self.assertEqual(unknown["traffic 14d"], "?")
+
+    def test_ground_bounds_follow_factory_plate(self) -> None:
+        for count, expected_x1 in ((3, 36.5), (10, None)):
+            fleet = {f"acme/factory-{i}": fleet_entry(100) for i in range(count)}
+            script = atlas.data(fleet) + "\nconsole.log(JSON.stringify([G.x1, PLATES.find(p => p.name === 'FACTORIES').x1]));"
+            proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            ground_x1, plate_x1 = json.loads(proc.stdout)
+            self.assertEqual(ground_x1, expected_x1) if expected_x1 is not None else self.assertGreater(ground_x1, plate_x1)
+
 
     def test_data_is_valid_javascript(self) -> None:
         node = __import__("shutil").which("node")
         if not node:
             self.skipTest("node not on PATH")
-        script = atlas.data(self.FLEET) + "\nconsole.log(JSON.stringify(B.filter(b => b.cat === 'factory').map(b => [b.id, b.h]).concat([PLATES.length, P.length, KPIS.length])));"
+        script = atlas.data(self.FLEET) + "\nconsole.log(JSON.stringify({B, PLATES, P, KPIS}));"
         proc = subprocess.run([node, "-e", script], capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(json.loads(proc.stdout), [["f_big", 120], ["f_small", 66], ["f_new", 12], 6, 20, 8])
+        generated = json.loads(proc.stdout)
+        blocks = generated["B"]
+        self.assertEqual([[b["id"], b["h"]] for b in blocks if b["cat"] == "factory"],
+                         [["f_big", 120], ["f_small", 66], ["f_new", 12]])
+        self.assertEqual({p["cat"] for p in generated["PLATES"]}, {b["cat"] for b in blocks})
+        routes = {(p["from"], p["to"]) for p in generated["P"]}
+        self.assertTrue({("systemd", "dispatch"), ("dashboard", "district"),
+                         ("dispatch", "f_big"), ("dispatch", "f_small"), ("dispatch", "f_new"),
+                         ("upstream", "f_big")} <= routes)
+        self.assertFalse({("upstream", "f_small"), ("upstream", "f_new")} & routes)
+        block_ids = {b["id"] for b in blocks}
+        self.assertTrue(all(start in block_ids and end in block_ids for start, end in routes))
+        kpis = {label: (value, detail) for label, value, detail in generated["KPIS"]}
+        self.assertEqual(set(kpis), {"factories", "assessment", "code under management", "engine",
+                                    "velocity 30d", "project work", "defects", "traffic 14d"})
+        self.assertEqual(kpis["factories"], ("3", "big · small · new"))
+        self.assertEqual(kpis["code under management"][0], "500")
 
     def test_page_splices_every_marker(self) -> None:
-        page = atlas.page(self.FLEET)
-        self.assertNotIn("@@", page)
-        self.assertIn("3 factories", page)
-        self.assertIn('id="manage"', page)
-        self.assertIn("LOC/400", page)
-        self.assertIn("mikeroySoft/factory@8f9baad", page)
+        at = datetime(2026, 9, 5, 12, 34, tzinfo=timezone.utc)
+        page = atlas.page(self.FLEET, at)
+        for marker in ("@@DATA@@", "@@EYEBROW@@", "@@FOOTER@@"):
+            self.assertNotIn(marker, page)
+        self.assertIn(atlas.data(self.FLEET), page.split("<script>", 1)[1])
+        eyebrow = page.split('<div class="eyebrow">', 1)[1].split("</div>", 1)[0]
+        self.assertIn("acme", eyebrow)
+        self.assertIn("3 factories", eyebrow)
+        self.assertIn("2026-09-05 12:34Z", eyebrow)
+        footer = page.split('<footer class="site">', 1)[1].split("</footer>", 1)[0]
+        self.assertIn("big @ abc1234", footer)
+        self.assertIn("small @ abc1234", footer)
+        self.assertIn("2026-09-05 12:34Z", footer)
+
+        entry = fleet_entry(None)
+        entry["error"] = r"@@EYEBROW@@ </script> \1"
+        page = atlas.page({"acme/new": entry}, at)
+        self.assertIn(r"@@EYEBROW@@ &lt;/script&gt; \\1", page)
+
 
 
 class DashboardTest(DistrictCase):
-    def test_act_rule(self) -> None:
-        self.assertFalse(dash.act_allowed("10.0.0.5", False, "1"))
-        self.assertTrue(dash.act_allowed("10.0.0.5", True, "1"))
-        self.assertTrue(dash.act_allowed("127.0.0.1", False, "1"))
-        self.assertTrue(dash.act_allowed("::1", False, "1"))
-        self.assertFalse(dash.act_allowed("127.0.0.1", False, None))
+    def test_remote_peer_cannot_claim_loopback_authority(self) -> None:
+        from email.message import Message
+
+        headers = Message()
+        for key, value in (("Host", "127.0.0.1:8760"), ("Origin", "http://127.0.0.1:8760"), ("X-District-Act", "1")):
+            headers[key] = value
+        self.assertTrue(dash.act_allowed("127.0.0.1", ("127.0.0.1", 8760), headers))
+        self.assertFalse(dash.act_allowed("10.0.0.5", ("127.0.0.1", 8760), headers))
+        self.assertFalse(dash.act_allowed("127.0.0.1", ("10.0.0.5", 8760), headers))
+        headers["X-Forwarded-For"] = "127.0.0.1"
+        self.assertFalse(dash.act_allowed("10.0.0.5", ("127.0.0.1", 8760), headers))
+        self.assertFalse(dash.act_allowed("127.0.0.1", ("127.0.0.1", 8760), headers))
+        del headers["X-Forwarded-For"]
+        headers["Host"] = "evil.example:8760"
+        self.assertFalse(dash.act_allowed("127.0.0.1", ("127.0.0.1", 8760), headers))
+
+    def test_mutation_boundary(self) -> None:
+        import http.client
+        import threading
+        from http.server import ThreadingHTTPServer
+        from unittest.mock import patch
+
+        for bind in ("127.0.0.1", "0.0.0.0"):
+            with ThreadingHTTPServer((bind, 0), dash.Handler) as server:
+                threading.Thread(target=server.serve_forever, daemon=True).start()
+                port = server.server_port
+                good = {"Host": f"127.0.0.1:{port}", "Origin": f"http://127.0.0.1:{port}", "X-District-Act": "1"}
+                cases = [
+                    {k: v for k, v in good.items() if k != "X-District-Act"},
+                    {**good, "X-District-Act": "0"},
+                    {k: v for k, v in good.items() if k != "Origin"},
+                    {**good, "Origin": "http://evil.example"},
+                    {**good, "Host": f"evil.example:{port}", "Origin": f"http://evil.example:{port}"},
+                    {**good, "Host": "127.0.0.1:1"},
+                    {**good, "Forwarded": "for=127.0.0.1;host=localhost"},
+                    {**good, "X-Forwarded-For": "127.0.0.1"},
+                ]
+                try:
+                    with patch.object(dash.Handler, "_stream", autospec=True,
+                                      side_effect=lambda handler, argv: handler._send(200, "text/plain", b"executed")) as command:
+                        for headers in cases:
+                            for method, route in (("POST", "/api/act"), ("POST", "/api/future"), ("PUT", "/api/future"), ("DELETE", "/api/future")):
+                                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+                                connection.request(method, route, '{"args":["apply"]}', headers)
+                                response = connection.getresponse()
+                                self.assertEqual(response.status, 403, (method, route, headers))
+                                response.read()
+                                connection.close()
+                        command.assert_not_called()
+                    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                    connection.request("POST", "/api/act", '{"args":["rm","not-registered"]}', good)
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertIn(b"[exit 1]", response.read())
+                    connection.close()
+                finally:
+                    server.shutdown()
+
+    def test_detect_and_read_do_not_disclose_configuration(self) -> None:
+        import threading
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        from http.server import ThreadingHTTPServer
+
+        secret = "ghp_SUPER_SECRET_CREDENTIAL"
+        repo = self.repo(toml=f'[triage]\nurl="https://user:{secret}@example.com"\n')
+        host.save({"repo": {"acme/widgets": {"path": str(repo), "triage": {"token": secret}}}})
+        self.stub("factory", ("dashboard --json", json.dumps(dashboard(errors=[secret]))),
+                  ("doctor --json", secret))
+        with ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            try:
+                for path in ("/", "/api/fleet"):
+                    body = urllib.request.urlopen(base + path).read().decode()
+                    self.assertNotIn(secret, body)
+                    self.assertNotIn(str(repo), body)
+                target_url = base + "/api/detect?target=" + urllib.parse.quote(str(repo))
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(target_url)
+                self.assertEqual(ctx.exception.code, 403)
+                request = urllib.request.Request(target_url, headers={"X-District-Act": "1"})
+                body = json.loads(urllib.request.urlopen(request).read())
+                self.assertTrue(body["ok"], body)
+                self.assertIn("adopt", body["output"])
+                self.assertNotIn(secret, body["output"])
+                self.assertNotIn(str(repo), body["output"])
+                self.assertNotIn("doctor --json", self.calls("factory"))
+                for target in ("/etc/passwd", "--help", "https://evil.example/repo", "https://user:password@github.com/a/b"):
+                    request = urllib.request.Request(base + "/api/detect?target=" + urllib.parse.quote(target),
+                                                     headers={"X-District-Act": "1"})
+                    with self.assertRaises(urllib.error.HTTPError) as ctx:
+                        urllib.request.urlopen(request)
+                    self.assertEqual(ctx.exception.code, 400)
+                    self.assertLess(len(ctx.exception.read()), 1024)
+            finally:
+                server.shutdown()
 
     def test_server_routes(self) -> None:
         import threading
@@ -742,22 +932,23 @@ class DashboardTest(DistrictCase):
         self.addCleanup(os.environ.pop, "PYTHONPATH", None)
         server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         base = f"http://127.0.0.1:{server.server_address[1]}"
 
         page = urllib.request.urlopen(base + "/").read().decode()
         self.assertIn('"id": "f_widgets"', page)
         fleet = json.loads(urllib.request.urlopen(base + "/api/fleet").read())
-        self.assertEqual(fleet["fleet"]["acme/widgets"]["health"], "healthy")
+        self.assertEqual(fleet["fleet"]["acme/widgets"]["assessment"], "unknown")
         self.assertIn("const KPIS", fleet["data"])
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(urllib.request.Request(base + "/api/act", data=b'{"args":["apply"]}', method="POST"))
         self.assertEqual(ctx.exception.code, 403)
-        req = urllib.request.Request(base + "/api/act", data=b'{"args":["status"]}', method="POST", headers={"X-District-Act": "1"})
+        req = urllib.request.Request(base + "/api/act", data=b'{"args":["status"]}', method="POST", headers={"X-District-Act": "1", "Origin": base})
         with self.assertRaises(urllib.error.HTTPError) as ctx:
             urllib.request.urlopen(req)
         self.assertEqual(ctx.exception.code, 400)
-        req = urllib.request.Request(base + "/api/act", data=b'{"args":["apply","--reset","nope"]}', method="POST", headers={"X-District-Act": "1"})
+        req = urllib.request.Request(base + "/api/act", data=b'{"args":["apply","--reset","nope"]}', method="POST", headers={"X-District-Act": "1", "Origin": base})
         out = urllib.request.urlopen(req).read().decode()
         self.assertIn("$ district apply --reset nope", out)
         self.assertIn("nope is not registered", out)

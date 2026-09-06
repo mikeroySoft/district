@@ -1,0 +1,6 @@
+$ district apply --reset acceptance/disposable
+> acceptance/disposable: running one pass (factory-disposable.service) before re-enabling the timer
+> acceptance/disposable: pass succeeded; cap cleared, timer re-enabled
+> acceptance/disposable  0.2.0  doctor OK  drift: none  failures 0  policy 24h (npm 1d, uv 2026-09-04T23:06:27Z)
+> WARN cargo has no minimum-release-age control; crates.io installs are unguarded
+[exit 0]

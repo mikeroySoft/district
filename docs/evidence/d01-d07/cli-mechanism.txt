@@ -1,0 +1,2 @@
+repo                  operating  execution  observation  assessment  version  next  last  pass  esc  gate1  bounce  fails  upstream              evidence
+acceptance/mechanism  running    failed     fresh        attention   0.2.0    -     -     -     1    0%     100%    0      behind 2, parked #31  runtime.mechanism_unavailable

@@ -190,49 +190,75 @@ def workflow_runs(root: Path) -> list[tuple[Path, int, str, str]]:
     paths = sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml"))) if workflows.is_dir() else []
     for path in paths:
         lines = path.read_text().splitlines()
-        step_name = ""
-        step_indent = -1
         i = 0
         while i < len(lines):
-            line = lines[i]
-            indent = len(line) - len(line.lstrip())
-            if re.match(r"\s*-\s+", line) and (step_indent < 0 or indent <= step_indent):
-                step_name = ""
-                step_indent = indent
-            name_match = re.match(r"\s*(?:-\s*)?name:\s*(.+?)\s*$", line)
-            if name_match and step_indent >= 0 and indent >= step_indent:
-                step_name = name_match.group(1).strip("\"'")
-            run_match = re.match(r"(\s*)(?:-\s*)?run:\s*(.*?)\s*$", line)
-            if not run_match:
-                i += 1
+            steps_match = re.fullmatch(r"(\s*)steps:\s*(?:#.*)?", lines[i])
+            i += 1
+            if not steps_match:
                 continue
-            run_indent = line.index("run:")
-            command = run_match.group(2)
-            commands = [(i + 1, command)] if command not in {"|", ">"} else []
-            if command in {"|", ">"}:
-                i += 1
-                while i < len(lines):
-                    block_line = lines[i]
-                    block_indent = len(block_line) - len(block_line.lstrip())
-                    if block_line.strip() and block_indent <= run_indent:
-                        break
-                    if block_line.strip():
-                        commands.append((i + 1, block_line.strip()))
+            steps_indent = len(steps_match.group(1))
+            step_indent = None
+            while i < len(lines):
+                line = lines[i]
+                if not line.strip() or line.lstrip().startswith("#"):
                     i += 1
-            else:
-                i += 1
-            for line_number, command in commands:
-                if "${{" in command or any(joiner in command for joiner in ("&&", "||", ";")):
                     continue
-                try:
-                    argv = shlex.split(command)
-                except ValueError:
+                indent = len(line) - len(line.lstrip())
+                item = re.match(r"\s*-\s+", line)
+                if indent < steps_indent or (indent == steps_indent and not item):
+                    break
+                if step_indent is None:
+                    if not item:
+                        break
+                    step_indent = indent
+                if indent != step_indent or not item:
+                    break
+                # Collect a complete step: name may follow run, and nested mappings
+                # (env/with) must not be mistaken for step keys.
+                key_indent = item.end()
+                step_name = ""
+                commands = []
+                uses = False
+                while i < len(lines):
+                    line = lines[i]
+                    indent = len(line) - len(line.lstrip())
+                    if line.strip() and not line.lstrip().startswith("#") and indent < key_indent and not item:
+                        break
+                    key = re.match(r"(name|run|uses):\s*(.*?)\s*$", line[key_indent:]) if item or indent == key_indent else None
+                    item = None
+                    i += 1
+                    if not key:
+                        continue
+                    field, value = key.groups()
+                    if field == "name":
+                        step_name = value.strip("\"'")
+                    elif field == "uses":
+                        uses = True
+                    elif value not in {"|", ">"}:
+                        commands.append((i, value))
+                    if value in {"|", ">"}:
+                        while i < len(lines):
+                            block_line = lines[i]
+                            block_indent = len(block_line) - len(block_line.lstrip())
+                            if block_line.strip() and block_indent <= key_indent:
+                                break
+                            if field == "run" and block_line.strip():
+                                commands.append((i + 1, block_line.strip()))
+                            i += 1
+                if uses:
                     continue
-                if not argv or argv[0] not in WORKFLOW_COMMANDS:
-                    continue
-                raw_name = step_name or "-".join(argv[:2])
-                name = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
-                runs.append((path.relative_to(root), line_number, name, command))
+                for line_number, command in commands:
+                    if "${{" in command or any(joiner in command for joiner in ("&&", "||", ";")):
+                        continue
+                    try:
+                        argv = shlex.split(command)
+                    except ValueError:
+                        continue
+                    if not argv or argv[0] not in WORKFLOW_COMMANDS:
+                        continue
+                    raw_name = step_name or "-".join(argv[:2])
+                    name = re.sub(r"[^a-z0-9]+", "-", raw_name.lower()).strip("-")
+                    runs.append((path.relative_to(root), line_number, name, command))
     return runs
 
 
@@ -312,10 +338,21 @@ def installed_units(unit: str) -> dict:
 # ---------------------------------------------------------------- main
 
 
+def clone_destination(target: str, data: dict) -> Path:
+    name = target.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+    return Path(os.path.expanduser(host.default(data, "clone_dir"))) / name
+
+
+def dashboard_port(slug: str, existing: dict, data: dict) -> int:
+    registered = host.repos(data)
+    used = {t.get("dashboard", {}).get("port") for s, t in registered.items() if s != slug}
+    port = registered.get(slug, {}).get("dashboard", {}).get("port") or existing.get("dashboard", {}).get("port")
+    return port if port and port not in used else host.next_port(data)
+
+
 def resolve_target(arg: str, data: dict) -> Path:
     if "://" in arg or arg.startswith("git@"):
-        name = arg.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-        dest = Path(os.path.expanduser(host.default(data, "clone_dir"))) / name
+        dest = clone_destination(arg, data)
         if not dest.exists():
             run(["gh", "repo", "clone", arg, str(dest)], check=True)
             print(f"cloned {arg} -> {dest}")
@@ -375,7 +412,7 @@ def dry_run(target: str, args: argparse.Namespace, data: dict) -> int:
     """Print what `add` would do — slug, port, fork parent, checks or lifted keys — and write nothing."""
     print("dry run: nothing written")
     if "://" in target or target.startswith("git@"):
-        dest = Path(os.path.expanduser(host.default(data, "clone_dir"))) / target.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
+        dest = clone_destination(target, data)
         if not dest.exists():
             slug = remote_slug(target)
             if not slug:
@@ -391,10 +428,8 @@ def dry_run(target: str, args: argparse.Namespace, data: dict) -> int:
     repo_file = root / CONFIG_NAME
     adopt = repo_file.exists()
     existing = tomllib.loads(repo_file.read_text()) if adopt else {}
-    table = host.repos(data).get(slug, {})
-    used = {t.get("dashboard", {}).get("port") for s, t in host.repos(data).items() if s != slug}
-    port = table.get("dashboard", {}).get("port") or existing.get("dashboard", {}).get("port")
-    print(f"repo: {slug} ({'adopt' if adopt else 'onboard'})\npath: {root}\ndashboard port: {port if port and port not in used else host.next_port(data)}")
+    port = dashboard_port(slug, existing, data)
+    print(f"repo: {slug} ({'adopt' if adopt else 'onboard'})\npath: {root}\ndashboard port: {port}")
     parent = fork_parent(slug)
     print(f"fork of: {parent}" if parent else "not a fork")
     if adopt:
@@ -442,10 +477,7 @@ def main(argv: list[str]) -> int:
     # 1. registry entry first: both paths depend on the port and path being persisted
     table = host.repo_table(data, slug)
     table["path"] = str(root)
-    used = {t.get("dashboard", {}).get("port") for s, t in registered.items() if s != slug}
-    port = table.get("dashboard", {}).get("port") or existing.get("dashboard", {}).get("port")
-    if not port or port in used:
-        port = host.next_port(data)
+    port = dashboard_port(slug, existing, data)
     table.setdefault("dashboard", {})["port"] = port
     host.save(data)
     print(f"registered {slug} at {root} (dashboard port {port})")

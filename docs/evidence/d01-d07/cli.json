@@ -1,0 +1,108 @@
+[
+  {
+    "slug": "acceptance/scheduled",
+    "text_exit": 0,
+    "json_exit": 0,
+    "assessment": "normal",
+    "operating_state": "scheduled waiting",
+    "execution_state": "known wait",
+    "observation": "fresh",
+    "conditions": []
+  },
+  {
+    "slug": "acceptance/paused",
+    "text_exit": 0,
+    "json_exit": 0,
+    "assessment": "normal",
+    "operating_state": "deliberately paused",
+    "execution_state": "known wait",
+    "observation": "fresh",
+    "conditions": []
+  },
+  {
+    "slug": "acceptance/capped",
+    "text_exit": 1,
+    "json_exit": 1,
+    "assessment": "attention",
+    "operating_state": "capped",
+    "execution_state": "known wait",
+    "observation": "fresh",
+    "conditions": [
+      "scheduling.capped"
+    ]
+  },
+  {
+    "slug": "acceptance/stopped",
+    "text_exit": 1,
+    "json_exit": 1,
+    "assessment": "attention",
+    "operating_state": "unexpectedly stopped",
+    "execution_state": "unknown",
+    "observation": "fresh",
+    "conditions": [
+      "scheduling.unexpected_stop"
+    ]
+  },
+  {
+    "slug": "acceptance/stale",
+    "text_exit": 2,
+    "json_exit": 2,
+    "assessment": "unknown",
+    "operating_state": "scheduled waiting",
+    "execution_state": "known wait",
+    "observation": "stale",
+    "conditions": []
+  },
+  {
+    "slug": "acceptance/partial",
+    "text_exit": 2,
+    "json_exit": 2,
+    "assessment": "unknown",
+    "operating_state": "running",
+    "execution_state": "stage-active",
+    "observation": "partial",
+    "conditions": []
+  },
+  {
+    "slug": "acceptance/unavailable",
+    "text_exit": 2,
+    "json_exit": 2,
+    "assessment": "unknown",
+    "operating_state": "unknown",
+    "execution_state": "unknown",
+    "observation": "unavailable",
+    "conditions": []
+  },
+  {
+    "slug": "acceptance/unknown",
+    "text_exit": 2,
+    "json_exit": 2,
+    "assessment": "unknown",
+    "operating_state": "unknown",
+    "execution_state": "unknown",
+    "observation": "fresh",
+    "conditions": []
+  },
+  {
+    "slug": "acceptance/project",
+    "text_exit": 0,
+    "json_exit": 0,
+    "assessment": "normal",
+    "operating_state": "scheduled waiting",
+    "execution_state": "failed",
+    "observation": "fresh",
+    "conditions": []
+  },
+  {
+    "slug": "acceptance/mechanism",
+    "text_exit": 1,
+    "json_exit": 1,
+    "assessment": "attention",
+    "operating_state": "running",
+    "execution_state": "failed",
+    "observation": "fresh",
+    "conditions": [
+      "runtime.mechanism_unavailable"
+    ]
+  }
+]
