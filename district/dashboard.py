@@ -105,7 +105,7 @@ class Handler(BaseHTTPRequestHandler):
             return False
         if self.command in ("GET", "HEAD", "OPTIONS") and not valid_destination(
                 self.connection.getsockname(), self.headers,
-                document_navigation=self.command in ("GET", "HEAD") and urlparse(self.path).path == "/"):
+                document_navigation=self.command in ("GET", "HEAD") and urlparse(self.path).path in ("/", "/legacy")):
             self._forbidden()
             return False
         return True

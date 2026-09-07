@@ -59,11 +59,12 @@ class DashboardPolicyTest(unittest.TestCase):
 
     def test_cross_site_document_navigation_preserves_read_viewing(self):
         for authority in (self.authority, f"localhost:{self.server.server_port}"):
-            with self.subTest(authority=authority):
-                headers = [("Host", authority), ("Sec-Fetch-Site", "cross-site"),
-                           ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")]
-                code, body, _ = self.request(route="/?view=overview", headers=headers)
-                self.assertEqual(code, 200)
+            for route in ("/?view=overview", "/legacy"):
+                with self.subTest(authority=authority, route=route):
+                    headers = [("Host", authority), ("Sec-Fetch-Site", "cross-site"),
+                               ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")]
+                    code, body, _ = self.request(route=route, headers=headers)
+                    self.assertEqual(code, 200)
         code, body, _ = self.request(route="/api/fleet")
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)["fleet"], {})

@@ -160,20 +160,25 @@ function render() {
     select.replaceChildren(...values.map(slug=>{const option=el('option',slug || 'All factories'); option.value=slug; return option;}));
   }
   select.value=selected || '';
-  const notice=byId('notice'), messages=[];
+  const notice=byId('notice'), messages=[], loaded=state.revision!==null;
   let entries=Object.entries(state.fleet);
   if (selected) {
     if (state.fleet[selected]) entries=[[selected,state.fleet[selected]]];
-    else { entries=[]; messages.push(`Factory ${selected} was removed or is not present in the current cached fleet. No other factory's facts are substituted.`); }
+    else { entries=[]; if (loaded) messages.push(`Factory ${selected} was removed or is not present in the current cached fleet. No other factory's facts are substituted.`); }
   }
   if (selected && state.fleet[selected]) messages.push(...validateSelection(selected,state.fleet[selected]));
   notice.replaceChildren(...messages.map(message=>el('p',message))); notice.classList.toggle('hidden',!messages.length);
-  const region=byId('factories'); region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
-  if (!entries.length && !messages.length) region.append(el('p','No factories are present in the current cached fleet observation.','empty'));
-  region.setAttribute('aria-busy','false'); byId('revision').textContent=state.revision===null?'not loaded':`revision ${state.revision}`;
+  const region=byId('factories'), fingerprint=JSON.stringify([loaded,messages.length>0,entries]);
+  if (region.dataset.fingerprint!==fingerprint) {
+    region.dataset.fingerprint=fingerprint;
+    region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
+    if (!entries.length && !loaded) region.append(el('p','Loading the cached fleet observation…','empty'));
+    else if (!entries.length && !messages.length) region.append(el('p','No factories are present in the current cached fleet observation.','empty'));
+    region.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
+  }
+  region.setAttribute('aria-busy',String(!loaded)); byId('revision').textContent=loaded?`revision ${state.revision}`:'not loaded';
   const selectedContext=selectionKeys.filter(key=>p.get(key)).map(key=>`${key}: ${p.get(key)}`);
   byId('selection').textContent=selectedContext.join(' · '); byId('selection').classList.toggle('hidden',!selectedContext.length);
-  region.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
   if (active===select) select.focus({preventScroll:true});
   else if (focusedLink) region.querySelector(`[data-factory="${CSS.escape(focusedLink[0])}"]`)?.querySelectorAll('a')[focusedLink[1]]?.focus({preventScroll:true});
   if (state.restoreScroll) { const y=history.state?.scrollY || 0; requestAnimationFrame(()=>scrollTo(0,y)); state.restoreScroll=false; }
