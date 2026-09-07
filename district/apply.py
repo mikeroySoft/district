@@ -98,7 +98,8 @@ def upgrade(data: dict, active_timers: list[str]) -> None:
     for timer in active_timers:
         systemctl("disable", "--now", timer)
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
-    wait_inactive([t.removesuffix(".timer") + ".service" for t in active_timers], SERVICE_WAIT)
+    # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
+    wait_inactive([f"{host.unit_name(s)}.service" for s in host.repos(data)], SERVICE_WAIT)
     proc = run(["uv", "tool", "install", "--reinstall", "--from", str(src), "factory"])
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
