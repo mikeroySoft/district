@@ -616,7 +616,8 @@ class ApplyTest(DistrictCase):
         data["defaults"] = {"factory_source": str(src)}
         host.save(data)
         self.stub("uv", ("tool install *", "Installed 1 executable: factory\n"))
-        self.stub("factory", ("--version", "0.2.0\n"))
+        self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)),
+                  ("dashboard --json", json.dumps(dashboard())))
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         code, out = self.district("apply", "--upgrade")
         self.assertEqual(code, 0, out)

@@ -233,16 +233,15 @@ def main(argv: list[str]) -> int:
         active = [t for t in all_timers if host.is_active(t) == "active"]
         rows = []
         code = 0
-        try:
-            if args.upgrade:
+        if args.upgrade:
+            try:
                 upgrade(data, active)
-            for slug, table in targets.items():
-                if args.reset and not reset(slug, table, data):
-                    code = 1
-                rows.append(repo_pass(slug, table, data))
-        finally:
-            if args.upgrade:
+            finally:
                 restore(active, data)
+        for slug, table in targets.items():
+            if args.reset and not reset(slug, table, data):
+                code = 1
+            rows.append(repo_pass(slug, table, data))
 
         for row in rows:
             print(line(row, status))
