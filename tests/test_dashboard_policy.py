@@ -9,6 +9,7 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -102,6 +103,11 @@ class DashboardPolicyTest(unittest.TestCase):
         code, body, _ = self.request(route="/legacy")
         self.assertEqual(code, 200)
         self.assertNotIn("<title>District operations console</title>", body.decode())
+        for hostile in ('"><script>x</script>', 'overview ', 'OVERVIEW'):
+            code, body, _ = self.request(route=f"/?view={quote(hostile)}")
+            self.assertEqual(code, 200)
+            self.assertNotIn("<title>District operations console</title>", body.decode())
+            self.assertNotIn(hostile, body.decode())
 
 
     def test_cross_site_data_and_embedded_documents_are_refused_before_collection(self):

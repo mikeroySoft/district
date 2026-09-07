@@ -73,7 +73,7 @@ footer { border-top:1px solid var(--line); padding:var(--s4); color:var(--muted)
   <p class="intro" id="intro"></p>
   <p id="selection" class="intro hidden"></p>
   <div id="notice" class="notice hidden" role="status"></div>
-  <section id="factories" class="grid" aria-live="polite" aria-busy="true"></section>
+  <section id="factories" class="grid" aria-busy="true"></section>
 </main>
 <footer><a href="/legacy">Legacy Atlas and management</a> · cached fleet observation <span id="revision">not loaded</span></footer>
 <script>
@@ -92,6 +92,12 @@ function urlFor(nextView=view(), factory=params().get('factory')) {
   const p = new URLSearchParams(params());
   p.set('view', nextView);
   if (factory) p.set('factory', factory); else p.delete('factory');
+  if (factory !== params().get('factory')) {
+    // A scope change clears factory-bound selection; a stage filter survives only where it has evidence.
+    p.delete('execution'); p.delete('panel');
+    const records = factory ? [state.fleet[factory]] : Object.values(state.fleet);
+    if (!records.some(record => (record?.executions || []).some(item => item.stage === p.get('stage')))) p.delete('stage');
+  }
   return '/?' + p.toString();
 }
 function saveScroll() {
@@ -138,7 +144,7 @@ function factoryCard(slug, record) {
   const destination=factoryURL(record); if (destination) { const link=el('a','Open Factory'); link.href=destination; link.target='_blank'; link.rel='noopener'; actions.append(link); }
   card.append(actions); return card;
 }
-function validateSelection(selected, record) {
+function validateSelection(record) {
   const p=params(), messages=[];
   const execution=p.get('execution'), stage=p.get('stage'), panel=p.get('panel');
   if (execution && !(record?.executions || []).some(item=>item.id===execution)) messages.push(`Execution ${execution} is no longer in the cached evidence window.`);
@@ -166,9 +172,9 @@ function render() {
     if (state.fleet[selected]) entries=[[selected,state.fleet[selected]]];
     else { entries=[]; if (loaded) messages.push(`Factory ${selected} was removed or is not present in the current cached fleet. No other factory's facts are substituted.`); }
   }
-  if (selected && state.fleet[selected]) messages.push(...validateSelection(selected,state.fleet[selected]));
+  if (selected && state.fleet[selected]) messages.push(...validateSelection(state.fleet[selected]));
   notice.replaceChildren(...messages.map(message=>el('p',message))); notice.classList.toggle('hidden',!messages.length);
-  const region=byId('factories'), fingerprint=JSON.stringify([loaded,messages.length>0,entries]);
+  const region=byId('factories'), fingerprint=JSON.stringify([loaded,messages.length>0,location.search,entries]);
   if (region.dataset.fingerprint!==fingerprint) {
     region.dataset.fingerprint=fingerprint;
     region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
@@ -185,10 +191,14 @@ function render() {
 }
 async function poll() {
   try { const response=await fetch('/api/fleet',{cache:'no-store'}); if (!response.ok) throw new Error(); const payload=await response.json(); state.fleet=payload.fleet || {}; state.revision=payload.revision; render(); }
-  catch { byId('notice').textContent='Cached fleet observation is currently unavailable.'; byId('notice').classList.remove('hidden'); byId('factories').setAttribute('aria-busy','false'); }
+  catch {
+    byId('notice').textContent='Cached fleet observation is currently unavailable.'; byId('notice').classList.remove('hidden');
+    const region=byId('factories'); region.setAttribute('aria-busy','false');
+    if (state.revision===null) { region.dataset.fingerprint='unavailable'; region.replaceChildren(el('p','No cached fleet observation has been received yet.','empty')); }
+  }
 }
 document.querySelectorAll('[data-view-link],.brand').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
-byId('scope').addEventListener('change',event=>{ const p=new URLSearchParams(params()), target=event.target.value; p.set('view',view()); if(target)p.set('factory',target);else p.delete('factory'); p.delete('execution'); p.delete('panel'); const records=target?[state.fleet[target]]:Object.values(state.fleet); if(!records.some(record=>(record?.executions || []).some(item=>item.stage===p.get('stage'))))p.delete('stage'); navigate('/?'+p.toString()); });
+byId('scope').addEventListener('change',event=>navigate(urlFor(view(), event.target.value || null)));
 addEventListener('popstate',()=>{state.restoreScroll=true; render(); poll();});
 history.replaceState({...history.state,scrollY:history.state?.scrollY ?? scrollY},'',location.href);
 render(); poll(); setInterval(poll,5000);
