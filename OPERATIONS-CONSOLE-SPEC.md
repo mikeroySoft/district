@@ -215,9 +215,9 @@ Unknown lock ownership remains explicit but is not independently an incident.
 
 The full-snapshot transport is `factory dashboard --json`, adapted by
 `health.snapshot_sources(snap, error)`. Its `generated_at` is retained as source
-time. Direct CLI snapshots have unknown cadence (`cadence_seconds: null`);
-server-collected snapshots use the configured full-snapshot interval (60 seconds
-by default) without replacing the source timestamp with collection time. The
+time. CLI status collects one bounded runtime/full round through the same collector
+as the server, using its five-second runtime and 60-second full-source freshness
+budgets. It does not start periodic polling or replace source time with collection time. The
 full snapshot lacks confirmed execution telemetry: by itself it normally remains
 partial/unknown, even when running or scheduled. Positive service/timer
 observations are usable; legacy false booleans also encode failed probes and
@@ -328,14 +328,17 @@ Precise serialized keys within these objects and lifecycle invariants must be do
 
 D02's dashboard server owns one collector and one cache for all browser clients.
 Runtime observations are due five seconds after their previous collection ends,
-with a four-second command deadline and at most eight concurrent Factory command
+with a four-second runtime command deadline and at most eight concurrent Factory command
 groups. A factory has at most one
 runtime/full collection in flight, so a slow or hung source cannot overlap or
 hold publication of other factories. Full `factory dashboard --json`
+is GitHub-bound (about two seconds typical on the target host, with spikes past
+four) and uses its own 30-second deadline. The same bound applies to the one-shot
+CLI, which has no last-known cache to fall back on. Full
 GitHub/config observations use a separate schedule (60 seconds by default), whose
-configured interval supplies their source freshness cadence. Direct CLI snapshots
-have no periodic schedule and retain null cadence. Neither collection nor rereads
-replace the producer's `generated_at`. Existing hourly repository metrics remain
+configured interval supplies their source freshness cadence. CLI status takes one
+round with the same source adapters and freshness budgets, without a background
+schedule. Neither collection nor rereads replace the producer's `generated_at`. Existing hourly repository metrics remain
 outside both paths. Browser polling reads only this cache and never starts collection.
 
 The collector reloads the host registry on the configured runtime interval
@@ -345,11 +348,18 @@ A failed registry read preserves the last valid registry. The worker bound is
 the configured concurrency capped at eight, independent of initial registry size,
 so newly registered factories can use the same capacity.
 
-F03 dispatcher/execution/resource quality flags and incomplete history remain
-authoritative even when `errors` is empty. A partial or unavailable member makes
-the single normalized runtime source conservatively partial (or stale by age),
-without discarding its usable facts or renewing source timestamps. An unknown
-resource owner therefore cannot become fresh/normal merely through adaptation.
+F03 dispatcher/execution/resource quality flags remain authoritative even when
+`errors` is empty. Ordinary `byte_limit`/`event_limit` history-window bounds remain
+explicit in `activity.history` but do not invalidate independently complete current
+evidence. Execution/resource quality is attached to that record through its
+normalized optional `error`; it does not degrade unrelated complete records.
+Source/transport errors still affect every member. Missing entries and other
+causal gaps remain partial on the affected records; ambiguous history not
+accounted for by authoritative record quality remains a source-wide error.
+Aggregate observation stays partial while any member is uncertain. The browser
+retains up to 32 sanitized structured diagnostics in `activity.errors`, with
+`projection.omitted.activity_errors` disclosing dropped diagnostics. Nothing
+discards usable facts or renews source timestamps to make the fleet normal.
 
 Each completed factory result increments the cache revision independently.
 The API reports the revision and configured bounds; entries expose original

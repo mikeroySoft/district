@@ -1105,7 +1105,7 @@ class DashboardTest(DistrictCase):
             with ThreadingHTTPServer((bind, 0), dash.Handler) as server:
                 server.collector = mock.Mock(
                     read=mock.Mock(return_value=(0, {})),
-                    runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+                    runtime_interval=5, full_interval=30, timeout=10, full_timeout=30, concurrency=4,
                 )
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 port = server.server_port
@@ -1156,7 +1156,7 @@ class DashboardTest(DistrictCase):
         with ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler) as server:
             server.collector = mock.Mock(
                 read=mock.Mock(return_value=(1, status.fleet(host.load()))),
-                runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+                runtime_interval=5, full_interval=30, timeout=10, full_timeout=30, concurrency=4,
             )
             threading.Thread(target=server.serve_forever, daemon=True).start()
             base = f"http://127.0.0.1:{server.server_port}"
@@ -1199,7 +1199,7 @@ class DashboardTest(DistrictCase):
         server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
         server.collector = mock.Mock(
             read=mock.Mock(return_value=(1, status.fleet(host.load()))),
-            runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+            runtime_interval=5, full_interval=30, timeout=10, full_timeout=30, concurrency=4,
         )
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
