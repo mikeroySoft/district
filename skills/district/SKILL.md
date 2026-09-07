@@ -5,7 +5,7 @@ description: Operate District, the host-side fleet manager for Factory installat
 
 # District
 
-`district` manages many repositories that each run the `factory` pipeline on one Linux host. The registry and shared settings live in `~/.config/agent-factory/config.toml`. `district --help` lists operations; `district <command> --help` is the source of truth for options.
+`district` manages many repositories that each run the `factory` pipeline on one Linux host. The registry and shared settings live in `~/.config/factory/config.toml`. `district --help` lists operations; `district <command> --help` is the source of truth for options.
 
 First run `district --version`. If absent, install it with the first available of:
 

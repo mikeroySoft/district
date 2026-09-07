@@ -32,7 +32,7 @@ class DashboardPolicyTest(unittest.TestCase):
         self.server = ThreadingHTTPServer(("0.0.0.0", 0), FutureHandler)
         self.collector = SimpleNamespace(
             read=Mock(return_value=(7, {})), runtime_interval=2.5, full_interval=47,
-            timeout=3.5, concurrency=6,
+            timeout=3.5, full_timeout=21, concurrency=6,
         )
         self.server.collector = self.collector
         self.addCleanup(self.server.server_close)
@@ -80,7 +80,7 @@ class DashboardPolicyTest(unittest.TestCase):
         self.assertEqual(payload["fleet"]["acme/widgets"]["snap"]["version"], "1.2.3")
         self.assertEqual(payload["cache"], {
             "runtime_interval_seconds": 2.5, "full_interval_seconds": 47,
-            "factory_timeout_seconds": 3.5, "concurrency": 6,
+            "factory_timeout_seconds": 3.5, "full_timeout_seconds": 21, "concurrency": 6,
             "event_limit_per_factory": dash.status.EVENT_LIMIT,
         })
 

@@ -1,4 +1,4 @@
-"""`district status`: one table for the fleet, from `factory dashboard --json` per repo.
+"""`district status`: one bounded runtime/full observation round for the fleet.
 
 Exit 1 for operational attention, 2 for unknown observation without attention,
 0 for normal operation (including an empty fleet). JSON retains project context.
@@ -79,6 +79,7 @@ def entry(result: dict, table: dict) -> dict:
 RUNTIME_INTERVAL = 5.0
 FULL_INTERVAL = 60.0
 COLLECTION_TIMEOUT = 4.0
+FULL_TIMEOUT = 30.0  # `factory dashboard --json` is GitHub-bound: ~2s typical, spikes past 4s
 COLLECTION_CONCURRENCY = 8
 EVENT_LIMIT = 512
 
@@ -95,30 +96,52 @@ def _runtime_error(data: dict) -> str | None:
     if not isinstance(errors, list):
         return "runtime errors malformed"
     details = []
+    # Window bounds and interleaved legacy audit rows (position -1 in the producer) are
+    # history disclosures; they never make a retained record uncertain.
+    disclosures = ("byte_limit", "event_limit", "unsupported_record")
+    record_scopes = {
+        scope for scope in ("executions", "resources")
+        if isinstance(data.get(scope), list) and data[scope]
+        and all(isinstance(record, dict) and record.get("observation") in ("fresh", "partial", "unavailable")
+                for record in data[scope])
+    }
+    # In a record scope the producer stamps the affected record's observation, except
+    # `configuration` diagnostics (lock_limit, invalid_scope, ...) which describe a
+    # configured resource that never became a record.
+    record_gaps = {error["code"] for error in errors if isinstance(error, dict)
+                   and isinstance(error.get("scope"), str) and error["scope"] in record_scopes
+                   and isinstance(error.get("code"), str) and error.get("source") != "configuration"}
+    history = data.get("history")
     for error in errors:
         if isinstance(error, dict) and all(isinstance(error.get(key), str) for key in ("source", "scope", "code")):
+            if error["scope"] == "history" and error["code"] in disclosures:
+                continue  # Retained-window limits remain explicit in activity.history.
+            if error["scope"] in record_scopes and error["code"] in record_gaps:
+                continue  # Each affected record carries its own quality; diagnostics remain in activity.errors.
             details.append(f"{error['source']}/{error['scope']}:{error['code']}")
         else:
             details.append("malformed structured error")
-    history = data.get("history")
     if not isinstance(history, dict):
         details.append("runtime history malformed")
     else:
         gaps = history.get("gaps")
         if isinstance(gaps, list):
-            details.extend(f"history:{gap}" for gap in gaps if isinstance(gap, str))
+            details.extend(f"history:{gap}" for gap in gaps
+                           if isinstance(gap, str) and gap not in disclosures and gap not in record_gaps)
         elif gaps is not None:
             details.append("runtime history gaps malformed")
-        if history.get("truncated") is True:
+        bounded_window = (history.get("status") == "available" and isinstance(gaps, list)
+                          and bool(gaps) and all(isinstance(gap, str) and
+                              (gap in disclosures or gap in record_gaps) for gap in gaps))
+        if history.get("truncated") is True and not bounded_window:
             details.append("history:truncated")
-        if history.get("complete") is not True:
+        if history.get("complete") is not True and not bounded_window:
             details.append("history:incomplete")
     # F03's per-observation quality is authoritative even without an error row
     # (for example, a held lock whose owner cannot be confirmed).
     for scope, records in (
         ("dispatcher", [data.get("dispatcher")]),
-        ("executions", data.get("executions", [])),
-        ("resources", data.get("resources", [])),
+        *((scope, data.get(scope, [])) for scope in ("executions", "resources") if scope not in record_scopes),
     ):
         for record in records:
             quality = record.get("observation") if isinstance(record, dict) else None
@@ -164,6 +187,7 @@ def runtime_source(data: dict, slug: str, cadence: float = RUNTIME_INTERVAL) -> 
             "reason": item.get("reason") or (wait.get("reason") if isinstance(wait, dict) else None),
             "outcome_kind": kind,
             "reference": item.get("latest_event_id"),
+            "error": None if item.get("observation") == "fresh" else "execution observation incomplete",
         })
 
     normalized_resources = []
@@ -178,6 +202,7 @@ def runtime_source(data: dict, slug: str, cadence: float = RUNTIME_INTERVAL) -> 
             "held": True if item.get("state") == "held" else False if item.get("state") == "free" else None,
             "owner": {"factory": slug, "execution_id": owner.get("execution_id")} if confirmed else None,
             "observed_at": item.get("observed_at"),
+            "error": None if item.get("observation") == "fresh" else "resource observation incomplete",
         })
     history = data["history"]
     normalized = {
@@ -209,6 +234,8 @@ def runtime_source(data: dict, slug: str, cadence: float = RUNTIME_INTERVAL) -> 
     activity = {
         "events": events[-EVENT_LIMIT:],
         "history": history if isinstance(history, dict) else {},
+        "errors": [error for error in data["errors"] if isinstance(error, dict)][:32]
+                  if isinstance(data["errors"], list) else [],
     }
     return source, activity
 
@@ -218,11 +245,12 @@ class FleetCollector:
 
     def __init__(self, data: dict, *, runtime_interval: float = RUNTIME_INTERVAL,
                  full_interval: float = FULL_INTERVAL, timeout: float = COLLECTION_TIMEOUT,
-                 concurrency: int = COLLECTION_CONCURRENCY):
+                 full_timeout: float = FULL_TIMEOUT, concurrency: int = COLLECTION_CONCURRENCY):
         self.repos = host.repos(data)
         self.runtime_interval = runtime_interval
         self.full_interval = full_interval
         self.timeout = timeout
+        self.full_timeout = full_timeout
         self.concurrency = max(1, min(concurrency, COLLECTION_CONCURRENCY))
         self.revision = 0
         self._records = {slug: self._new_record() for slug in self.repos}
@@ -352,7 +380,7 @@ class FleetCollector:
             if record is None:
                 return
             table = self.repos[slug]
-        result = snapshot(slug, table, timeout=self.timeout)
+        result = snapshot(slug, table, timeout=self.full_timeout)
         with self._lock:
             if self._records.get(slug) is not record:
                 return
@@ -372,6 +400,7 @@ class FleetCollector:
             records = {
                 slug: {**record, "runtime": dict(record["runtime"]) if record["runtime"] else None,
                        "activity": {"events": list(record["activity"]["events"]),
+                                    "errors": list(record["activity"].get("errors", [])),
                                     "history": dict(record["activity"]["history"])}}
                 for slug, record in self._records.items()
             }
@@ -406,7 +435,7 @@ class FleetCollector:
     def stop(self) -> None:
         self._stop.set()
         if self._thread:
-            self._thread.join(self.timeout + 1)
+            self._thread.join(max(self.timeout, self.full_timeout) + 1)
         if self._pool:
             self._pool.shutdown(wait=True, cancel_futures=True)
         self._thread = None
@@ -414,13 +443,19 @@ class FleetCollector:
 
 
 def fleet(data: dict) -> dict[str, dict]:
-    """{slug: entry} for every registered repo; snapshots are taken in parallel."""
-    repos = host.repos(data)
-    if not repos:
+    """Collect one bounded runtime/full round through the server's observation path."""
+    collector = FleetCollector(data)
+    if not collector.repos:
         return {}
-    with ThreadPoolExecutor(max_workers=min(8, len(repos))) as pool:
-        results = list(pool.map(lambda kv: snapshot(*kv), repos.items()))
-    return {r["slug"]: entry(r, repos[r["slug"]]) for r in results}
+
+    def collect(slug: str) -> None:
+        collector.collect_runtime(slug)
+        collector.collect_full(slug)
+
+    with ThreadPoolExecutor(max_workers=collector.concurrency) as pool:
+        for _ in pool.map(collect, collector.repos):
+            pass
+    return collector.fleet()
 
 
 def row(slug: str, e: dict) -> dict:

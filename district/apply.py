@@ -98,7 +98,8 @@ def upgrade(data: dict, active_timers: list[str]) -> None:
     for timer in active_timers:
         systemctl("disable", "--now", timer)
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
-    wait_inactive([t.removesuffix(".timer") + ".service" for t in active_timers], SERVICE_WAIT)
+    # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
+    wait_inactive([f"{host.unit_name(s)}.service" for s in host.repos(data)], SERVICE_WAIT)
     proc = run(["uv", "tool", "install", "--reinstall", "--from", str(src), "factory"])
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
@@ -233,16 +234,15 @@ def main(argv: list[str]) -> int:
         active = [t for t in all_timers if host.is_active(t) == "active"]
         rows = []
         code = 0
-        try:
-            if args.upgrade:
+        if args.upgrade:
+            try:
                 upgrade(data, active)
-            for slug, table in targets.items():
-                if args.reset and not reset(slug, table, data):
-                    code = 1
-                rows.append(repo_pass(slug, table, data))
-        finally:
-            if args.upgrade:
+            finally:
                 restore(active, data)
+        for slug, table in targets.items():
+            if args.reset and not reset(slug, table, data):
+                code = 1
+            rows.append(repo_pass(slug, table, data))
 
         for row in rows:
             print(line(row, status))

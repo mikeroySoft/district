@@ -16,16 +16,17 @@ D02 input (JSON-compatible; optional/missing facts remain unknown):
   executions: [{id: str, state: "stage-active"|"known wait"|"blocked"|
     "completed"|"failed"|"interrupted"|"unknown", stage?: reported str,
     observed_at?: timestamp, entered_at?: timestamp, reason?: str,
-    outcome_kind?: "product"|"mechanism"|"unknown", reference?: str}].
+    outcome_kind?: "product"|"mechanism"|"unknown", reference?: str, error?: str|null}].
     observed_at means last confirmed observation, NOT stage entry time. Omit it
     to use the source observation. Mechanism means inability to execute the
     configured mechanism, never an ordinary negative verdict. A failed/blocked
     outcome without a known kind has unknown operational significance.
     [] explicitly reports no executions; omitting the key reports no telemetry.
   resources: [{id: opaque str, held: bool|null,
-    owner?: {factory: str, execution_id: str}|null, observed_at?: timestamp}].
+    owner?: {factory: str, execution_id: str}|null, observed_at?: timestamp, error?: str|null}].
     Only an explicit owner confirms ownership; a known terminal execution clears
     its ownership claim. A held lock by itself is not a finding.
+    A record error makes only that record partial; source errors affect all records.
   checks: [{condition: one of CHECKS below, resource: opaque str,
     status: "failed"|"passed"|"unknown", detail: nonempty str,
     impact: nonempty str, cause?: str, reference?: str, observed_at?: timestamp,
@@ -70,10 +71,10 @@ Empty execution telemetry is known wait only with scheduled/paused/capped dispat
 Operating precedence is capped, recorded pause, running, scheduled, stopped,
 unknown: admission may be capped/paused while an existing execution still runs.
 
-Legacy adapter: generated_at remains source time. Direct CLI snapshots have
-unknown cadence (cadence_seconds=None); the server collector sets cadence_seconds
-to its configured full-snapshot interval (60 seconds by default), without
-replacing source time with collection time. True service/timer facts are usable;
+Legacy adapter: generated_at remains source time. The adapter alone has unknown
+cadence; both one-shot CLI and server collection set the same full-source freshness
+budget (60 seconds by default), without replacing source time with collection time.
+True service/timer facts are usable;
 false collapses failed probes and becomes unknown. Ticket phases/artifact times,
 project escalations, bounce rates and parked upstream work are never execution
 telemetry or findings. GitHub errors do not erase local dispatcher facts. Unit
@@ -284,7 +285,8 @@ def classify(slug: str, sources: list[dict], table: dict, at: datetime | None = 
                     source["observation"] = "partial"
                     continue
                 timestamp = record.get("observed_at", source["observed_at"])
-                record_quality, _ = _quality(timestamp, source["cadence_seconds"], at, error=source["error"])
+                record_quality, _ = _quality(timestamp, source["cadence_seconds"], at,
+                                            error=source["error"] or record.get("error"))
                 fields = (("id", "state", "stage", "entered_at", "reason", "outcome_kind", "reference")
                           if key == "executions" else ("id", "held", "owner"))
                 item = {k: record[k] for k in fields if k in record}
