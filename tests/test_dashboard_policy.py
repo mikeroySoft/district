@@ -9,6 +9,7 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import quote
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -59,11 +60,12 @@ class DashboardPolicyTest(unittest.TestCase):
 
     def test_cross_site_document_navigation_preserves_read_viewing(self):
         for authority in (self.authority, f"localhost:{self.server.server_port}"):
-            with self.subTest(authority=authority):
-                headers = [("Host", authority), ("Sec-Fetch-Site", "cross-site"),
-                           ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")]
-                code, body, _ = self.request(route="/?view=overview", headers=headers)
-                self.assertEqual(code, 200)
+            for route in ("/?view=overview", "/legacy"):
+                with self.subTest(authority=authority, route=route):
+                    headers = [("Host", authority), ("Sec-Fetch-Site", "cross-site"),
+                               ("Sec-Fetch-Mode", "navigate"), ("Sec-Fetch-Dest", "document")]
+                    code, body, _ = self.request(route=route, headers=headers)
+                    self.assertEqual(code, 200)
         code, body, _ = self.request(route="/api/fleet")
         self.assertEqual(code, 200)
         self.assertEqual(json.loads(body)["fleet"], {})
@@ -83,8 +85,30 @@ class DashboardPolicyTest(unittest.TestCase):
             "factory_timeout_seconds": 3.5, "full_timeout_seconds": 21, "concurrency": 6,
             "event_limit_per_factory": dash.status.EVENT_LIMIT,
         })
+
+    def test_console_and_legacy_routes_remain_reachable(self):
         self.assertEqual(self.request(route="/")[0], 200)
         self.fleet.assert_not_called()
+        routes = (
+            ("/?view=overview", "Overview"),
+            ("/?view=flows&factory=acme%2Fwidgets&stage=gate", "Flows"),
+            ("/?view=brief&factory=acme%2Fwidgets", "Brief"),
+        )
+        for route, view in routes:
+            code, body, _ = self.request(route=route)
+            self.assertEqual(code, 200)
+            page = body.decode()
+            self.assertIn("<title>District operations console</title>", page)
+            self.assertIn(f'data-view="{view.lower()}"', page)
+        code, body, _ = self.request(route="/legacy")
+        self.assertEqual(code, 200)
+        self.assertNotIn("<title>District operations console</title>", body.decode())
+        for hostile in ('"><script>x</script>', 'overview ', 'OVERVIEW'):
+            code, body, _ = self.request(route=f"/?view={quote(hostile)}")
+            self.assertEqual(code, 200)
+            self.assertNotIn("<title>District operations console</title>", body.decode())
+            self.assertNotIn(hostile, body.decode())
+
 
     def test_cross_site_data_and_embedded_documents_are_refused_before_collection(self):
         cases = [
