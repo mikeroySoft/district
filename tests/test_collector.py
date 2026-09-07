@@ -82,6 +82,31 @@ class FleetCollectorTest(unittest.TestCase):
             self.assertEqual(len(calls), before)
             release.set()
 
+    def test_one_shot_fleet_collects_the_same_runtime_evidence(self):
+        data = runtime("acme/fast", stamp=datetime.now(timezone.utc).isoformat())
+        def run(argv, **kwargs):
+            payload = data if "--runtime-json" in argv else {"generated_at": data["generated_at"]}
+            return subprocess.CompletedProcess(argv, 0, json.dumps(payload), "")
+        with mock.patch.object(status, "run", side_effect=run), \
+             mock.patch.object(status.metrics, "read", return_value=None):
+            entry = status.fleet({"repo": {"acme/fast": self.tables["acme/fast"]}})["acme/fast"]
+        self.assertEqual(entry["execution_state"], "stage-active")
+        self.assertEqual(entry["executions"][0]["id"], "acme/fast/worker")
+        self.assertNotIn("execution telemetry unavailable", entry["unknowns"])
+
+    def test_bounded_history_does_not_invalidate_complete_current_evidence(self):
+        data = runtime("acme/fast", errors=[
+            {"source": "events.jsonl", "scope": "history", "code": "event_limit"}])
+        data["history"].update(complete=False, truncated=True, gaps=["event_limit"])
+        source, activity = status.runtime_source(data, "acme/fast")
+        entry = health.classify("acme/fast", [source], self.tables["acme/fast"],
+                                at=datetime.fromisoformat(STAMP.replace("Z", "+00:00")))
+        self.assertEqual(entry["observation"], "fresh")
+        self.assertEqual(entry["assessment"], "normal")
+        self.assertFalse(activity["history"]["complete"])
+        self.assertTrue(activity["history"]["truncated"])
+        self.assertEqual(activity["history"]["gaps"], ["event_limit"])
+
     def test_old_source_time_ages_and_failure_keeps_last_known_runtime(self):
         payloads = [runtime("acme/fast"), subprocess.TimeoutExpired("factory", 1)]
 
@@ -172,7 +197,41 @@ class FleetCollectorTest(unittest.TestCase):
         self.assertTrue(entry["resources"][0]["held"])
         self.assertEqual(entry["resources"][0]["ownership"], "unknown")
         self.assertEqual(entry["execution_state"], "stage-active")
+        self.assertEqual(entry["executions"][0]["observation"], "fresh")
         self.assertEqual(entry["sources"][0]["observed_at"], STAMP)
+
+    def test_clipped_old_execution_does_not_poison_current_execution(self):
+        data = runtime("acme/fast", errors=[
+            {"source": "events.jsonl", "scope": "executions", "code": "missing_enter"}])
+        data["executions"].append({**data["executions"][0], "execution_id": "old",
+                                   "state": "completed", "observation": "partial"})
+        data["history"].update(complete=False, truncated=True, gaps=["event_limit", "missing_enter"])
+        source, activity = status.runtime_source(data, "acme/fast")
+        entry = health.classify("acme/fast", [source], self.tables["acme/fast"],
+                                at=datetime.fromisoformat(STAMP.replace("Z", "+00:00")))
+        self.assertEqual(entry["executions"][0]["observation"], "fresh")
+        self.assertEqual(entry["executions"][1]["observation"], "partial")
+        self.assertEqual(entry["assessment"], "unknown")
+        self.assertIn("missing_enter", activity["history"]["gaps"])
+        self.assertEqual(activity["errors"], data["errors"])
+
+    def test_unaccounted_resource_omissions_and_malformed_errors_stay_visible(self):
+        data = runtime("acme/fast", errors=[
+            {"source": "configuration", "scope": "resources", "code": "lock_limit"}])
+        data["resources"] = [{"resource": {"id": "seen"}, "state": "free", "ownership": "none",
+                              "owner": None, "observed_at": STAMP, "observation": "fresh"}]
+        source, _ = status.runtime_source(data, "acme/fast")
+        self.assertIn("lock_limit", source["error"])
+        entry = health.classify("acme/fast", [source], self.tables["acme/fast"],
+                                at=datetime.fromisoformat(STAMP.replace("Z", "+00:00")))
+        self.assertEqual((entry["observation"], entry["assessment"]), ("partial", "unknown"))
+        table = {"repo": {"acme/fast": self.tables["acme/fast"]}}
+        collector = status.FleetCollector(table)
+        collector.accept_runtime("acme/fast", runtime("acme/fast", errors=None) | {"errors": None})
+        with mock.patch.object(status.metrics, "read", return_value=None):
+            item = collector.fleet()["acme/fast"]
+        self.assertIn("runtime errors malformed", item["sources"][0]["error"])
+        self.assertEqual(item["activity"]["errors"], [])
 
     def test_full_snapshot_failure_does_not_erase_fresh_runtime(self):
         table = {"repo": {"acme/fast": self.tables["acme/fast"]}}

@@ -74,10 +74,12 @@ class ProjectionTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(health, "datetime", Clock))
             stack.enter_context(mock.patch.object(status, "datetime", Clock))
             if sources is not None:
-                stack.enter_context(mock.patch.object(status, "snapshot", side_effect=lambda slug, table: {
-                    "slug": slug, "sources": copy.deepcopy(sources),
-                    "snap": copy.deepcopy(snap), "error": error,
-                }))
+                stack.enter_context(mock.patch.object(status.FleetCollector, "collect_runtime"))
+                stack.enter_context(mock.patch.object(status.FleetCollector, "collect_full"))
+                stack.enter_context(mock.patch.object(status.FleetCollector, "read", side_effect=lambda: (1, {
+                    SLUG: status.entry({"slug": SLUG, "sources": copy.deepcopy(sources),
+                                        "snap": copy.deepcopy(snap), "error": error}, self.table),
+                })))
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 json_code = cli.main(["status", "--json"])
@@ -225,8 +227,10 @@ class ProjectionTest(unittest.TestCase):
         public = result[1]
         self.assertEqual(public["findings"], [])
         self.assertEqual(public["executions"], [])
-        self.assertEqual([s["id"] for s in public["sources"]], ["factory.snapshot", "factory.github"])
-        self.assertEqual([s["observed_at"] for s in public["sources"]], [STAMP, STAMP])
+        sources = {source["id"]: source for source in public["sources"]}
+        self.assertEqual(sources["factory.runtime"]["observation"], "unavailable")
+        self.assertEqual(sources["factory.snapshot"]["observed_at"], STAMP)
+        self.assertEqual(sources["factory.github"]["observed_at"], STAMP)
         self.assertEqual(public["resources"][0]["owner"], None)
         self.assertEqual(public["resources"][0]["ownership"], "unknown")
 
@@ -366,7 +370,7 @@ class ProjectionTest(unittest.TestCase):
         # Exercise the actual public routes too: their HTML and embedded DATA must not bypass the projection.
         collector = mock.Mock(
             read=mock.Mock(return_value=(1, {SLUG: raw})),
-            runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+            runtime_interval=5, full_interval=30, timeout=10, full_timeout=30, concurrency=4,
         )
         bodies = [json.dumps(public), json.dumps(block), atlas.page({SLUG: public}, AT)]
         with mock.patch.object(status, "fleet", side_effect=AssertionError("request collected fleet")):
@@ -398,6 +402,10 @@ class ProjectionTest(unittest.TestCase):
         raw = {"activity": {"events": [
             {"event_id": f"event-{i}", "sequence": i} for i in range(514)
         ], "history": {"gaps": [f"gap-{i}" for i in range(33)]}}}
+        secret = "ghp_ACTIVITY_CREDENTIAL"
+        raw["activity"]["errors"] = [
+            {"source": secret, "scope": "history", "code": "missing_enter", "private": secret}
+            for _ in range(33)]
         public = safe_fleet({SLUG: raw})[SLUG]
         events = public["activity"]["events"]
         self.assertEqual([(event["event_id"], event["sequence"]) for event in events],
@@ -405,6 +413,9 @@ class ProjectionTest(unittest.TestCase):
         self.assertTrue(public["projection"]["truncated"])
         self.assertEqual(public["projection"]["omitted"]["events"], 2)
         self.assertEqual(public["projection"]["omitted"]["history_gaps"], 1)
+        self.assertEqual(public["projection"]["omitted"]["activity_errors"], 1)
+        self.assertNotIn(secret, json.dumps(public))
+        self.assertEqual(public["activity"]["errors"][0]["code"], "missing_enter")
         raw["activity"]["events"][0] = {}
         self.assertEqual(safe_fleet({SLUG: raw})[SLUG]["projection"]["omitted"]["events"], 3)
         for value, expected in ((2**53 - 1, 2**53 - 1), (2**53, None), (-1, None),

@@ -280,6 +280,8 @@ def _activity(raw: object) -> dict:
         })
     return {
         "events": events,
+        "errors": [{key: _identity(error.get(key)) for key in ("source", "scope", "code")}
+                   for error in _list(raw.get("errors"))[:32] if isinstance(error, dict)],
         "history": {
             "source": _identity(history.get("source")),
             "status": _choice(history.get("status"), ("empty", "available", "missing", "unreadable")),
@@ -327,6 +329,7 @@ def safe_fleet(fleet: dict) -> dict:
         omitted.update(
             events=len(_list(activity.get("events"))) - len(result[slug]["activity"]["events"]),
             history_gaps=len(_list(history.get("gaps"))) - len(result[slug]["activity"]["history"]["gaps"]),
+            activity_errors=len(_list(activity.get("errors"))) - len(result[slug]["activity"]["errors"]),
             tickets=max(0, len(_list(snap.get("tickets"))) - 128),
             runs=max(0, len(_list(_dict(snap.get("dispatcher")).get("runs"))) - 32),
             gate_checks=max(0, len(_list(_dict(snap.get("config")).get("gate_checks"))) - 64),

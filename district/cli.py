@@ -7,7 +7,7 @@ from importlib import import_module
 
 COMMANDS = {
     "add": ("add", "main", "onboard a repository (path or URL), or adopt one that has .factory.toml"),
-    "apply": ("apply", "main", "reconcile the host to the registry; --upgrade reinstalls agent-factory"),
+    "apply": ("apply", "main", "reconcile the host to the registry; --upgrade reinstalls factory"),
     "doctor": ("doctor", "main", "check District's host prerequisites"),
     "status": ("status", "main", "fleet operations: exit 1 attention, 2 unknown observation, 0 normal"),
     "rm": ("rm", "main", "remove a repository's units and registry entry; repo files untouched"),

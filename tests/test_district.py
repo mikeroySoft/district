@@ -607,6 +607,24 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
         self.assertNotIn("enable --now factory-widgets.timer", self.calls("systemctl"))
 
+    def test_upgrade_installs_the_renamed_engine_package(self) -> None:
+        src = self.tmp / "af"
+        src.mkdir()
+        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
+        self.register()
+        data = host.load()
+        data["defaults"] = {"factory_source": str(src)}
+        host.save(data)
+        self.stub("uv", ("tool install *", "Installed 1 executable: factory\n"))
+        self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)),
+                  ("dashboard --json", json.dumps(dashboard())))
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        code, out = self.district("apply", "--upgrade")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.calls("uv"), [f"tool install --reinstall --from {src} factory"])
+        self.assertEqual(self.calls("factory")[0], "--version")
+        self.assertIn(f"installed factory 0.2.0 from {src}", out)
+
     def test_upgrade_refuses_dirty_source(self) -> None:
         src = self.tmp / "af"
         src.mkdir()
@@ -1105,7 +1123,7 @@ class DashboardTest(DistrictCase):
             with ThreadingHTTPServer((bind, 0), dash.Handler) as server:
                 server.collector = mock.Mock(
                     read=mock.Mock(return_value=(0, {})),
-                    runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+                    runtime_interval=5, full_interval=30, timeout=10, full_timeout=30, concurrency=4,
                 )
                 threading.Thread(target=server.serve_forever, daemon=True).start()
                 port = server.server_port
@@ -1156,7 +1174,7 @@ class DashboardTest(DistrictCase):
         with ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler) as server:
             server.collector = mock.Mock(
                 read=mock.Mock(return_value=(1, status.fleet(host.load()))),
-                runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+                runtime_interval=5, full_interval=30, timeout=10, full_timeout=30, concurrency=4,
             )
             threading.Thread(target=server.serve_forever, daemon=True).start()
             base = f"http://127.0.0.1:{server.server_port}"
@@ -1199,7 +1217,7 @@ class DashboardTest(DistrictCase):
         server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
         server.collector = mock.Mock(
             read=mock.Mock(return_value=(1, status.fleet(host.load()))),
-            runtime_interval=5, full_interval=30, timeout=10, concurrency=4,
+            runtime_interval=5, full_interval=30, timeout=10, full_timeout=30, concurrency=4,
         )
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)

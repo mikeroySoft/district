@@ -132,6 +132,7 @@ class Handler(BaseHTTPRequestHandler):
                     "runtime_interval_seconds": self.server.collector.runtime_interval,
                     "full_interval_seconds": self.server.collector.full_interval,
                     "factory_timeout_seconds": self.server.collector.timeout,
+                    "full_timeout_seconds": self.server.collector.full_timeout,
                     "concurrency": self.server.collector.concurrency,
                     "event_limit_per_factory": status.EVENT_LIMIT,
                 },
