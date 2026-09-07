@@ -96,23 +96,25 @@ def _runtime_error(data: dict) -> str | None:
     if not isinstance(errors, list):
         return "runtime errors malformed"
     details = []
-    window_limits = ("byte_limit", "event_limit")
+    # Window bounds and interleaved legacy audit rows (position -1 in the producer) are
+    # history disclosures; they never make a retained record uncertain.
+    disclosures = ("byte_limit", "event_limit", "unsupported_record")
     record_scopes = {
         scope for scope in ("executions", "resources")
         if isinstance(data.get(scope), list) and data[scope]
         and all(isinstance(record, dict) and record.get("observation") in ("fresh", "partial", "unavailable")
                 for record in data[scope])
     }
-    history = data.get("history")
-    history_gaps = {gap for gap in history.get("gaps", []) if isinstance(gap, str)} if isinstance(history, dict) else set()
-    # Only gaps the producer mirrored onto records are record-accounted; omission
-    # diagnostics (lock_limit, invalid_scope) describe records that do not exist.
+    # In a record scope the producer stamps the affected record's observation, except
+    # `configuration` diagnostics (lock_limit, invalid_scope, ...) which describe a
+    # configured resource that never became a record.
     record_gaps = {error["code"] for error in errors if isinstance(error, dict)
                    and isinstance(error.get("scope"), str) and error["scope"] in record_scopes
-                   and isinstance(error.get("code"), str) and error["code"] in history_gaps}
+                   and isinstance(error.get("code"), str) and error.get("source") != "configuration"}
+    history = data.get("history")
     for error in errors:
         if isinstance(error, dict) and all(isinstance(error.get(key), str) for key in ("source", "scope", "code")):
-            if error["scope"] == "history" and error["code"] in window_limits:
+            if error["scope"] == "history" and error["code"] in disclosures:
                 continue  # Retained-window limits remain explicit in activity.history.
             if error["scope"] in record_scopes and error["code"] in record_gaps:
                 continue  # Each affected record carries its own quality; diagnostics remain in activity.errors.
@@ -125,12 +127,12 @@ def _runtime_error(data: dict) -> str | None:
         gaps = history.get("gaps")
         if isinstance(gaps, list):
             details.extend(f"history:{gap}" for gap in gaps
-                           if isinstance(gap, str) and gap not in window_limits and gap not in record_gaps)
+                           if isinstance(gap, str) and gap not in disclosures and gap not in record_gaps)
         elif gaps is not None:
             details.append("runtime history gaps malformed")
         bounded_window = (history.get("status") == "available" and isinstance(gaps, list)
                           and bool(gaps) and all(isinstance(gap, str) and
-                              (gap in window_limits or gap in record_gaps) for gap in gaps))
+                              (gap in disclosures or gap in record_gaps) for gap in gaps))
         if history.get("truncated") is True and not bounded_window:
             details.append("history:truncated")
         if history.get("complete") is not True and not bounded_window:

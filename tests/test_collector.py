@@ -233,6 +233,27 @@ class FleetCollectorTest(unittest.TestCase):
         self.assertIn("runtime errors malformed", item["sources"][0]["error"])
         self.assertEqual(item["activity"]["errors"], [])
 
+    def test_record_stamped_diagnostics_and_legacy_rows_do_not_flatten_the_source(self):
+        data = runtime("acme/fast", errors=[
+            {"source": "events.jsonl", "scope": "history", "code": "unsupported_record"},
+            {"source": "proc", "scope": "executions", "code": "descendants_not_scanned"},
+            {"source": "filesystem", "scope": "resources", "code": "lock_unavailable"}])
+        data["executions"].append({**data["executions"][0], "execution_id": "ticket-scope",
+                                   "state": "completed", "observation": "partial"})
+        data["resources"] = [
+            {"resource": {"id": "gate"}, "state": "free", "ownership": "none", "owner": None,
+             "observed_at": STAMP, "observation": "fresh"},
+            {"resource": {"id": "merge"}, "state": "unknown", "ownership": "unknown", "owner": None,
+             "observed_at": STAMP, "observation": "unavailable"}]
+        data["history"].update(complete=False, truncated=True, gaps=["byte_limit", "unsupported_record"])
+        source, _ = status.runtime_source(data, "acme/fast")
+        self.assertIsNone(source["error"])
+        entry = health.classify("acme/fast", [source], self.tables["acme/fast"],
+                                at=datetime.fromisoformat(STAMP.replace("Z", "+00:00")))
+        self.assertEqual([e["observation"] for e in entry["executions"]], ["fresh", "partial"])
+        self.assertEqual([r["observation"] for r in entry["resources"]], ["fresh", "partial"])
+        self.assertEqual((entry["observation"], entry["assessment"]), ("partial", "unknown"))
+
     def test_full_snapshot_failure_does_not_erase_fresh_runtime(self):
         table = {"repo": {"acme/fast": self.tables["acme/fast"]}}
         collector = status.FleetCollector(table)
