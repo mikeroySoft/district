@@ -607,6 +607,23 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
         self.assertNotIn("enable --now factory-widgets.timer", self.calls("systemctl"))
 
+    def test_upgrade_installs_the_renamed_engine_package(self) -> None:
+        src = self.tmp / "af"
+        src.mkdir()
+        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
+        self.register()
+        data = host.load()
+        data["defaults"] = {"factory_source": str(src)}
+        host.save(data)
+        self.stub("uv", ("tool install *", "Installed 1 executable: factory\n"))
+        self.stub("factory", ("--version", "0.2.0\n"))
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        code, out = self.district("apply", "--upgrade")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.calls("uv"), [f"tool install --reinstall --from {src} factory"])
+        self.assertEqual(self.calls("factory")[0], "--version")
+        self.assertIn(f"installed factory 0.2.0 from {src}", out)
+
     def test_upgrade_refuses_dirty_source(self) -> None:
         src = self.tmp / "af"
         src.mkdir()
