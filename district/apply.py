@@ -1,4 +1,4 @@
-"""`district apply [slug] [--upgrade] [--reset slug]`: reconcile the host to the registry.
+"""`district apply [slug] [--upgrade [REF]] [--reset slug]`: reconcile the host to the registry.
 
 Idempotent. Rewrites host-side artifacts (units, policy env) without asking;
 never modifies a committed file. Exit nonzero when any repo is not converged.
@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -90,22 +91,40 @@ def wait_inactive(services: list[str], timeout: float) -> None:
         time.sleep(5)
 
 
-def upgrade(data: dict, active_timers: list[str]) -> None:
-    """Stop → wait → reinstall → restart dashboards. Timers are re-enabled by the caller."""
+def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
+    """Stop → wait → reinstall an export of `ref` → restart dashboards. Timers are re-enabled by the caller.
+
+    Records `[defaults.engine]` (ref, sha, previous, installed_at) and prints the rollback command.
+    """
     src = Path(os.path.expanduser(host.default(data, "factory_source")))
-    if run(["git", "status", "--porcelain"], cwd=src, check=True).stdout.strip():
+    proc = run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=src)
+    if proc.returncode != 0:
+        raise DistrictError(f"{ref}: not a commit in {src}")
+    sha = proc.stdout.strip()
+    if ref == "HEAD" and run(["git", "status", "--porcelain"], cwd=src, check=True).stdout.strip():
         raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
     for timer in active_timers:
         systemctl("disable", "--now", timer)
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
     wait_inactive([t.removesuffix(".timer") + ".service" for t in active_timers], SERVICE_WAIT)
-    proc = run(["uv", "tool", "install", "--reinstall", "--from", str(src), "factory"])
+    with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
+        tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
+        tree.mkdir()
+        run(["git", "archive", "-o", str(tar), sha], cwd=src, check=True)
+        run(["tar", "-x", "-C", str(tree), "-f", str(tar)], check=True)
+        proc = run(["uv", "tool", "install", "--reinstall", "--from", str(tree), "factory"])
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)
         raise DistrictError("uv tool install failed")
     version = run(["factory", "--version"], check=True).stdout.strip()
-    print(f"installed factory {version} from {src}")
+    print(f"installed factory {version} from {src}@{sha[:7]} ({ref})")
+    previous = data.get("defaults", {}).get("engine", {}).get("sha")
+    engine = {"ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now())}
+    data.setdefault("defaults", {})["engine"] = engine
+    host.save(data)
+    if previous:
+        print(f"rollback: district apply --upgrade {previous}")
     for slug in host.repos(data):
         dash = f"{host.unit_name(slug)}-dashboard.service"
         if (host.unit_dir() / dash).exists():
@@ -207,7 +226,8 @@ def line(row: dict, status: str) -> str:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district apply", description=__doc__.split("\n", 1)[0])
     parser.add_argument("slug", nargs="?", help="one repo (owner/name or basename); default all")
-    parser.add_argument("--upgrade", action="store_true", help="reinstall factory from [defaults].factory_source first")
+    parser.add_argument("--upgrade", nargs="?", const="HEAD", metavar="REF",
+                        help="reinstall factory from [defaults].factory_source first, at REF (tag, branch, sha; default HEAD)")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
     args = parser.parse_args(argv)
     from district import metrics  # Deferred: metrics imports apply.hours.
@@ -235,7 +255,7 @@ def main(argv: list[str]) -> int:
         code = 0
         if args.upgrade:
             try:
-                upgrade(data, active)
+                upgrade(data, active, args.upgrade)
             finally:
                 restore(active, data)
         for slug, table in targets.items():
@@ -243,6 +263,9 @@ def main(argv: list[str]) -> int:
                 code = 1
             rows.append(repo_pass(slug, table, data))
 
+        engine = data.get("defaults", {}).get("engine")
+        if engine and not args.upgrade:
+            print(f"engine {engine['sha'][:7]} ({engine['ref']})")
         for row in rows:
             print(line(row, status))
         for w in warnings:
