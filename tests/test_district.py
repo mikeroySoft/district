@@ -625,6 +625,21 @@ class ApplyTest(DistrictCase):
         self.assertEqual(self.calls("factory")[0], "--version")
         self.assertIn(f"installed factory 0.2.0 from {src}", out)
 
+    def test_upgrade_waits_for_a_running_pass_whose_timer_is_already_disabled(self) -> None:
+        src = self.tmp / "af"
+        src.mkdir()
+        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
+        self.register()
+        data = host.load()
+        data["defaults"] = {"factory_source": str(src)}
+        host.save(data)
+        self.stub("systemctl", ("is-active *.service", "activating\n"), ("is-active *", "inactive\n"))
+        with mock.patch.object(apply, "SERVICE_WAIT", 0), mock.patch.object(apply.time, "sleep"):
+            code, out = self.district("apply", "--upgrade")
+        self.assertEqual(code, 1)
+        self.assertIn("still running after 0s: factory-widgets.service", out)
+        self.assertEqual(self.calls("uv"), [])
+
     def test_upgrade_refuses_dirty_source(self) -> None:
         src = self.tmp / "af"
         src.mkdir()
