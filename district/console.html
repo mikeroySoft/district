@@ -498,7 +498,8 @@ function observe(payload, now = Date.now()) {
   if (gap) state.gaps = [{key:`gap|${now}`, at:new Date(now).toISOString(), cls:'gap', text:`No fleet observation in this browser between ${when(new Date(state.lastPollAt).toISOString())} and ${when(new Date(now).toISOString())}; events from that interval are baselined, not replayed.`}, ...state.gaps].slice(0, 8);
   const motions = new Map();
   for (const [slug, record] of Object.entries(payload.fleet || {})) {
-    const list = observeEvents(state.seen, slug, record.activity?.events, {animate:!document.hidden, rebaseline:gap});
+    // A reconnect after any failed poll re-baselines: events missed while unavailable are facts, never fresh motion.
+    const list = observeEvents(state.seen, slug, record.activity?.events, {animate:!document.hidden, rebaseline:gap || state.unavailableSince !== null});
     if (list.length) motions.set(slug, list);
     const previous = state.findings.get(slug), current = new Set((record.findings || []).map(f => f.id));
     if (previous) for (const id of previous) if (!current.has(id)) {
