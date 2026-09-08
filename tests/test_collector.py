@@ -215,6 +215,20 @@ class FleetCollectorTest(unittest.TestCase):
         self.assertIn("missing_enter", activity["history"]["gaps"])
         self.assertEqual(activity["errors"], data["errors"])
 
+    def test_dispatcher_capacity_schedule_and_latest_transition_survive_as_activity(self):
+        data = runtime("acme/fast")
+        data["dispatcher"].update(next_at="2026-09-05T12:10:00Z", latest_transition={
+            "event_id": "event-9", "at": STAMP, "execution_id": "acme/fast/worker", "kind": "enter",
+            "private": "/home/operator/.factory"})
+        _, activity = status.runtime_source(data, "acme/fast")
+        self.assertEqual(activity["dispatcher"], {
+            "service_active": True, "timer_active": False, "next_at": "2026-09-05T12:10:00Z",
+            "observed_at": STAMP, "observation": "fresh",
+            "capacity": {"configured": 2, "active": 1, "complete": True},
+            "latest_transition": {"event_id": "event-9", "at": STAMP,
+                                  "execution_id": "acme/fast/worker", "kind": "enter"},
+        })
+
     def test_unaccounted_resource_omissions_and_malformed_errors_stay_visible(self):
         data = runtime("acme/fast", errors=[
             {"source": "configuration", "scope": "resources", "code": "lock_limit"}])
