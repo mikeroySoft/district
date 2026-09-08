@@ -411,7 +411,8 @@ class FleetCollector:
                 slug: {**record, "runtime": dict(record["runtime"]) if record["runtime"] else None,
                        "activity": {"events": list(record["activity"]["events"]),
                                     "errors": list(record["activity"].get("errors", [])),
-                                    "history": dict(record["activity"]["history"])}}
+                                    "history": dict(record["activity"]["history"]),
+                                    "dispatcher": record["activity"].get("dispatcher")}}
                 for slug, record in self._records.items()
             }
         result = {}
