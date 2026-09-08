@@ -219,7 +219,7 @@ class FleetCollectorTest(unittest.TestCase):
         data = runtime("acme/fast")
         data["dispatcher"].update(next_at="2026-09-05T12:10:00Z", latest_transition={
             "event_id": "event-9", "at": STAMP, "execution_id": "acme/fast/worker", "kind": "enter",
-            "private": "/home/operator/.factory"})
+            "extra": "UNCONTRACTED_CANARY"})
         expected = {
             "service_active": True, "timer_active": False, "next_at": "2026-09-05T12:10:00Z",
             "observed_at": STAMP, "observation": "fresh",

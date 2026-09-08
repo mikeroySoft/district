@@ -431,9 +431,9 @@ class ProjectionTest(unittest.TestCase):
         raw = {"activity": {"dispatcher": {
             "service_active": True, "timer_active": "yes", "next_at": "2026-09-05T12:10:00Z",
             "observed_at": STAMP, "observation": "fresh", "paused": secret,
-            "capacity": {"configured": 2, "active": 1, "complete": True, "private": secret},
+            "capacity": {"configured": 2, "active": 1, "complete": True, "extra": secret},
             "latest_transition": {"event_id": "event-9", "at": STAMP, "execution_id": "run/worker",
-                                  "kind": "enter", "path": "/home/operator"},
+                                  "kind": "enter", "path": "PATH_CANARY"},
         }}, "executions": [
             *({"id": f"old-{i}", "state": "completed", "stage": "gate"} for i in range(40)),
             {"id": "live-worker", "state": "stage-active", "stage": "worker"},
@@ -447,7 +447,7 @@ class ProjectionTest(unittest.TestCase):
             "latest_transition": {"event_id": "event-9", "at": STAMP, "execution_id": "run/worker", "kind": "enter"},
         })
         self.assertNotIn(secret, json.dumps(public))
-        self.assertNotIn("/home/operator", json.dumps(public))
+        self.assertNotIn("PATH_CANARY", json.dumps(public))
         ids = [item["id"] for item in public["executions"]]
         self.assertEqual(ids[:2], ["live-worker", "live-review"])
         self.assertEqual(len(ids), 32)
