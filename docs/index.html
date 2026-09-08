@@ -3,32 +3,38 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>District — fleet manager for mikeroySoft/factory</title>
-<meta name="description" content="District runs many mikeroySoft/factory pipelines on one host: registry, ports, host config, upgrades, failure caps, and one bird's-eye dashboard.">
+<title>District — shared infrastructure for autonomous factories</title>
+<meta name="description" content="Manage a fleet of Factory pipelines on one Linux host. Shared infrastructure, evidence-backed operational status, and a scoped console. Explore the changelog, design decisions, and roadmap.">
 <link rel="stylesheet" href="mikeroysoft.css">
 <style>
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; }
-  body { margin: 0; background: var(--surface-page); color: var(--text-primary); font: 16px/1.6 var(--font-mono); }
+  body { --text-muted: var(--sand-300); --text-faint: var(--sand-300); margin: 0; background: var(--surface-page); color: var(--text-primary); font: 16px/1.6 var(--font-mono); }
   a { color: var(--link); text-decoration: none; }
   a:hover { text-decoration: underline; }
+  a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 5px; }
+  .skip { position: absolute; top: -80px; padding: 12px; background: var(--surface-panel); z-index: 1; }
+  .skip:focus { top: 12px; }
   code, pre { font-family: var(--font-mono); }
   code { background: var(--surface-inset); border: 1px solid var(--border-hairline); border-radius: 4px; padding: 0 5px; font-size: 0.9em; }
   pre { margin: 0; overflow-x: auto; }
   .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
   h1, h2, h3 { font-family: var(--font-display); font-weight: 400; line-height: 1.15; margin: 0 0 12px; letter-spacing: -0.01em; }
   h2 { font-size: 30px; }
-  h3 { font-size: 17px; }
-  section { padding: 72px 0; border-top: 1px solid var(--border-hairline); }
+  h3 { font-size: 22px; }
+  section { padding: 72px 0; border-top: 1px solid var(--border-hairline); scroll-margin-top: 24px; }
   .lede { color: var(--text-muted); font-size: 18px; max-width: 680px; margin: 0 0 36px; }
   .kicker { font: 600 12px/1 var(--font-mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin-bottom: 14px; }
 
-  nav { display: flex; justify-content: space-between; align-items: center; padding: 20px 0; }
+  nav { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px 24px; padding: 20px 0; }
   nav .brand { font: 700 18px var(--font-mono); color: var(--text-primary); }
-  nav .links a { color: var(--text-muted); margin-left: 24px; font-size: 14px; }
+  nav .links { display: flex; flex-wrap: wrap; gap: 0 20px; }
+  nav .links a { display: inline-flex; align-items: center; min-height: 44px; color: var(--text-muted); font-size: 14px; }
   nav .links a:hover { color: var(--text-primary); text-decoration: none; }
 
   header.hero { padding: 72px 0 80px; display: grid; grid-template-columns: 1.05fr 1fr; gap: 48px; align-items: center; }
+  header.hero > *, .grid > *, .own > * { min-width: 0; }
+  p, li, .cmds .v { overflow-wrap: anywhere; }
   header h1 { font-size: 52px; }
   header h1 em { font-style: normal; color: var(--accent); }
   header p { color: var(--text-muted); font-size: 19px; max-width: 520px; }
@@ -73,74 +79,90 @@
   table { width: 100%; border-collapse: collapse; font-size: 15px; }
   th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--border-hairline); vertical-align: top; }
   th { font: 600 12px var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
-  td.lvl { font-family: var(--font-mono); font-weight: 600; white-space: nowrap; }
-  td.lvl.f { color: var(--status-danger); } td.lvl.a { color: var(--status-warn); } td.lvl.h { color: var(--status-ok); }
-  td.why { color: var(--text-muted); }
-
-  .atlas { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: center; }
-  .city { background: var(--surface-sunken); border: 1px solid var(--border-hairline); border-radius: 8px; padding: 24px; }
-  .city svg { width: 100%; height: auto; display: block; }
-  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
-  .kpi { background: var(--surface-panel); border: 1px solid var(--border-hairline); border-radius: 6px; padding: 10px 12px; }
-  .kpi .l { font: 11px var(--font-mono); color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.08em; }
-  .kpi .v { font: 600 20px var(--font-mono); color: var(--text-primary); }
+  .note { padding: 18px 22px; border-left: 3px solid var(--accent); background: var(--surface-panel); color: var(--text-muted); }
+  .note strong, .decision strong { color: var(--text-primary); }
+  .status { display: inline-block; border: 1px solid var(--border-strong); border-radius: 4px; padding: 4px 8px; margin-bottom: 16px; font: 600 12px/1.5 var(--font-mono); color: var(--text-muted); }
+  .status.shipped { color: var(--status-ok); }
+  .status.next { color: var(--accent-soft); }
+  .timeline { list-style: none; padding: 0; margin: 0; }
+  .timeline > li { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 32px; padding: 28px 0; border-top: 1px solid var(--border-hairline); }
+  .timeline time, .timeline .date { display: block; color: var(--text-muted); font-size: 14px; margin-bottom: 12px; }
+  .timeline p { color: var(--text-muted); margin: 10px 0; }
+  .timeline ul { padding-left: 20px; color: var(--text-muted); }
+  .timeline li li { margin: 8px 0; }
+  .sources { font-size: 14px; }
+  .decision { border-left: 2px solid var(--border-strong); padding-left: 16px; }
+  details { margin-top: 24px; border: 1px solid var(--border-hairline); border-radius: 8px; padding: 8px 20px; }
+  summary { cursor: pointer; padding: 12px 0; color: var(--text-primary); }
+  details ul { padding-left: 20px; color: var(--text-muted); }
+  details li { margin: 12px 0; }
 
   footer { padding: 36px 0 48px; border-top: 1px solid var(--border-hairline); color: var(--text-faint); font-size: 14px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 
   @media (max-width: 820px) {
     header.hero { grid-template-columns: 1fr; padding-top: 32px; }
     header h1 { font-size: 38px; }
-    .grid.two, .grid.three, .own, .atlas { grid-template-columns: 1fr; }
+    .grid.two, .grid.three, .own { grid-template-columns: 1fr; }
     .cmds { grid-template-columns: 1fr; }
     .cmds .k { border-bottom: 0; }
-    .kpis { grid-template-columns: repeat(2, 1fr); }
+    .timeline > li { grid-template-columns: 1fr; gap: 4px; }
     section { padding: 48px 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
   }
 </style>
 </head>
 <body data-product="district">
 <div class="wrap">
-  <nav>
+  <a class="skip" href="#main">Skip to content</a>
+  <nav aria-label="Main navigation">
     <span class="brand"><span class="mrs-mark mrs-mark-square" aria-hidden="true"></span> mikeroySoft :: district</span>
     <span class="links">
-      <a href="#how">How it works</a>
-      <a href="#commands">Commands</a>
+      <a href="#console">Features</a>
+      <a href="#decisions">Decisions</a>
+      <a href="#changelog">Changelog</a>
+      <a href="#roadmap">Roadmap</a>
       <a href="#install">Install</a>
       <a href="https://github.com/mikeroySoft/district">GitHub</a>
     </span>
   </nav>
 
+  <main id="main" tabindex="-1">
   <header class="hero">
     <div>
       <h1>One host.<br>Many factories.<br><em>Shared infrastructure.</em></h1>
-      <p><a href="https://github.com/mikeroySoft/factory">mikeroySoft/factory</a> runs an autonomous ticket pipeline for one repository. District runs the fleet: the registry, ports, host config, engine upgrades, failure caps, and a single bird's-eye view — so no factory has to manage the roads and power itself.</p>
+      <p><a href="https://github.com/mikeroySoft/factory">Factory</a> runs the ticket pipeline for one repository. District manages the fleet: shared configuration, engine upgrades, host policy, and operational status that tells you what is running, what needs attention, and what is still unknown.</p>
       <div class="actions">
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
+      <p class="sources">Current milestone: scoped operations console.<br><a href="#changelog">Progress through September 8, 2026</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
 <pre><span class="p">$</span> district status
-<span class="m">repo                  operating          execution  observation  assessment</span>
-mikeroySoft/rocm-cli  scheduled waiting  unknown    partial      unknown
-mikeroySoft/gpuflo    running            unknown    partial      unknown
-mikeroySoft/rocm-app  capped             unknown    partial      attention
-<span class="c"># illustration: this fleet exits 1 because attention takes precedence
-# 0 normal / empty fleet · 1 operational attention · 2 unknown without attention
-# actual output also retains version, schedule, pass and project metrics</span></pre>
+<span class="m">Illustrative fleet · not live telemetry</span>
+
+rocm-cli   scheduled waiting  <span class="m">unknown</span>
+gpuflo     running            <span class="ok">normal</span>
+rocm-app   capped             <span class="att">attention</span>
+
+<span class="c"># status keeps operating state, execution
+# and observation quality separate
+# exit: 0 normal · 1 attention · 2 unknown</span></pre>
     </div>
   </header>
 
   <section id="problem">
     <div class="kicker">The problem</div>
     <h2>The second factory creates concerns no single factory can own.</h2>
-    <p class="lede">A factory is deliberately repo-scoped and stateless. Everything below belongs to the host, and until now it lived in someone's memory.</p>
+    <p class="lede">Repository autonomy is useful. Duplicating host configuration, upgrade procedures, and operational checks across every repository is not.</p>
     <div class="grid two">
-      <div class="card"><div class="n">01</div><h3>Which engine version runs</h3><p>One shared install, used by every timer. Nobody records it; upgrading is "remember to reinstall".</p></div>
-      <div class="card"><div class="n">02</div><h3>Host settings in public repos</h3><p>Local model endpoints, hand-picked dashboard ports, and bind hosts committed to <code>.factory.toml</code> — duplicated and drifting.</p></div>
-      <div class="card"><div class="n">03</div><h3>Stale generated artifacts</h3><p>systemd units bake in <code>PATH</code> at install time. Issue templates, labels, and new config keys are copied once and never refreshed.</p></div>
-      <div class="card"><div class="n">04</div><h3>No fleet answer</h3><p><code>systemctl --user list-timers</code> plus one browser tab per dashboard. No single answer to "is everything healthy?"</p></div>
+      <div class="card"><div class="n">01</div><h3>One place for host settings</h3><p>Keep model endpoints, worker defaults, dashboard ports, and timer cadence in the host registry, not scattered across public repositories.</p></div>
+      <div class="card"><div class="n">02</div><h3>Repeatable maintenance</h3><p>Reconcile generated units and labels, check prerequisites, and upgrade the shared engine without replacing each repository's own rules.</p></div>
+      <div class="card"><div class="n">03</div><h3>Bounded failure, explicit recovery</h3><p>Cap repeatedly failing timers and check package-age policy. Restore a capped factory only after an explicit reset pass succeeds.</p></div>
+      <div class="card"><div class="n">04</div><h3>A fleet answer you can inspect</h3><p>See operational findings and source freshness together. A review requesting changes is project work, not automatically broken machinery.</p></div>
     </div>
   </section>
 
@@ -188,81 +210,51 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
     <p class="lede">District never imports from mikeroySoft/factory and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
       <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
-      <div class="k">district apply</div><div class="v">Reconcile the host to the registry. Re-renders units, ensures labels, runs <code>doctor</code>, enforces the failure cap and supply-chain policy. <code>--upgrade</code> reinstalls the engine so every timer picks it up on the next tick.</div>
+      <div class="k">district apply</div><div class="v">Reconcile units, labels, doctor checks, failure caps, and host policy. Hourly reconciliation is available through <code>dashboard --install</code>. <code>--upgrade</code> waits for all managed passes before replacing the shared engine; <code>--reset SLUG</code> requires a successful pass before restoring a capped timer.</div>
       <div class="k">district doctor</div><div class="v">Check District's host prerequisites, registered repository remotes, dashboard ports, package policy, and units. Reports every check as <code>PASS</code>, <code>WARN</code>, or <code>FAIL</code>.</div>
-      <div class="k">district status</div><div class="v">One table, one screen, one exit code. Version, timer, last pass, tickets in flight, escalations, first-gate pass %, bounce rate, upstream drift.</div>
+      <div class="k">district status</div><div class="v">Operating state, execution state, observation quality, and evidence-backed findings, with version and project metrics alongside. Text or <code>--json</code>; exit 0 for normal, 1 for operational attention, 2 for unknown without attention.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
-      <div class="k">district dashboard</div><div class="v">Serve the cached operations console at explicit <code>/?view=overview</code>, <code>/?view=flows</code>, and <code>/?view=brief</code> URLs, with an all-factory or registered-factory scope. The existing Atlas and management surface remains at <code>/</code> and <code>/legacy</code> until console cutover. <code>--host 0.0.0.0</code> enables read-only LAN viewing, not remote management; a LAN URL stays read-only even on the host. Manage and detect require direct HTTP to numeric loopback or <code>localhost</code> with the actual server port (default <code>http://127.0.0.1:8760</code>). DNS aliases and reverse proxies are unsupported; forwarded headers fail closed. Authorized actions run the CLI as a subprocess with bounded sanitized diagnostics.</div>
+      <div class="k">district dashboard</div><div class="v">Serve the shared cached fleet and scoped console. Atlas and management remain at the default route until cutover. Optional LAN viewing is read-only; management stays on direct localhost access. <a href="#console">See current routes and access boundaries.</a></div>
       <div class="k">district rm</div><div class="v">Disable and delete the units, drop the registry entry. Repo files untouched; the factory can be re-added later.</div>
     </div>
   </section>
 
-  <section id="atlas">
-    <div class="atlas">
-      <div>
-        <div class="kicker">District Atlas</div>
-        <h2>The fleet as a city.</h2>
-        <p class="lede" style="margin-bottom:16px">Every managed repository is a building whose height is proportional to its tracked lines of code, standing on a plate with the shared engine, the control tower, host runtime, and GitHub. Roads are the real control and data paths, cited to <code>file:line</code>.</p>
-        <p style="color:var(--text-muted)">Above the map: factory count, shared operational assessment, code under management, engine version spread, velocity, open work, defects, traffic. Click a factory for operating state, execution state, observation quality and evidence-backed findings; each tile links to that factory's own dashboard for ticket-level detail.</p>
+  <section id="console">
+    <div class="kicker">Available now</div>
+    <h2>A shared operational picture. Not another project inbox.</h2>
+    <p class="lede">The scoped console is merged: real cached factory state, source ages, findings, and links back to Factory. The richer graphical views are the next milestone, not a feature claim hidden in a preview.</p>
+    <div class="grid three">
+      <div class="card">
+        <span class="status shipped">Merged · shared state</span>
+        <h3>Collect once. View anywhere.</h3>
+        <p>One server-owned collector refreshes runtime observations about every five seconds and full snapshots every minute. Extra browser tabs read the cache instead of multiplying Factory and GitHub calls.</p>
       </div>
-      <div class="city">
-        <svg viewBox="0 0 420 260" role="img" aria-label="Isometric fleet map: three buildings of different heights on a plate beside an engine block and a control tower">
-          <defs>
-            <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2A3650"/><stop offset="1" stop-color="#141926"/></linearGradient>
-          </defs>
-          <!-- plate -->
-          <polygon points="210,40 400,135 210,230 20,135" fill="#0E1219" stroke="#202836"/>
-          <polygon points="210,48 380,135 210,222 40,135" fill="none" stroke="#1A2130" stroke-dasharray="3 4"/>
-          <!-- roads -->
-          <polyline points="120,135 210,90 300,135" fill="none" stroke="#E8A87C" stroke-width="1.5" opacity="0.7"/>
-          <polyline points="120,135 210,180 300,135" fill="none" stroke="#62D6E8" stroke-width="1.5" opacity="0.7"/>
-          <circle cx="165" cy="112" r="2.5" fill="#E8A87C"/>
-          <circle cx="255" cy="157" r="2.5" fill="#62D6E8"/>
-          <!-- building A (tall) -->
-          <g transform="translate(120,135)">
-            <polygon points="0,0 30,-15 60,0 30,15" fill="#3A4A6B"/>
-            <polygon points="0,0 30,15 30,-95 0,-110" fill="#1C2438"/>
-            <polygon points="30,15 60,0 60,-110 30,-95" fill="#26314C"/>
-            <polygon points="0,-110 30,-125 60,-110 30,-95" fill="#5B8DD6"/>
-            <circle cx="30" cy="-132" r="4" fill="#E3A83B"/>
-          </g>
-          <!-- building B (medium) -->
-          <g transform="translate(210,180)">
-            <polygon points="0,0 30,15 30,-55 0,-70" fill="#1C2438"/>
-            <polygon points="30,15 60,0 60,-70 30,-55" fill="#26314C"/>
-            <polygon points="0,-70 30,-85 60,-70 30,-55" fill="#5B8DD6"/>
-            <circle cx="30" cy="-92" r="4" fill="#4CBB6C"/>
-          </g>
-          <!-- building C (short) -->
-          <g transform="translate(270,120)">
-            <polygon points="0,0 30,15 30,-20 0,-35" fill="#1C2438"/>
-            <polygon points="30,15 60,0 60,-35 30,-20" fill="#26314C"/>
-            <polygon points="0,-35 30,-50 60,-35 30,-20" fill="#5B8DD6"/>
-            <circle cx="30" cy="-57" r="4" fill="#E3A83B"/>
-          </g>
-          <!-- engine block -->
-          <g transform="translate(60,150)">
-            <polygon points="0,0 24,12 24,-16 0,-28" fill="#3A2E14"/>
-            <polygon points="24,12 48,0 48,-28 24,-16" fill="#5A4720"/>
-            <polygon points="0,-28 24,-40 48,-28 24,-16" fill="#E3A83B"/>
-          </g>
-          <!-- control tower -->
-          <g transform="translate(200,70)">
-            <polygon points="0,0 10,5 10,-40 0,-45" fill="#0F3A36"/>
-            <polygon points="10,5 20,0 20,-45 10,-40" fill="#1A5A54"/>
-            <polygon points="0,-45 10,-50 20,-45 10,-40" fill="#38BFAD"/>
-            <circle cx="10" cy="-56" r="3" fill="#38BFAD"><animate attributeName="opacity" values="1;0.2;1" dur="2s" repeatCount="indefinite"/></circle>
-          </g>
-          <text x="20" y="250" font-family="ui-monospace,Menlo,monospace" font-size="9" fill="#55617A">illustrative architecture · live status uses shared classification</text>
-        </svg>
-        <div class="kpis">
-          <div class="kpi"><div class="l">factories</div><div class="v">3</div></div>
-          <div class="kpi"><div class="l">unknown</div><div class="v">2</div></div>
-          <div class="kpi"><div class="l">attention</div><div class="v" style="color:var(--status-warn)">1</div></div>
-          <div class="kpi"><div class="l">engine</div><div class="v">0.2.0</div></div>
-        </div>
+      <div class="card">
+        <span class="status shipped">Merged · scoped navigation</span>
+        <h3>Keep your place.</h3>
+        <p>Overview, Flows, and Brief routes share all-factory or single-factory scope. Deep links, browser Back, scroll restoration, and focus-preserving updates keep navigation usable while the fleet changes.</p>
+      </div>
+      <div class="card">
+        <span class="status shipped">Merged · read-only LAN</span>
+        <h3>View remotely. Manage locally.</h3>
+        <p>Opt into LAN viewing without exposing host controls. Remote requests cannot run management or detection; browser data is bounded and sanitized rather than a copy of host configuration.</p>
       </div>
     </div>
+    <p class="note"><strong>Try the current console:</strong> after starting the dashboard, open <code>http://127.0.0.1:8760/?view=overview</code>. Change <code>view</code> to <code>flows</code> or <code>brief</code> for the shared scoped views. Detailed flow lanes, the evidence panel, and the full Brief are <a href="#roadmap">still planned</a>. Atlas and existing management remain at <code>/</code> and <code>/legacy</code>.</p>
+    <p class="sources">LAN viewing requires an explicit bind such as <code>--host 0.0.0.0</code>. Manage and detect require direct HTTP to numeric loopback or <code>localhost</code> at the actual server port. LAN URLs remain read-only even on the host; DNS aliases and reverse proxies are unsupported, and forwarded headers fail closed. <a href="https://github.com/mikeroySoft/district/blob/main/OPERATIONS-CONSOLE-SPEC.md#9-management-and-network-safety">Network policy</a>.</p>
+  </section>
+
+  <section id="decisions">
+    <div class="kicker">Design decisions</div>
+    <h2>What we chose. What we chose not to build.</h2>
+    <p class="lede">District started with a city-shaped Atlas. The next operating surface puts work and evidence ahead of architecture and repository size.</p>
+    <div class="grid two">
+      <div class="card"><h3>Host infrastructure, not repo control</h3><p>District owns the shared machinery. Gate commands, reviewable files, and project decisions stay with each Factory. It shells out to public commands rather than importing the engine's internals.</p></div>
+      <div class="card"><h3>Operational attention, not project noise</h3><p>A failing runner and a failing product test are different events. Ordinary CI waits, review revisions, and human decisions do not independently turn into fleet incidents.</p></div>
+      <div class="card"><h3>Unknown is an answer</h3><p>Missing or stale observations stay visible. Re-reading a cache does not make old evidence fresh, and an unavailable snapshot does not prove that a dispatcher stopped.</p></div>
+      <div class="card"><h3>Evidence before animation</h3><p>The approved graphical direction uses equally weighted factories and concurrent execution lanes, not taller buildings for bigger repos. Motion will describe observed activity, never fictional progress or an invented ETA.</p></div>
+    </div>
+    <p class="sources"><a href="https://github.com/mikeroySoft/district/blob/main/OPERATIONS-CONSOLE-SPEC.md">Read the approved operations-console specification</a> · One operator, one Linux host. Multi-host orchestration, team management, and an LLM-generated Brief are outside this console's scope.</p>
   </section>
 
   <section id="health">
@@ -277,28 +269,116 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
         <tr><td>Observation</td><td>fresh · stale · partial · unavailable; source times are retained across rereads</td></tr>
       </tbody>
     </table>
-    <p><code>district status --json</code> is keyed by repository slug. Each entry exposes <code>schema_version</code>, <code>operating_state</code>, <code>execution_state</code>, <code>observation</code>, <code>assessment</code>, <code>findings</code>, <code>sources</code>, reported <code>executions</code>, <code>resources</code> and explicit <code>unknowns</code>, alongside existing <code>table</code>, <code>snap</code>, <code>error</code> and cached <code>metrics</code> context. The obsolete <code>health</code>/<code>reasons</code> fields are removed. The complete normalized D02 contract is in <code>OPERATIONS-CONSOLE-SPEC.md</code> §6.1 and <code>district/health.py</code>.</p>
-    <p>Exit <strong>0</strong>: every entry normal, or an empty fleet (<code>{}</code> in JSON). Exit <strong>1</strong>: any supported operational attention. Exit <strong>2</strong>: unknown observation/state without attention; command-usage errors also use 2. Attention takes precedence over unknown, which remains visible in each JSON entry. Existing engines without execution telemetry normally report partial/unknown, not silently healthy.</p>
-    <p>CLI and server observations use the same freshness budgets: five seconds for runtime and 60 seconds for full snapshots. CLI status collects once, without starting background polling. Both retain the producer's original <code>generated_at</code> as source time: collection and rereads never renew an old observation.</p>
-    <p>The browser receives a bounded, sanitized projection of that same classification, not raw CLI snapshots or host configuration. One server-owned collector runs schema-1 <code>factory dashboard --runtime-json</code> about every five seconds with a four-second deadline, and the GitHub-bound full snapshot every 60 seconds with a 30-second deadline, under an eight-worker concurrency bound and no overlapping work per factory. Browser requests only read the cache. <code>/api/fleet</code> reports its revision and bounds; each entry retains source and collection ages plus at most 512 deduplicated events and the producer's history completeness, truncation and reconnect gaps. Findings retain scope, source timestamps, observation quality and evidence; omissions are explicit and never change the assessment. See <code>OPERATIONS-CONSOLE-SPEC.md</code> §§6.2 and 8.</p>
-    <p>Producer observation-quality flags remain authoritative even without an error message: partial resource ownership or execution evidence keeps the runtime observation partial rather than silently becoming normal. Collection deadlines terminate the command's process group, including descendants with inherited output pipes; stopping the dashboard waits for remaining deadlines rather than leaving source work behind.</p>
-    <p>Ordinary byte/event history-window limits remain explicit in the retained history but do not invalidate independently complete current evidence. Missing entries, ambiguous records and unavailable ownership remain partial rather than being hidden.</p>
-    <p>Ready-for-human tickets, parked upstream project work, review bounce, legitimate gate/review rejection and ordinary CI/capacity/resource waits do not independently create findings. A failed snapshot is an observation gap, not proof of stopped dispatch. <code>apply</code> retains its separate reconciliation exit contract and failure-cap policy.</p>
+    <p>Exit <strong>0</strong>: every entry normal, or an empty fleet. Exit <strong>1</strong>: any supported operational attention. Exit <strong>2</strong>: unknown observation or state without attention. Attention takes precedence, but unknowns remain visible. Engines without execution telemetry report partial/unknown rather than silently healthy.</p>
+    <p>The CLI and dashboard share source adapters and classification. Runtime and full snapshots refresh independently; producer timestamps, record-level quality, bounded history, and gaps remain explicit. A slow full snapshot does not need to block publication of runtime evidence.</p>
+    <p class="sources">Integrating with District? <a href="https://github.com/mikeroySoft/district/blob/main/OPERATIONS-CONSOLE-SPEC.md">The source and JSON contract</a> documents observation bounds, findings, and the migration from the old <code>health</code>/<code>reasons</code> fields. <code>district status --json</code> exposes the normalized state keyed by repository slug.</p>
     <div class="grid three" style="margin-top:24px">
-      <div class="card"><h3>Failure cap</h3><p>Ten consecutive failed passes and District disables the timer. A pass that fails every ten minutes otherwise burns model spend indefinitely. <code>apply</code> re-enables it once the cause is fixed.</p></div>
+      <div class="card"><h3>Failure cap</h3><p>Ten consecutive failed passes disable a timer. Fix the cause, then use <code>district apply --reset SLUG</code>: the timer resumes only after a successful pass.</p></div>
       <div class="card"><h3>Supply-chain policy</h3><p>Workers install packages with the operator's credentials. District checks the host-wide minimum package age for <code>uv</code>, <code>npm</code>, and <code>cargo</code>. Missing policy is a WARN, never a silent skip.</p></div>
-      <div class="card"><h3>Adding a repo never hides a bad floor</h3><p>First-gate pass % and review bounce rate stay on the fleet table. A fleet that scales a mediocre pipeline scales mediocrity.</p></div>
+      <div class="card"><h3>Context without false alarms</h3><p>First-gate pass rate and review bounce remain useful project metrics. They do not independently label the underlying machinery unhealthy.</p></div>
     </div>
+  </section>
+
+  <section id="changelog">
+    <div class="kicker">Changelog</div>
+    <h2>From fleet registry to operational evidence.</h2>
+    <p class="lede">Selected milestones through September 8, 2026. Dates below use UTC merge history for PRs; these are source milestones, not invented version releases or a claim about every installed host.</p>
+    <ol class="timeline">
+      <li>
+        <div><time datetime="2026-09-07">September 7, 2026</time><span class="status shipped">Merged</span></div>
+        <div>
+          <h3>The scoped console lands; telemetry and upgrades get tighter.</h3>
+          <ul>
+            <li>Overview / Flows / Brief navigation over real cached state, with factory scope, honest loading and expired-selection messages, and Back / scroll / focus preservation.</li>
+            <li>CLI status now collects the same runtime evidence as the dashboard. Record-scoped diagnostics preserve partial observations without flattening unrelated current evidence.</li>
+            <li>Shared-engine upgrades wait for every managed active pass and restore timers before reporting their state. Full-snapshot collection has its own bounded deadline.</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> agreement between surfaces and safe maintenance matter more than adding another visualization.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/pull/35">Console #35</a> · <a href="https://github.com/mikeroySoft/district/pull/38">Telemetry #38</a> · <a href="https://github.com/mikeroySoft/district/pull/39">Upgrade safety #39</a> · <a href="https://github.com/mikeroySoft/district/pull/41">Record quality #41</a></p>
+        </div>
+      </li>
+      <li>
+        <div><time datetime="2026-09-06">September 6, 2026</time><span class="status shipped">Merged</span></div>
+        <div>
+          <h3>One classification, one collector, an explicit trust boundary.</h3>
+          <ul>
+            <li>Operating state, execution state, observation quality, and findings replace the old mixed health verdict.</li>
+            <li>Independent runtime/full refresh, bounded collection work, and sanitized cache-only browser reads become the common console data source.</li>
+            <li>LAN viewing becomes read-only; host mutations fail closed outside trusted local requests.</li>
+            <li>Host doctor, CI-derived gate proposals, and locked hourly reconciliation join the everyday workflow.</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> more viewers should not create more collection work, and remote visibility should not grant remote control.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/pull/33">Classification #33</a> · <a href="https://github.com/mikeroySoft/district/pull/34">Collector #34</a> · <a href="https://github.com/mikeroySoft/district/pull/32">LAN boundary #32</a> · <a href="https://github.com/mikeroySoft/district/pull/16">Doctor #16</a> · <a href="https://github.com/mikeroySoft/district/pull/18">Onboarding #18</a> · <a href="https://github.com/mikeroySoft/district/pull/19">Reconciliation #19</a></p>
+        </div>
+      </li>
+      <li>
+        <div><time datetime="2026-09-05">September 5, 2026</time><span class="status">Design approved</span></div>
+        <div>
+          <h3>From an architecture map to an operations console.</h3>
+          <p>Approved the Overview / Flows / Brief direction, a shared evidence model, and dependency-gated implementation tickets. Atlas stays available until the new console passes its implementation and human acceptance checkpoints.</p>
+          <p class="decision"><strong>Why:</strong> repository size is not operational importance. The operating screen should answer whether work is flowing and what the operator can actually act on.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/commit/164663b1a3e5e78b4fde3b127cf013d87b7e3c28">Approved specification and ticket plan</a></p>
+        </div>
+      </li>
+      <li>
+        <div><span class="date">September 3–4, 2026</span><span class="status shipped">Initial implementation</span></div>
+        <div>
+          <h3>A district around the factories.</h3>
+          <p>Introduced the host registry, onboarding and adoption, shared defaults, port allocation, reconciliation, upgrades, failure caps, and fleet status. Added cached repository metrics, the Atlas, local management, dashboard installation, and a reusable agent skill.</p>
+          <p class="decision"><strong>Why:</strong> centralize what every factory needs without taking ownership of its committed configuration or project decisions.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/commit/8e14918">Initial implementation</a> · <a href="https://github.com/mikeroySoft/district/commit/d89af1c">Live Atlas</a> · <a href="https://github.com/mikeroySoft/district/commit/ce35caf">Agent skill</a></p>
+        </div>
+      </li>
+    </ol>
+    <p class="sources"><a href="https://github.com/mikeroySoft/district/commits/main/">Full commit history</a> · <a href="https://github.com/mikeroySoft/district/pulls?q=is%3Apr+is%3Amerged">All merged pull requests</a></p>
+  </section>
+
+  <section id="roadmap">
+    <div class="kicker">Roadmap</div>
+    <h2>Make the machinery readable. Then make it the home screen.</h2>
+    <p class="lede">The shared state, collector, LAN boundary, and scoped shell are merged. This is the remaining console sequence as of September 8, 2026 — not a release-date promise.</p>
+    <div class="grid three">
+      <div class="card">
+        <span class="status next">Next · released to intake</span>
+        <h3>Graphical Overview</h3>
+        <p>Stable factory positions, concurrent stage occupancy, capacity, source freshness, and bounded recent activity. Watch mode and motion tied to real observations, with reduced-motion and pause controls.</p>
+        <p class="sources"><a href="https://github.com/mikeroySoft/district/issues/27">D04 · #27</a> — open, not merged.</p>
+      </div>
+      <div class="card">
+        <span class="status">Following · held</span>
+        <h3>Flows &amp; Brief</h3>
+        <p>Investigate concurrent executions, waits, and review loops through one reusable evidence panel. Then read a deterministic Brief of findings, changes, recoveries, and maintenance from that same snapshot.</p>
+        <p class="sources"><a href="https://github.com/mikeroySoft/district/issues/28">D05 · Flows #28</a> → <a href="https://github.com/mikeroySoft/district/issues/29">D06 · Brief #29</a>.</p>
+      </div>
+      <div class="card">
+        <span class="status">Acceptance-gated · held</span>
+        <h3>Management &amp; cutover</h3>
+        <p>Bring existing management into explicit, safe operator workflows. Make the console the default only after dependency checks, human visual approval, desktop/LAN acceptance, and a retrievable prototype archive.</p>
+        <p class="sources"><a href="https://github.com/mikeroySoft/district/issues/30">D08 · Management #30</a> · <a href="https://github.com/mikeroySoft/district/issues/31">D09 · Cutover #31</a>.</p>
+      </div>
+    </div>
+    <p class="note"><strong>Release is not completion.</strong> “Released to intake” means eligible for the Factory pipeline, not shipped. Held work waits for its dependencies and operator checkpoints. The current default remains Atlas; successful CI alone does not authorize the console cutover.</p>
+    <details>
+      <summary>Also on the horizon — open backlog, not part of the console release promise</summary>
+      <ul>
+        <li><strong>Engine control:</strong> <a href="https://github.com/mikeroySoft/district/issues/5">ref-based upgrades and rollback guidance #5</a>, plus <a href="https://github.com/mikeroySoft/district/issues/6">per-factory engine pins #6</a>.</li>
+        <li><strong>Reviewable drift:</strong> <a href="https://github.com/mikeroySoft/district/issues/8">print patches for committed-file drift #8</a> rather than silently rewriting repo-owned files.</li>
+        <li><strong>Host visibility:</strong> <a href="https://github.com/mikeroySoft/district/issues/12">worker sandbox status #12</a> and <a href="https://github.com/mikeroySoft/district/issues/36">GPU platform/configuration mismatch warnings #36</a>.</li>
+        <li><strong>Notifications:</strong> <a href="https://github.com/mikeroySoft/district/issues/4">status-change hooks #4</a> and <a href="https://github.com/mikeroySoft/district/issues/37">a notification-to-pipeline bridge #37</a>.</li>
+      </ul>
+    </details>
+    <p class="sources"><a href="https://github.com/mikeroySoft/district/issues">Follow the live issue tracker</a> for current status, dependencies, and discussion. Scope or order may change as real operation provides evidence.</p>
   </section>
 
   <section id="install">
     <div class="kicker">Install</div>
     <h2>Python 3.11+, one dependency, a stdlib HTTP server.</h2>
-    <p class="lede">Requires <a href="https://github.com/mikeroySoft/factory">mikeroySoft/factory</a> on the host and the <code>gh</code> CLI authenticated.</p>
+    <p class="lede">For a Linux host with user systemd, <a href="https://github.com/mikeroySoft/factory">Factory</a>, <code>git</code>, and an authenticated <code>gh</code> CLI. Runtime execution detail requires a Factory build supporting <code>dashboard --runtime-json</code>.</p>
     <div class="term">
       <div class="bar"><span>shell</span><span></span></div>
 <pre><span class="p">$</span> npx skills add mikeroysoft/district
 <span class="p">$</span> uv tool install git+https://github.com/mikeroySoft/district
+<span class="p">$</span> district doctor                       <span class="c"># check this host before onboarding</span>
 <span class="p">$</span> district add ~/dev/owner/repo        <span class="c"># or a GitHub URL; adopts an existing .factory.toml</span>
 <span class="p">$</span> district apply                        <span class="c"># reconcile units, labels, doctor, caps, policy</span>
 <span class="p">$</span> district dashboard --install          <span class="c"># dashboard + hourly metrics and apply timers</span>
@@ -306,6 +386,7 @@ mikeroySoft/rocm-app  capped             unknown    partial      attention
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
   </section>
+  </main>
 
   <footer>
     <span>District — fleet manager for mikeroySoft/factory installs on one host.</span>
