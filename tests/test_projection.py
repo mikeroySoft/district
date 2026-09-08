@@ -449,7 +449,8 @@ class ProjectionTest(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(public))
         self.assertNotIn("PATH_CANARY", json.dumps(public))
         ids = [item["id"] for item in public["executions"]]
-        self.assertEqual(ids[:2], ["live-worker", "live-review"])
+        self.assertEqual(ids[:3], ["live-worker", "live-review", "old-39"])
+        self.assertNotIn("old-0", ids)
         self.assertEqual(len(ids), 32)
         self.assertEqual(public["projection"]["omitted"]["executions"], 10)
         self.assertEqual(safe_fleet({SLUG: {"activity": {}}})[SLUG]["activity"]["dispatcher"], None)

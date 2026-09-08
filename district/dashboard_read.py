@@ -166,8 +166,10 @@ def _classification(raw: dict) -> dict:
         "observation": _choice(item.get("observation"), ("fresh", "stale", "partial", "unavailable"), "unavailable"),
         "error": safe_text(item.get("error")),
     } for item in records(raw.get("sources"), "sources")]
-    # The record limit keeps every non-terminal execution first: occupancy must survive a long completed tail.
-    ordered = sorted(_list(raw.get("executions")), key=lambda item: _dict(item).get("state") in health.TERMINAL_STATES)
+    # The record limit keeps every non-terminal execution, then the newest terminal ones (the producer
+    # lists oldest first): occupancy and the latest completions survive a long completed tail.
+    terminal = [item for item in _list(raw.get("executions")) if _dict(item).get("state") in health.TERMINAL_STATES]
+    ordered = [item for item in _list(raw.get("executions")) if _dict(item).get("state") not in health.TERMINAL_STATES] + terminal[::-1]
     executions = [{
         "id": _identity(item.get("id")), "source_id": _identity(item.get("source_id")),
         "state": _choice(item.get("state"), health.EXECUTION_STATES),
