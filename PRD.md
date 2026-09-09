@@ -149,16 +149,19 @@ command. Both existing repos go through this path once.
 Done when `factory doctor` prints `OK: 0 blocking problem(s)` and the timer is
 active.
 
-### 5.2 `district apply [repo] [--upgrade]`
+### 5.2 `district apply [repo] [--upgrade [REF]]`
 
 Reconcile the host to the registry. Idempotent; safe to run any time.
 
 `district-apply.timer` runs `apply` hourly.
 
-- `--upgrade`: reinstall agent-factory from its source (the local checkout
-  today; a git ref later) so every timer picks up the new code on its next tick.
-  The install is an explicit snapshot — not editable — so an in-progress edit in
-  the checkout never runs unattended.
+- `--upgrade [REF]`: reinstall factory from an export (`git archive`) of
+  one commit in its source checkout — `REF` (tag, branch, sha) or `HEAD`, which
+  additionally requires a clean working tree — so every timer picks up the new
+  code on its next tick. The install is an explicit snapshot — not editable —
+  so an in-progress edit in the checkout never runs unattended. The host file
+  records `[defaults.engine]` ref / sha / previous / installed_at; the printed
+  `rollback: district apply --upgrade <previous sha>` reverts it.
 - Per repo (all, or the one named): `factory install` (re-renders units with the
   current `PATH` and `ExecStart`), ensure labels, `factory doctor --json`.
 - **Failure cap.** Count consecutive failed dispatcher passes from the journal.

@@ -579,14 +579,27 @@ class ApplyTest(DistrictCase):
         self.assertIn("start factory-widgets.service", self.calls("systemctl"))
         self.assertIn("install", self.calls("factory"))
 
-    def test_upgrade_restores_timers_on_failure(self) -> None:
+    def engine_source(self) -> Path:
+        """A committed `factory_source` checkout registered in the host file."""
         src = self.tmp / "af"
         src.mkdir()
-        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
+        self.git(src, "init", "-q")
+        (src / "VERSION").write_text("1\n")
+        self.git(src, "add", ".")
+        self.git(src, "commit", "-q", "-m", "one")
         self.register()
         data = host.load()
         data["defaults"] = {"factory_source": str(src)}
         host.save(data)
+        return src
+
+    @staticmethod
+    def git(src: Path, *args: str) -> str:
+        identity = ["-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
+        return subprocess.run(["git", "-C", str(src), *identity, *args], check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_upgrade_restores_timers_on_failure(self) -> None:
+        self.engine_source()
         self.stub("uv", ("tool install *", "no network\n", 1))
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         code, out = self.district("apply", "--upgrade")
@@ -596,6 +609,7 @@ class ApplyTest(DistrictCase):
         self.assertLess(calls.index("disable --now factory-widgets.timer"), calls.index("enable --now factory-widgets.timer"))
         self.assertEqual(self.calls("factory"), [])  # nothing ran after the failed reinstall
         self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
+        self.assertNotIn("engine", host.load()["defaults"])
         # a District-disabled timer is inactive: neither stopped nor restored
         data = host.load()
         data["repo"]["acme/widgets"]["disabled_at"] = "2026-09-03T00:00:00Z"
@@ -608,31 +622,19 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("enable --now factory-widgets.timer", self.calls("systemctl"))
 
     def test_upgrade_installs_the_renamed_engine_package(self) -> None:
-        src = self.tmp / "af"
-        src.mkdir()
-        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
-        self.register()
-        data = host.load()
-        data["defaults"] = {"factory_source": str(src)}
-        host.save(data)
+        src = self.engine_source()
         self.stub("uv", ("tool install *", "Installed 1 executable: factory\n"))
         self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)),
                   ("dashboard --json", json.dumps(dashboard())))
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         code, out = self.district("apply", "--upgrade")
         self.assertEqual(code, 0, out)
-        self.assertEqual(self.calls("uv"), [f"tool install --reinstall --from {src} factory"])
+        self.assertRegex(self.calls("uv")[0], r"^tool install --reinstall --from \S+ factory$")
         self.assertEqual(self.calls("factory")[0], "--version")
         self.assertIn(f"installed factory 0.2.0 from {src}", out)
 
     def test_upgrade_waits_for_a_running_pass_whose_timer_is_already_disabled(self) -> None:
-        src = self.tmp / "af"
-        src.mkdir()
-        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
-        self.register()
-        data = host.load()
-        data["defaults"] = {"factory_source": str(src)}
-        host.save(data)
+        self.engine_source()
         self.stub("systemctl", ("is-active *.service", "activating\n"), ("is-active *", "inactive\n"))
         with mock.patch.object(apply, "SERVICE_WAIT", 0), mock.patch.object(apply.time, "sleep"):
             code, out = self.district("apply", "--upgrade")
@@ -641,18 +643,68 @@ class ApplyTest(DistrictCase):
         self.assertEqual(self.calls("uv"), [])
 
     def test_upgrade_refuses_dirty_source(self) -> None:
-        src = self.tmp / "af"
-        src.mkdir()
-        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
+        src = self.engine_source()
         (src / "x").write_text("dirty")
-        self.register()
-        data = host.load()
-        data["defaults"] = {"factory_source": str(src)}
-        host.save(data)
         code, out = self.district("apply", "--upgrade")
         self.assertEqual(code, 1)
         self.assertIn("uncommitted changes", out)
         self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
+
+    def test_upgrade_unknown_ref_touches_no_timer(self) -> None:
+        src = self.engine_source()
+        code, out = self.district("apply", "--upgrade", "v9")
+        self.assertEqual(code, 1)
+        self.assertIn(f"v9: not a commit in {src}", out)
+        self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
+        self.assertEqual(self.calls("uv"), [])
+        self.assertNotIn("engine", host.load()["defaults"])
+
+    def test_upgrade_ref_installs_an_export_of_that_commit_and_records_it(self) -> None:
+        src = self.engine_source()
+        self.git(src, "tag", "v1")
+        tagged = self.git(src, "rev-parse", "v1")
+        (src / "VERSION").write_text("2\n")
+        self.git(src, "commit", "-qam", "two")
+        head = self.git(src, "rev-parse", "HEAD")
+        (src / "VERSION").write_text("dirty\n")
+        seen = []
+        real = apply.run
+
+        def fake_run(argv, **kw):
+            if argv[:3] == ["uv", "tool", "install"]:
+                exported = Path(argv[argv.index("--from") + 1])
+                seen.append(((exported / "VERSION").read_text(), (exported / ".git").exists()))
+                return subprocess.CompletedProcess(argv, 0, "Installed 1 executable: factory\n", "")
+            return real(argv, **kw)
+
+        self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        with mock.patch.object(apply, "run", fake_run):
+            code, out = self.district("apply", "--upgrade", "v1")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(seen, [("1\n", False)])  # the tagged tree, not the dirty checkout
+        engine = host.load()["defaults"]["engine"]
+        self.assertEqual((engine["ref"], engine["sha"]), ("v1", tagged))
+        self.assertNotIn("previous", engine)
+        self.assertRegex(engine["installed_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertNotIn("rollback", out)
+        # HEAD still needs a clean tree; then `apply <slug> --upgrade` is upgrade-then-apply-one
+        code, out = self.district("apply", "widgets", "--upgrade")
+        self.assertEqual(code, 1)
+        self.assertIn("uncommitted changes", out)
+        (src / "VERSION").write_text("2\n")
+        with mock.patch.object(apply, "run", fake_run):
+            code, out = self.district("apply", "widgets", "--upgrade")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(seen[-1], ("2\n", False))
+        engine = host.load()["defaults"]["engine"]
+        self.assertEqual((engine["ref"], engine["sha"], engine["previous"]), ("HEAD", head, tagged))
+        self.assertIn(f"rollback: district apply --upgrade {tagged}", out)
+        # plain apply reports the recorded engine once, ahead of the repo rows
+        code, out = self.district("apply")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.count("engine "), 1)
+        self.assertLess(out.index(f"engine {head[:7]} (HEAD)"), out.index("acme/widgets"))
 
 
 class StatusTest(DistrictCase):

@@ -2,8 +2,10 @@
 
 Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
-clone_dir / factory_source / min_package_age / max_failed_passes, and per repo
-`path`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
+clone_dir / factory_source / min_package_age / max_failed_passes,
+`[defaults.engine]` ref / sha / previous / installed_at (what `apply --upgrade`
+last installed), and per repo `path`, `disabled_at`, `disabled_reason`.
+A repo is managed iff its table has a `path`.
 """
 
 from __future__ import annotations
