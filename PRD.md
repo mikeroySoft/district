@@ -155,7 +155,7 @@ Reconcile the host to the registry. Idempotent; safe to run any time.
 
 `district-apply.timer` runs `apply` hourly.
 
-- `--upgrade [REF]`: reinstall agent-factory from an export (`git archive`) of
+- `--upgrade [REF]`: reinstall factory from an export (`git archive`) of
   one commit in its source checkout — `REF` (tag, branch, sha) or `HEAD`, which
   additionally requires a clean working tree — so every timer picks up the new
   code on its next tick. The install is an explicit snapshot — not editable —

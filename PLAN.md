@@ -196,10 +196,10 @@ tests/test_district.py
 
 Non-interactive: `--exclusive a,b --no-edit --check …`.
 
-### 2.3 `district apply [slug] [--upgrade]`
+### 2.3 `district apply [slug] [--upgrade [REF]]`
 
-1. `--upgrade`: source `[defaults.factory_source]`; refuse if its working
-   tree is dirty (no override — the PRD's snapshot guarantee is absolute).
+1. `--upgrade [REF]`: source `[defaults].factory_source`; resolve a local
+   commit and install its export. `HEAD` (the default) requires a clean tree.
    Sequence: disable all managed timers → wait for every managed service to
    be inactive (timeout → abort with the timer state restored) →
    `uv tool install --reinstall` → continue to step 3 → re-enable timers.

@@ -106,7 +106,8 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
     for timer in active_timers:
         systemctl("disable", "--now", timer)
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
-    wait_inactive([t.removesuffix(".timer") + ".service" for t in active_timers], SERVICE_WAIT)
+    # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
+    wait_inactive([f"{host.unit_name(s)}.service" for s in host.repos(data)], SERVICE_WAIT)
     with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
         tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
         tree.mkdir()
