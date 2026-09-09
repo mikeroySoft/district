@@ -2,6 +2,8 @@
 
 Worker-recorded browser evidence for District #27 (D04). Human visual approval of the combined Overview/Flows design is a separate D05/D09 checkpoint.
 
+**Current status:** see the 2026-09-09 retry evidence below. Deterministic gate passes; the complete live-state browser exit gate is **not claimed complete**. Earlier captures describe the previous implementation, not the fixes in `fa47977`.
+
 Setup: worktree console served by `uv run python -m district dashboard --no-open --port 8790` from `.factory/wt-27`, reading the installed host registry (five real factories, engine `factory-3de0a24`). Headless Chromium 1440×1000 unless stated. All times UTC, 2026-09-08. Real-telemetry captures are the source-of-truth fleet; the fixture case is labeled separately.
 
 ## Real telemetry
@@ -25,3 +27,42 @@ Setup: worktree console served by `uv run python -m district dashboard --no-open
 `fixture-fault-cases.webp` and `fixture-fleet.json` come from a throwaway server feeding `health.classify` + `dashboard_read.safe_fleet` with synthetic sources, to show distinctions the installed fleet did not exhibit at the time: `fixture/running` (fresh active worker+gate pulse, capacity wait on review, `2 of 2 active`, countdown), `fixture/scheduled` (scheduled waiting, known wait), `fixture/capped` (warning finding, “no automatic dispatch (capped)”), `fixture/stopped` (`scheduling.unexpected_stop` error finding), `fixture/stale` (muted card, stationary `stage-active · stale` last known state, “runtime stale, 15m old”), `fixture/shared-dependency` (shared-scope `dependency.unavailable` counted in the strip, `runtime.mechanism_unavailable`, held resource with unknown owner). Strip: `2 normal · 3 attention · 1 unknown · 1 shared-scope finding`.
 
 Closing check of the prolonged watch-mode session: 00:19:24Z → 00:23:51Z (4.5 min headless, 53 distinct cache revisions, one worktree-server restart reconnected silently, DOM node count 493→505 only from real new gate-check/gate stage nodes, focus on the `dispatcher` stage link and scroll retained; `watch-mode-desktop.webp`).
+
+## Retry: 2026-09-09, real desktop browser
+
+Implementation: `fa47977`. All timestamps below are UTC. Worktree console served at `http://127.0.0.1:8790/?view=overview`, using the installed five-factory registry and public F03 telemetry. No production service or schedule changes. Actual desktop Chromium launched on X11 (`DISPLAY=:1`) and attached through CDP; other browser checks used a separate headless Chromium tab. These are production-console captures, not prototypes.
+
+### Corrections and regression checks
+
+- Removed CSS connectors that asserted an edge between every adjacent stage. Duplicate execution IDs count once; stale/unavailable factory records cannot retain active pulses.
+- Watch mode affects Overview only: factory/stage navigation restores Flows navigation. Pause remains available in watch mode. The in-scope count has its own CSS class and no longer disappears with the scope selector.
+- Hidden-tab return, route return, reconnect, pause and reduced-motion consume old transient motion. Deduplication retains only the bounded event window plus a source-time watermark, so older returning records do not replay.
+- Requests are serialized and time out after ten seconds. Lost connection stops every stage animation, mutes cards and advances the displayed age of unchanged source timestamps.
+- Resource summaries expand to identity, ownership, source quality and timestamps. A disappearing finding is not recovery evidence. Only newer fresh dispatcher evidence can confirm recovery from a cap/unexpected stop; other disappearances remain explicitly unconfirmed.
+- `uv run python -m unittest discover -s tests`: **139 tests passed** after the final code change. The added duplicate/stale-occupancy and old-history regressions failed before their fixes.
+- `/home/mike/.local/share/uv/tools/factory/bin/python3 -m factory gate --report .factory/gate-report-27.md`: **PASS** (conflict markers, test, leak scan).
+
+### Real observations
+
+- [Concurrent worker/gate capture](retry-real-concurrent.webp), 00:36:43.745Z, revision 910: District worker `26b7a41b-80e5-41a3-8026-7939aae9d44b` remains active while the actual acceptance command supplies gate `ada092cb-c4d2-4a36-b22b-b20a46f6fb28` and gate-check `d28c4b3f-4cd7-4e24-af9f-febf30aa0b40`. Their source observation is 00:36:41.875644Z. Dispatcher is another distinct execution. All are explicitly **partial**, not fresh pulses.
+- [Real review capture](retry-real-review.webp), 00:36:12.685Z, revision 878: Factory #62 review `c0d9b5fa-13a7-49fb-b487-003bdbab7120` exited with `product_feedback / REVISE` at 00:26:34.537163Z. Distinct review `8cb1e2f4-79e3-41d0-a27a-889814a1fba6` entered at 00:34:27.413628Z; desktop observed its one arrival at 00:34:33.041Z. Earlier browser inspection observed worker `43f56207-d7ec-427f-a030-eea0d5eeeca2` exit at 00:17:58.718491Z, gate `56916ffe-b9f3-40f9-a594-4529325836a4` complete at 00:19:05.265032Z, and the first review enter at 00:19:06.857750Z. No intermediate worker restart is inferred. The retained-window gaps remain visible; the older worker record subsequently left that window.
+- Actual timer activity produced distinct arrivals/completions for rocm-app at browser times 00:30:03Z/00:30:08Z and gpuflo at 00:33:38Z. Identical intervening polls did not emit those motions again. [Desktop observation log](retry-desktop-session.json) records cache revisions, motion batches, visibility, focus and scroll without changing telemetry.
+- [Retained real telemetry](retry-real-telemetry.json) includes original source times, execution/event identities, findings, ownership, declared history gaps and projection omissions. Events are filtered to the named execution stages for this evidence file; it is not a claim of complete history.
+- Counts at revision 540 were `1 normal / 0 attention / 4 unknown`, exactly matching the same five D01 assessments. The [final screenshot](retry-desktop-final.webp) and [matched source metadata](retry-desktop-final.json) are revision **1132**, captured 00:40:19.414Z, with `0 / 0 / 5`; equality was checked again, and the revision stayed unchanged during the screenshot. No disappearing unknown was counted healthy.
+
+### Desktop duration and interactions
+
+- Actual desktop observation session: **00:29:03.061Z–00:39:17.965Z = 10 min 14.904 s**, 117 distinct sampled revisions. Watch mode stayed enabled, with brief Flows navigation and a real six-second background-tab check. From 00:30:03Z onward, focus stayed on District's worker link and scroll stayed at 250 px through real polls and gate activity.
+- The observation log spans verification of the implementation; three final small corrections (in-scope count CSS class, transient cleanup on pause/preference changes, stricter positive dispatcher recovery evidence) were subsequently reloaded for the final desktop capture. This is not a claim of a ten-minute session entirely on the final commit.
+- Actual second desktop tab brought to foreground at 00:29:31.735Z: console reported `document.hidden=true`, `data-hidden`, and all stage animation names `none`. Returning at 00:29:37.755Z restored visibility with zero transient motions. No override of `document.hidden` was used.
+- Pause/resume: control remains visible in watch mode; all animation names become `none`; note explicitly says factories/facts keep updating. Fixture transition followed immediately by pause/resume left zero old transition/completion classes.
+- Reduced motion was browser-emulated: animation names `none`, explanatory note present, facts retained. Keyboard Tab moved between stage links with a solid focus outline.
+- Worker selection entered `/?view=flows&factory=mikeroySoft%2Fdistrict&stage=worker`; navigation remained visible despite persisted watch mode. Factory-name selection cleared the previous stage parameter. [Flows screenshot](retry-flows.webp). Back restored Overview/watch mode with zero replayed transients.
+- [390×844 keyboard capture](retry-narrow.webp), final check 00:39:17.963Z: width and scroll width both 390, stages stacked, scheduling link has solid keyboard focus after a poll. Watch/pause controls and in-scope count remain available. Resource details expand to source-stamped evidence.
+- [Disconnected real-state capture](retry-offline.webp), 00:31:49.551Z: this headless tab alone was put offline; the real collector and desktop session continued. All stage animations stopped, opacity was `.72`, and the runtime source remained 00:31:38Z while its displayed age advanced from 11 to 14 seconds. Reconnect produced no transient motion.
+
+### Fixture-only checks and remaining exit gap
+
+[Fault capture](retry-fixture-faults.webp), 00:34:03.543Z, reuses the explicitly synthetic archived [fixture payload](fixture-fleet.json). Its timestamps/ages are fixed test inputs, not current host telemetry. It covers fresh worker+gate pulse, scheduled waiting, capacity wait, held-resource ownership unknown, capped dispatch, unexpected stop, shared-scope findings and stale stationary state. New distinct fixture transition animated once; duplicate poll emitted no new motion; pause/resume did not replay it; stale completion emitted no motion.
+
+The installed active execution records remained partial. A **real fresh active pulse**, real resource/capacity-wait cases and real capped/unexpected-stop cases were not captured; these remain fixture-only. Review revision and re-entry were real, but the clipped worker history is not a complete revision trace. No producer fields were relabeled fresh and no production fault/schedule was manufactured to fill these gaps. The deterministic PASS does not waive the live-state exit gate or human acceptance. Submit these artifacts with D05; D09 remains held for the operator's combined visual approval.
