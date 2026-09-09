@@ -166,6 +166,10 @@ def _classification(raw: dict) -> dict:
         "observation": _choice(item.get("observation"), ("fresh", "stale", "partial", "unavailable"), "unavailable"),
         "error": safe_text(item.get("error")),
     } for item in records(raw.get("sources"), "sources")]
+    # The record limit keeps every non-terminal execution, then the newest terminal ones (the producer
+    # lists oldest first): occupancy and the latest completions survive a long completed tail.
+    terminal = [item for item in _list(raw.get("executions")) if _dict(item).get("state") in health.TERMINAL_STATES]
+    ordered = [item for item in _list(raw.get("executions")) if _dict(item).get("state") not in health.TERMINAL_STATES] + terminal[::-1]
     executions = [{
         "id": _identity(item.get("id")), "source_id": _identity(item.get("source_id")),
         "state": _choice(item.get("state"), health.EXECUTION_STATES),
@@ -175,7 +179,7 @@ def _classification(raw: dict) -> dict:
         **{key: _identity(item[key]) for key in ("stage", "reference") if key in item},
         **{key: safe_text(item[key]) for key in ("reason",) if key in item},
         **{key: _choice(item[key], ("product", "mechanism", "unknown")) for key in ("outcome_kind",) if key in item},
-    } for item in records(raw.get("executions"), "executions")]
+    } for item in records(ordered, "executions")]
     resources = [{
         "id": _identity(item.get("id")), "source_id": _identity(item.get("source_id")),
         "observed_at": _stamp(item.get("observed_at")),
@@ -278,7 +282,21 @@ def _activity(raw: object) -> dict:
             "outcome": _identity(item.get("outcome")),
             "reason": safe_text(item.get("reason")),
         })
+    dispatcher = _dict(raw.get("dispatcher"))
+    capacity, transition = _dict(dispatcher.get("capacity")), _dict(dispatcher.get("latest_transition"))
     return {
+        "dispatcher": {
+            **{key: dispatcher.get(key) if type(dispatcher.get(key)) is bool else None
+               for key in ("service_active", "timer_active")},
+            "next_at": _stamp(dispatcher.get("next_at")), "observed_at": _stamp(dispatcher.get("observed_at")),
+            "observation": _choice(dispatcher.get("observation"), ("fresh", "stale", "partial", "unavailable"), "unavailable"),
+            "capacity": {"configured": _number(capacity.get("configured")), "active": _number(capacity.get("active")),
+                         "complete": capacity.get("complete") if type(capacity.get("complete")) is bool else None}
+                        if capacity else None,
+            "latest_transition": {"event_id": _identity(transition.get("event_id")), "at": _stamp(transition.get("at")),
+                                  "execution_id": _identity(transition.get("execution_id")),
+                                  "kind": _identity(transition.get("kind"))} if transition else None,
+        } if dispatcher else None,
         "events": events,
         "errors": [{key: _identity(error.get(key)) for key in ("source", "scope", "code")}
                    for error in _list(raw.get("errors"))[:32] if isinstance(error, dict)],

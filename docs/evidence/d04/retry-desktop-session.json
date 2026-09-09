@@ -1,0 +1,1272 @@
+{
+  "start": "2026-09-09T00:29:03.061Z",
+  "firstRevision": 434,
+  "revisions": [
+    {
+      "at": "2026-09-09T00:29:08.061Z",
+      "revision": 434,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "\n\n  District\n  OverviewFlowsBrief\n  Factory scope All factoriesmikeroySoft/distr"
+    },
+    {
+      "at": "2026-09-09T00:29:13.061Z",
+      "revision": 444,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "\n\n  District\n  OverviewFlowsBrief\n  Factory scope All factoriesmikeroySoft/distr"
+    },
+    {
+      "at": "2026-09-09T00:29:18.061Z",
+      "revision": 449,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "\n\n  District\n  OverviewFlowsBrief\n  Factory scope All factoriesmikeroySoft/distr"
+    },
+    {
+      "at": "2026-09-09T00:29:23.061Z",
+      "revision": 456,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "\n\n  District\n  OverviewFlowsBrief\n  Factory scope All factoriesmikeroySoft/distr"
+    },
+    {
+      "at": "2026-09-09T00:29:28.061Z",
+      "revision": 461,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "\n\n  District\n  OverviewFlowsBrief\n  Factory scope All factoriesmikeroySoft/distr"
+    },
+    {
+      "at": "2026-09-09T00:29:33.928Z",
+      "revision": 467,
+      "hidden": true,
+      "scroll": 0,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:29:38.061Z",
+      "revision": 473,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:29:43.061Z",
+      "revision": 479,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:29:48.061Z",
+      "revision": 484,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:29:53.061Z",
+      "revision": 489,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:29:58.061Z",
+      "revision": 494,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:03.061Z",
+      "revision": 498,
+      "hidden": false,
+      "scroll": 0,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:08.061Z",
+      "revision": 503,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:13.061Z",
+      "revision": 506,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:18.061Z",
+      "revision": 511,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:23.061Z",
+      "revision": 518,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:28.061Z",
+      "revision": 523,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:33.061Z",
+      "revision": 528,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:38.061Z",
+      "revision": 534,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:43.061Z",
+      "revision": 540,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:48.061Z",
+      "revision": 546,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:53.061Z",
+      "revision": 550,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:30:58.061Z",
+      "revision": 555,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:03.061Z",
+      "revision": 560,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:08.061Z",
+      "revision": 565,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:13.061Z",
+      "revision": 570,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:18.061Z",
+      "revision": 570,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:23.061Z",
+      "revision": 581,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:28.061Z",
+      "revision": 587,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:33.061Z",
+      "revision": 590,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:38.061Z",
+      "revision": 595,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:43.061Z",
+      "revision": 599,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:48.061Z",
+      "revision": 605,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:53.061Z",
+      "revision": 611,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:31:58.061Z",
+      "revision": 616,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:03.061Z",
+      "revision": 621,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:08.061Z",
+      "revision": 626,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:13.061Z",
+      "revision": 631,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:18.061Z",
+      "revision": 636,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:23.061Z",
+      "revision": 641,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:28.062Z",
+      "revision": 648,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:33.061Z",
+      "revision": 653,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:38.061Z",
+      "revision": 658,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:43.061Z",
+      "revision": 664,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:48.061Z",
+      "revision": 670,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:53.061Z",
+      "revision": 674,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:32:58.061Z",
+      "revision": 680,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:03.061Z",
+      "revision": 685,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:08.061Z",
+      "revision": 689,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:13.061Z",
+      "revision": 694,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:18.061Z",
+      "revision": 699,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:23.061Z",
+      "revision": 704,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:28.061Z",
+      "revision": 710,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:33.061Z",
+      "revision": 716,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:38.061Z",
+      "revision": 721,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:43.061Z",
+      "revision": 724,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:48.061Z",
+      "revision": 730,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:53.061Z",
+      "revision": 736,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:33:58.061Z",
+      "revision": 740,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:03.061Z",
+      "revision": 740,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:08.061Z",
+      "revision": 751,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:13.061Z",
+      "revision": 756,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:18.061Z",
+      "revision": 760,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:23.061Z",
+      "revision": 765,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:28.061Z",
+      "revision": 771,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:33.061Z",
+      "revision": 777,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:38.061Z",
+      "revision": 782,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:43.061Z",
+      "revision": 787,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:48.061Z",
+      "revision": 793,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:53.061Z",
+      "revision": 797,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:34:58.061Z",
+      "revision": 803,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:03.061Z",
+      "revision": 806,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:08.061Z",
+      "revision": 812,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:13.061Z",
+      "revision": 817,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:18.061Z",
+      "revision": 822,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:23.061Z",
+      "revision": 826,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:28.061Z",
+      "revision": 832,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:33.061Z",
+      "revision": 838,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:38.061Z",
+      "revision": 838,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:43.061Z",
+      "revision": 848,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:48.061Z",
+      "revision": 853,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:53.061Z",
+      "revision": 859,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:35:58.061Z",
+      "revision": 864,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:03.061Z",
+      "revision": 870,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:08.065Z",
+      "revision": 876,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:13.061Z",
+      "revision": 880,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:18.061Z",
+      "revision": 885,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:23.061Z",
+      "revision": 888,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:28.061Z",
+      "revision": 893,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:33.061Z",
+      "revision": 899,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:38.061Z",
+      "revision": 905,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:43.061Z",
+      "revision": 905,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:48.061Z",
+      "revision": 915,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:53.061Z",
+      "revision": 919,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:36:58.061Z",
+      "revision": 925,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:03.061Z",
+      "revision": 929,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:08.061Z",
+      "revision": 935,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:13.061Z",
+      "revision": 941,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:18.069Z",
+      "revision": 946,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:23.061Z",
+      "revision": 950,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:28.061Z",
+      "revision": 955,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:33.061Z",
+      "revision": 961,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:38.061Z",
+      "revision": 967,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:43.061Z",
+      "revision": 972,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:48.061Z",
+      "revision": 977,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:53.061Z",
+      "revision": 982,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:37:58.061Z",
+      "revision": 988,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:03.061Z",
+      "revision": 993,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:08.061Z",
+      "revision": 997,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:13.061Z",
+      "revision": 1003,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:18.061Z",
+      "revision": 1009,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:23.061Z",
+      "revision": 1014,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:28.061Z",
+      "revision": 1018,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:33.065Z",
+      "revision": 1024,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:38.061Z",
+      "revision": 1030,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:43.061Z",
+      "revision": 1034,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:48.061Z",
+      "revision": 1039,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:53.061Z",
+      "revision": 1039,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:38:58.061Z",
+      "revision": 1047,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:39:03.061Z",
+      "revision": 1053,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:39:08.061Z",
+      "revision": 1058,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    },
+    {
+      "at": "2026-09-09T00:39:13.061Z",
+      "revision": 1062,
+      "hidden": false,
+      "scroll": 250,
+      "focus": "worker"
+    }
+  ],
+  "motions": [
+    {
+      "at": "2026-09-09T00:30:03.025Z",
+      "revision": 498,
+      "items": [
+        [
+          "mikeroySoft/rocm-app",
+          [
+            {
+              "stage": "triage",
+              "kind": "arrive"
+            },
+            {
+              "stage": "triage",
+              "kind": "complete"
+            },
+            {
+              "stage": "dispatcher",
+              "kind": "arrive"
+            },
+            {
+              "stage": "landing",
+              "kind": "arrive"
+            },
+            {
+              "stage": "landing",
+              "kind": "complete"
+            },
+            {
+              "stage": "manage",
+              "kind": "arrive"
+            },
+            {
+              "stage": "manage",
+              "kind": "complete"
+            },
+            {
+              "stage": "scheduling",
+              "kind": "arrive"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:30:08.040Z",
+      "revision": 503,
+      "items": [
+        [
+          "mikeroySoft/rocm-app",
+          [
+            {
+              "stage": "scheduling",
+              "kind": "complete"
+            },
+            {
+              "stage": "dispatcher",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:30:13.023Z",
+      "revision": 506,
+      "items": [
+        [
+          "mikeroySoft/factory",
+          [
+            {
+              "stage": "gate",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:30:58.031Z",
+      "revision": 555,
+      "items": [
+        [
+          "mikeroySoft/factory",
+          [
+            {
+              "stage": "merge-eligibility",
+              "kind": "arrive"
+            },
+            {
+              "stage": "merge",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "complete"
+            },
+            {
+              "stage": "gate",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:31:03.033Z",
+      "revision": 560,
+      "items": [
+        [
+          "mikeroySoft/factory",
+          [
+            {
+              "stage": "gate-check",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "complete"
+            },
+            {
+              "stage": "gate",
+              "kind": "arrive"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:31:08.042Z",
+      "revision": 565,
+      "items": [
+        [
+          "mikeroySoft/factory",
+          [
+            {
+              "stage": "gate-check",
+              "kind": "complete"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:31:13.038Z",
+      "revision": 570,
+      "items": [
+        [
+          "mikeroySoft/rocm-cli",
+          [
+            {
+              "stage": "triage",
+              "kind": "arrive"
+            },
+            {
+              "stage": "triage",
+              "kind": "complete"
+            },
+            {
+              "stage": "dispatcher",
+              "kind": "arrive"
+            },
+            {
+              "stage": "landing",
+              "kind": "arrive"
+            },
+            {
+              "stage": "landing",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:31:18.140Z",
+      "revision": 575,
+      "items": [
+        [
+          "mikeroySoft/rocm-cli",
+          [
+            {
+              "stage": "manage",
+              "kind": "arrive"
+            },
+            {
+              "stage": "manage",
+              "kind": "complete"
+            },
+            {
+              "stage": "scheduling",
+              "kind": "arrive"
+            },
+            {
+              "stage": "scheduling",
+              "kind": "complete"
+            },
+            {
+              "stage": "dispatcher",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:33:38.048Z",
+      "revision": 721,
+      "items": [
+        [
+          "mikeroySoft/gpuflo",
+          [
+            {
+              "stage": "triage",
+              "kind": "arrive"
+            },
+            {
+              "stage": "triage",
+              "kind": "complete"
+            },
+            {
+              "stage": "dispatcher",
+              "kind": "arrive"
+            },
+            {
+              "stage": "landing",
+              "kind": "arrive"
+            },
+            {
+              "stage": "landing",
+              "kind": "complete"
+            },
+            {
+              "stage": "scheduling",
+              "kind": "arrive"
+            },
+            {
+              "stage": "scheduling",
+              "kind": "complete"
+            },
+            {
+              "stage": "dispatcher",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:34:33.041Z",
+      "revision": 777,
+      "items": [
+        [
+          "mikeroySoft/factory",
+          [
+            {
+              "stage": "review",
+              "kind": "arrive"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:36:43.137Z",
+      "revision": 910,
+      "items": [
+        [
+          "mikeroySoft/district",
+          [
+            {
+              "stage": "gate",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:36:48.030Z",
+      "revision": 915,
+      "items": [
+        [
+          "mikeroySoft/factory",
+          [
+            {
+              "stage": "triage",
+              "kind": "arrive"
+            },
+            {
+              "stage": "triage",
+              "kind": "complete"
+            },
+            {
+              "stage": "dispatcher",
+              "kind": "arrive"
+            },
+            {
+              "stage": "landing",
+              "kind": "arrive"
+            },
+            {
+              "stage": "landing",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:36:53.023Z",
+      "revision": 919,
+      "items": [
+        [
+          "mikeroySoft/factory",
+          [
+            {
+              "stage": "manage",
+              "kind": "arrive"
+            },
+            {
+              "stage": "manage",
+              "kind": "complete"
+            },
+            {
+              "stage": "scheduling",
+              "kind": "arrive"
+            },
+            {
+              "stage": "scheduling",
+              "kind": "complete"
+            },
+            {
+              "stage": "dispatcher",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    },
+    {
+      "at": "2026-09-09T00:37:03.039Z",
+      "revision": 929,
+      "items": [
+        [
+          "mikeroySoft/district",
+          [
+            {
+              "stage": "gate-check",
+              "kind": "complete"
+            },
+            {
+              "stage": "gate-check",
+              "kind": "arrive"
+            },
+            {
+              "stage": "gate",
+              "kind": "complete"
+            }
+          ]
+        ]
+      ]
+    }
+  ],
+  "visibility": [
+    {
+      "at": "2026-09-09T00:29:31.735Z",
+      "hidden": true
+    },
+    {
+      "at": "2026-09-09T00:29:37.755Z",
+      "hidden": false
+    }
+  ],
+  "focus": "worker",
+  "end": "2026-09-09T00:39:17.965Z",
+  "lastRevision": 1062,
+  "scroll": 250,
+  "hidden": false,
+  "watch": true
+}

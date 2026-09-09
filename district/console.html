@@ -25,30 +25,88 @@ nav { display:flex; gap:var(--s1) }
 nav a { color:var(--muted); padding:.45rem .7rem; border-radius:.35rem; text-decoration:none; font-weight:650 }
 nav a[aria-current="page"] { color:var(--text); background:var(--panel2) }
 .scope { display:flex; align-items:center; gap:var(--s2); color:var(--muted) }
-select { max-width:18rem; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:.35rem; padding:.5rem }
+select, button { font:inherit; color:var(--text); background:var(--panel); border:1px solid var(--line); border-radius:.35rem; padding:.5rem }
+select { max-width:18rem }
+button { cursor:pointer; padding:.4rem .7rem }
+button[aria-pressed="true"] { background:var(--panel2); border-color:var(--accent) }
 main { max-width:80rem; margin:auto; padding:var(--s5) var(--s4) 8rem }
 .eyebrow { color:var(--accent); font:700 .75rem/1.2 ui-monospace, monospace; letter-spacing:.12em; text-transform:uppercase }
 h1 { margin:var(--s1) 0; font-size:clamp(1.8rem,4vw,3rem); line-height:1.1 }
+h3 { margin:0 0 var(--s2); font-size:1rem }
 .intro { max-width:48rem; margin:0 0 var(--s4); color:var(--muted) }
 .notice { margin:var(--s4) 0; padding:var(--s3); border-left:4px solid var(--attention); background:var(--panel) }
-.hidden { display:none }
-.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(20rem,1fr)); gap:var(--s3) }
+.hidden { display:none !important }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(22rem,1fr)); gap:var(--s3) }
 .factory { min-width:0; padding:var(--s4); border:1px solid var(--line); border-radius:.5rem; background:var(--panel) }
+.factory.muted { opacity:.72; border-style:dashed }
 .factory h2 { margin:0; font-size:1.15rem; overflow-wrap:anywhere }
+.factory h2 a { color:var(--text); text-decoration:none }
+.factory h2 a:hover { text-decoration:underline }
 .factory-head { display:flex; justify-content:space-between; gap:var(--s3); align-items:start }
 .status { display:inline-flex; gap:.45rem; align-items:center; white-space:nowrap; font-size:.85rem; font-weight:750 }
 .status::before { content:""; width:.65rem; height:.65rem; border-radius:50%; background:var(--unknown) }
 .status.normal::before { background:var(--normal) }
 .status.attention::before { background:var(--attention) }
-.facts { display:grid; grid-template-columns:max-content 1fr; gap:var(--s1) var(--s3); margin:var(--s3) 0 }
+.facts { display:grid; grid-template-columns:max-content 1fr; gap:var(--s1) var(--s3); margin:var(--s3) 0; font-size:.95rem }
 .facts dt { color:var(--muted) }
 .facts dd { margin:0; overflow-wrap:anywhere }
 .findings { margin:var(--s3) 0; padding:0; list-style:none }
 .findings li { margin-top:var(--s1); padding:var(--s2); background:var(--panel2); border-left:3px solid var(--error) }
-.sources { color:var(--muted); font-size:.9rem }
+.findings li.warning { border-left-color:var(--attention) }
+.findings li.quiet { border-left-color:var(--line); color:var(--muted) }
+.findings small { display:block; color:var(--muted) }
+.sources, .unknowns { color:var(--muted); font-size:.9rem; margin:var(--s2) 0 }
 .actions { display:flex; flex-wrap:wrap; gap:var(--s3); margin-top:var(--s3) }
 .empty { padding:var(--s5); border:1px dashed var(--line); color:var(--muted) }
 footer { border-top:1px solid var(--line); padding:var(--s4); color:var(--muted); text-align:center }
+
+/* Overview: count strip, compact flow diagrams, recent activity */
+.toolbar { display:flex; flex-wrap:wrap; gap:var(--s2); align-items:center; margin:0 0 var(--s3) }
+.toolbar .note { color:var(--muted); font-size:.9rem }
+.strip { display:grid; grid-template-columns:repeat(auto-fit,minmax(10rem,1fr)); gap:var(--s2); margin:0 0 var(--s4) }
+.strip div { padding:var(--s2) var(--s3); border:1px solid var(--line); border-radius:.5rem; background:var(--panel) }
+.strip strong { display:block; font-size:1.6rem; line-height:1.1 }
+.strip span { color:var(--muted); font-size:.85rem }
+.strip .normal strong { color:var(--normal) } .strip .attention strong { color:var(--attention) }
+.stages { display:flex; flex-wrap:wrap; gap:var(--s1) var(--s2); margin:var(--s3) 0 0; padding:0; list-style:none }
+.stage { position:relative; min-width:7.5rem; flex:1 1 7.5rem; border:1px solid var(--line); border-radius:.45rem; background:var(--panel2); padding:var(--s2) }
+.stage a { display:block; color:var(--text); text-decoration:none; font-weight:700; font-size:.9rem; overflow-wrap:anywhere }
+.stage a:hover { text-decoration:underline }
+.stage .count { float:right; margin-left:var(--s1); font:700 .8rem/1.4 ui-monospace, monospace; color:var(--muted) }
+.stage .detail { display:block; margin-top:.2rem; color:var(--muted); font-size:.78rem; line-height:1.35 }
+.stage.s-active { border-color:var(--normal) }
+.stage.s-active a::before { content:"▶ "; color:var(--normal) }
+.stage.s-wait { border-color:var(--accent) }
+.stage.s-wait a::before { content:"◷ "; color:var(--accent) }
+.stage.s-blocked { border-color:var(--attention) }
+.stage.s-blocked a::before { content:"■ "; color:var(--attention) }
+.stage.s-unknown { border-style:dashed }
+.stage.s-unknown a::before { content:"? "; color:var(--unknown) }
+.stage.pulse { animation:pulse 2.8s ease-in-out infinite }
+.stage.arrive { animation:arrive .9s ease-out 1 }
+.stage.complete { animation:complete 2.2s ease-out 1 }
+@keyframes pulse { 0%,100% { box-shadow:0 0 0 0 rgba(88,197,139,0) } 50% { box-shadow:0 0 0 .4rem rgba(88,197,139,.28) } }
+@keyframes arrive { from { transform:translateX(-.6rem); background:rgba(112,183,255,.35) } to { transform:none } }
+@keyframes complete { from { background:rgba(88,197,139,.5) } to { background:var(--panel2) } }
+[data-motion="paused"] .stage, [data-hidden] .stage, [data-view]:not([data-view="overview"]) .stage { animation:none !important }
+[data-connection="lost"] .stage { animation:none !important }
+[data-connection="lost"] .factory { opacity:.72; border-style:dashed }
+@media (prefers-reduced-motion: reduce) { .stage { animation:none !important } }
+.diagram-note { margin:var(--s3) 0 0; padding:var(--s2); border:1px dashed var(--line); border-radius:.45rem; color:var(--muted); font-size:.9rem }
+.rail { margin-top:var(--s4); padding:var(--s3); border:1px solid var(--line); border-radius:.5rem; background:var(--panel) }
+.rail ol { margin:0; padding:0; list-style:none; font-size:.9rem }
+.rail li { display:grid; grid-template-columns:6.5rem 1fr; gap:var(--s2); padding:.35rem 0; border-top:1px solid var(--line) }
+.rail li:first-child { border-top:0 }
+.rail time { color:var(--muted); font:.85rem ui-monospace, monospace }
+.rail .completion { color:var(--normal) } .rail .failure { color:var(--error) } .rail .recovery { color:var(--normal) } .rail .gap { color:var(--attention) }
+.rail p { margin:0 0 var(--s2); color:var(--muted); font-size:.9rem }
+
+/* Watch mode: hide secondary controls only; names, state, freshness and findings stay. */
+[data-view="overview"][data-watch] nav, [data-view="overview"][data-watch] .scope,
+[data-view="overview"][data-watch] #intro, [data-view="overview"][data-watch] footer,
+[data-view="overview"][data-watch] .actions, [data-view="overview"][data-watch] .sources { display:none }
+[data-view="overview"][data-watch] main { padding-top:var(--s3) }
+
 @media (max-width:42rem) {
   .header { grid-template-columns:1fr; gap:var(--s2) }
   nav { overflow-x:auto }
@@ -58,6 +116,9 @@ footer { border-top:1px solid var(--line); padding:var(--s4); color:var(--muted)
   .grid { grid-template-columns:1fr }
   .factory-head { display:block }
   .status { margin-top:var(--s2) }
+  .stages { flex-direction:column }
+  .stage { flex-basis:auto }
+  .rail li { grid-template-columns:1fr }
 }
 </style>
 </head>
@@ -73,18 +134,93 @@ footer { border-top:1px solid var(--line); padding:var(--s4); color:var(--muted)
   <p class="intro" id="intro"></p>
   <p id="selection" class="intro hidden"></p>
   <div id="notice" class="notice hidden" role="status"></div>
+  <section id="overview" class="hidden" aria-label="Overview">
+    <div class="toolbar">
+      <button id="watch" type="button" aria-pressed="false">Watch mode</button>
+      <button id="motion" type="button" aria-pressed="false">Pause animation</button>
+      <span class="note" id="motion-note"></span>
+    </div>
+    <div class="strip" id="strip" aria-label="Fleet counts"></div>
+    <section id="diagrams" class="grid" aria-busy="true" aria-label="Factories"></section>
+    <section class="rail" aria-labelledby="rail-title">
+      <h3 id="rail-title">Recent activity</h3>
+      <p id="rail-window"></p>
+      <ol id="rail"></ol>
+    </section>
+  </section>
   <section id="factories" class="grid" aria-busy="true"></section>
 </main>
 <footer><a href="/legacy">Legacy Atlas and management</a> · cached fleet observation <span id="revision">not loaded</span></footer>
 <script>
 'use strict';
 const VIEWS = {
-  overview:['Overview','Current operating state across the selected real cached fleet observation.'],
+  overview:['Overview','Live operating state across the selected real cached fleet observation. Motion is evidence: pulse means a fresh confirmed active stage; nothing circulates for decoration.'],
   flows:['Flows','Current execution and finding state for investigation; detailed evidence arrives in D05.'],
   brief:['Brief','Current deterministic fleet facts; the authored reading narrative arrives in D06.']
 };
+/* ===== pure: no DOM ===== */
+const STAGE_ORDER = ['dispatcher','scheduling','triage','ticket','worker','gate-check','gate','review','merge-eligibility','landing','merge','manage'];
+const LIVE = new Set(['stage-active','known wait','blocked','unknown']);
+const RAIL_KINDS = new Set(['enter','exit','result']);
+const RECONNECT_GAP_MS = 60000;
+function stageOrder(a, b) {
+  const ia = STAGE_ORDER.indexOf(a), ib = STAGE_ORDER.indexOf(b);
+  return ((ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib)) || a.localeCompare(b);
+}
+// Aggregate distinct executions per reported stage; a factory never gets one moving position.
+function occupancy(record) {
+  const stages = new Map(), seen = new Set();
+  for (const item of record.executions || []) {
+    if (!item.stage || !item.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    const slot = stages.get(item.stage) || {stage:item.stage, live:[], terminal:0};
+    if (LIVE.has(item.state)) slot.live.push(item); else slot.terminal++;
+    stages.set(item.stage, slot);
+  }
+  for (const slot of stages.values()) {
+    const states = new Set(slot.live.map(item => item.state));
+    slot.state = ['stage-active','blocked','known wait','unknown'].find(s => states.has(s)) || 'idle';
+    slot.pulse = !['stale','unavailable'].includes(record.observation) && slot.live.some(item => item.state === 'stage-active' && item.observation === 'fresh');
+  }
+  return [...stages.values()].sort((a, b) => stageOrder(a.stage, b.stage));
+}
+// Baseline once per factory, dedupe by event identity, and never treat a poll, reconnect or duplicate as an event.
+function observeEvents(seen, slug, events, {animate = true, rebaseline = false} = {}) {
+  const known = seen.get(slug), baseline = !known || rebaseline;
+  const ids = new Set(), motions = new Map();
+  let through = known?.through ?? -Infinity;
+  for (const event of events || []) {
+    if (!event.event_id || ids.has(event.event_id)) continue;
+    ids.add(event.event_id);
+    const at = Date.parse(event.at);
+    if (Number.isFinite(at)) through = Math.max(through, at);
+    if (baseline || !animate || !event.stage || known.ids.has(event.event_id)
+        || !Number.isFinite(at) || at <= known.through) continue;
+    const kind = event.kind === 'enter' ? 'arrive' : event.kind === 'exit' && event.outcome === 'completed' ? 'complete' : null;
+    if (kind) motions.set(`${event.stage}|${kind}`, {stage:event.stage, kind});
+  }
+  // Keep only the producer's bounded window; its source-time watermark rejects older reappearing records.
+  seen.set(slug, {ids, through});
+  return [...motions.values()];
+}
+function railClass(event) {
+  if (event.kind === 'exit' && event.outcome === 'completed') return 'completion';
+  if (event.kind === 'exit' && (event.outcome === 'failed' || event.outcome === 'interrupted')) return 'failure';
+  if (event.kind === 'result' && event.outcome === 'mechanism_failure') return 'failure';
+  return 'transition';
+}
+// Disappearance alone can mean expiry or unavailable evidence. Only positive newer evidence confirms recovery.
+function recoveryEvidence(finding, record) {
+  const dispatcher = record.activity?.dispatcher;
+  if (dispatcher?.observation !== 'fresh' || !(dispatcher.service_active === true || dispatcher.timer_active === true)) return null;
+  if (!['scheduling.capped','scheduling.unexpected_stop'].includes(finding.condition_code)
+      || !['running','scheduled waiting'].includes(record.operating_state)) return null;
+  return (record.sources || []).find(s => s.id === 'factory.runtime' && s.observation === 'fresh'
+    && Date.parse(s.observed_at) > Date.parse(finding.observed_at)) || null;
+}
+/* ===== dom ===== */
 const byId = id => document.getElementById(id);
-const state = {fleet:{}, revision:null, restoreScroll:false};
+const state = {fleet:{}, revision:null, restoreScroll:false, seen:new Map(), findings:new Map(), recoveries:[], gaps:[], lastPollAt:null, unavailableSince:null, omittedFactories:0, rebaseline:false, polling:false};
 const params = () => new URLSearchParams(location.search);
 const view = () => VIEWS[params().get('view')] ? params().get('view') : 'overview';
 const selectionKeys = ['stage','execution','panel'];
@@ -100,11 +236,19 @@ function urlFor(nextView=view(), factory=params().get('factory')) {
   }
   return '/?' + p.toString();
 }
+function selectURL(slug, key, value) {
+  // Overview selection into Flows: the stage/panel is chosen from this factory's own evidence.
+  const p = new URLSearchParams(urlFor('flows', slug).slice(2));
+  selectionKeys.forEach(k => p.delete(k)); p.set(key, value);
+  return '/?' + p.toString();
+}
 function saveScroll() {
   history.replaceState({...history.state, scrollY:scrollY}, '', location.href);
 }
 function navigate(url) {
   saveScroll();
+  state.rebaseline = true;
+  clearMotions();
   history.pushState({scrollY:0}, '', url);
   state.restoreScroll = true;
   render();
@@ -120,10 +264,38 @@ function age(value) {
   if (value < 3600) return `${Math.round(value/60)}m old`;
   return `${Math.round(value/3600)}h old`;
 }
+function when(iso) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return 'time unknown';
+  const d = new Date(t), now = new Date();
+  const clock = d.toISOString().slice(11, 19) + 'Z';
+  return d.toISOString().slice(0, 10) === now.toISOString().slice(0, 10) ? clock : d.toISOString().slice(5, 10) + ' ' + clock;
+}
+function span(ms) {
+  const s = Math.round(Math.abs(ms) / 1000);
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s/60)}m ${s%60}s` : `${Math.floor(s/3600)}h ${Math.floor(s%3600/60)}m`;
+}
 function el(tag, text, className) {
   const node=document.createElement(tag); if (text !== undefined) node.textContent=text; if (className) node.className=className; return node;
 }
+function set(node, text) { if (node.textContent !== text) node.textContent = text; }
 function fact(list, label, value) { list.append(el('dt',label),el('dd',value ?? 'unknown')); }
+// Keyed child reconciliation keeps DOM nodes (focus, scroll, running animations) stable across polls.
+function sync(parent, items, keyOf, create, update) {
+  const existing = new Map(Array.from(parent.children, child => [child.dataset.key, child]));
+  let cursor = parent.firstChild;
+  for (const item of items) {
+    const key = keyOf(item);
+    let node = existing.get(key);
+    if (node) existing.delete(key); else { node = create(item); node.dataset.key = key; }
+    if (node === cursor) cursor = cursor.nextSibling; else parent.insertBefore(node, cursor);
+    update(node, item);
+  }
+  for (const node of existing.values()) node.remove();
+}
+function wireNav(root) {
+  root.querySelectorAll('a[data-nav]:not([data-wired])').forEach(link => { link.dataset.wired=''; link.addEventListener('click', event => { event.preventDefault(); navigate(link.href); }); });
+}
 function factoryCard(slug, record) {
   const card=el('article',undefined,'factory'); card.dataset.factory=slug;
   const head=el('div',undefined,'factory-head'), title=el('h2',slug), status=el('span',`${record.assessment || 'unknown'} status`,`status ${record.assessment || 'unknown'}`);
@@ -143,6 +315,233 @@ function factoryCard(slug, record) {
   const actions=el('div',undefined,'actions'), inspect=el('a','Open in Flows'); inspect.href=urlFor('flows',slug); inspect.dataset.nav=''; actions.append(inspect);
   const destination=factoryURL(record); if (destination) { const link=el('a','Open Factory'); link.href=destination; link.target='_blank'; link.rel='noopener'; actions.append(link); }
   card.append(actions); return card;
+}
+/* ----- Overview diagrams ----- */
+const FACTS = ['Operating','Dispatcher','Capacity','Execution','Latest transition','Next dispatch','Observation','Resources','History'];
+function diagramCard(slug) {
+  const card=el('article',undefined,'factory'); card.dataset.factory=slug;
+  const head=el('div',undefined,'factory-head'), title=el('h2'), link=el('a',slug); link.dataset.nav=''; title.append(link);
+  head.append(title, el('span',undefined,'status')); card.append(head);
+  card.append(el('ol',undefined,'stages'), el('p',undefined,'diagram-note hidden'));
+  const facts=el('dl',undefined,'facts');
+  for (const label of FACTS) { const dd=el('dd'); dd.dataset.f=label; facts.append(el('dt',label), dd); }
+  card.append(facts, el('ul',undefined,'findings'), el('p',undefined,'unknowns'), el('p',undefined,'sources'), el('div',undefined,'actions'));
+  return card;
+}
+function dispatcherText(record) {
+  const d = record.activity?.dispatcher, snap = record.snap?.dispatcher;
+  const flag = (value, label) => value === true ? `${label} active` : value === false ? `${label} inactive` : `${label} unknown`;
+  if (d) return `${flag(d.service_active,'service')} · ${flag(d.timer_active,'timer')} · runtime ${d.observation || 'unknown'}`;
+  if (snap) return `${flag(snap.service_active,'service')} · ${flag(snap.timer?.active,'timer')} · snapshot only`;
+  return 'no dispatcher observation';
+}
+function capacityText(record) {
+  const c = record.activity?.dispatcher?.capacity;
+  if (!c || c.active === null || c.configured === null) return 'unknown';
+  return `${c.active} of ${c.configured} active${c.complete === false ? ' (count incomplete)' : ''}`;
+}
+function transitionText(record, tickets) {
+  const t = record.activity?.dispatcher?.latest_transition;
+  if (!t?.event_id) return 'none reported in window';
+  const event = (record.activity?.events || []).find(e => e.event_id === t.event_id);
+  const stage = event?.stage || (record.executions || []).find(e => e.id === t.execution_id)?.stage || 'stage unknown';
+  const ticket = event?.ticket ?? tickets.get(t.execution_id);
+  return `${t.kind || 'transition'} ${stage}${ticket != null ? ` · #${ticket}` : ''} · ${when(t.at)}`;
+}
+function nextDispatch(record) {
+  const runtime = record.activity?.dispatcher?.next_at, snap = record.snap?.dispatcher?.timer?.next;
+  if (record.operating_state === 'capped' || record.operating_state === 'deliberately paused') return {at:null, text:`no automatic dispatch (${record.operating_state})`};
+  const runtimeSource = (record.sources || []).find(s => s.id === 'factory.runtime');
+  const snapshotSource = (record.sources || []).find(s => s.id === 'factory.snapshot');
+  if (runtime) return {at:runtimeSource?.observation === 'fresh' && record.activity.dispatcher.observation === 'fresh' ? runtime : null, text:`${when(runtime)} (runtime${runtimeSource?.observation === 'fresh' && record.activity.dispatcher.observation === 'fresh' ? '' : ', unconfirmed last schedule'})`};
+  if (snap) return {at:snapshotSource?.observation === 'fresh' ? snap : null, text:`${when(snap)} (snapshot${snapshotSource?.observation === 'fresh' ? '' : ', unconfirmed last schedule'})`};
+  return {at:null, text:'no confirmed schedule'};
+}
+function countdown(node) {
+  if (state.unavailableSince) return;
+  const at = Date.parse(node.dataset.at || '');
+  if (!Number.isFinite(at)) return;
+  const delta = at - Date.now();
+  set(node, delta >= 0 ? `${node.dataset.label} · in ${span(delta)}` : `${node.dataset.label} · was due ${span(delta)} ago; awaiting observation`);
+}
+function historyText(record) {
+  const h = record.activity?.history || {}, omitted = record.projection?.omitted || {};
+  if (!h.status || h.status === 'missing') return 'no event history reported';
+  const parts = [`${h.status}`];
+  if (h.start_at && h.end_at) parts.push(`${when(h.start_at)} → ${when(h.end_at)}`);
+  if (h.complete === false) parts.push('incomplete'); if (h.truncated) parts.push('truncated');
+  if (h.gaps?.length) parts.push(`gaps: ${h.gaps.join(', ')}`);
+  const drops = Object.entries(omitted).filter(([k,v]) => v > 0 && k !== 'factories').map(([k,v]) => `${v} ${k} omitted`);
+  if (drops.length) parts.push(drops.join(', '));
+  return parts.join(' · ');
+}
+function resourceText(record) {
+  const items = record.resources || [];
+  if (!items.length) return 'none reported';
+  return items.map(r => `${r.id}: ${r.held === true ? 'held' : r.held === false ? 'free' : 'state unknown'} · ${r.ownership === 'known' ? `owner ${r.owner?.factory || 'unknown factory'}/${r.owner?.execution_id || 'unknown execution'}` : r.held === false ? 'no owner' : 'owner unknown'} · ${r.source_id || 'source unknown'}, ${r.observation || 'unknown'}, ${when(r.observed_at)}`).join('; ');
+}
+function updateStage(node, slot, slug, tickets) {
+  const link = node.firstElementChild, count = link.nextElementSibling, detail = count.nextElementSibling;
+  set(link, slot.stage); link.href = selectURL(slug, 'stage', slot.stage);
+  set(count, slot.live.length ? String(slot.live.length) : '');
+  node.className = `stage s-${slot.state === 'stage-active' ? 'active' : slot.state === 'known wait' ? 'wait' : slot.state}${slot.pulse ? ' pulse' : ''}${node.classList.contains('arrive') ? ' arrive' : ''}${node.classList.contains('complete') ? ' complete' : ''}`;
+  const live = slot.live;
+  let text;
+  if (!live.length) text = `${slot.terminal} finished in window`;
+  else {
+    const refs = [...new Set(live.map(item => tickets.has(item.id) ? `#${tickets.get(item.id)}` : item.id.slice(0, 8)))].slice(0, 3).join(' ');
+    const quality = [...new Set(live.map(item => item.observation))].join('/');
+    const reason = live.find(item => item.reason)?.reason;
+    text = `${slot.state}${reason ? `: ${reason}` : ''} · ${refs} · ${quality}`;
+  }
+  set(detail, text);
+  node.setAttribute('aria-label', `${slot.stage}: ${text}`);
+}
+function updateDiagram(card, slug, record) {
+  const tickets = new Map();
+  for (const event of record.activity?.events || []) if (event.execution_id && event.ticket != null) tickets.set(event.execution_id, event.ticket);
+  card.classList.toggle('muted', record.observation === 'stale' || record.observation === 'unavailable');
+  const status = card.querySelector('.status');
+  status.className = `status ${record.assessment || 'unknown'}`; set(status, `${record.assessment || 'unknown'} status`);
+  const slots = occupancy(record);
+  sync(card.querySelector('.stages'), slots, slot => slot.stage, () => {
+    const li = el('li'), a = el('a'); a.dataset.nav=''; li.append(a, el('span',undefined,'count'), el('span',undefined,'detail')); return li;
+  }, (node, slot) => updateStage(node, slot, slug, tickets));
+  const note = card.querySelector('.diagram-note');
+  const telemetry = !(record.unknowns || []).includes('execution telemetry unavailable');
+  set(note, !telemetry ? 'Execution telemetry unavailable from this factory; no stage occupancy can be shown.'
+    : !slots.length ? `No executions reported in the retained window (execution state: ${record.execution_state}).` : '');
+  note.classList.toggle('hidden', !note.textContent);
+  const f = name => card.querySelector(`[data-f="${name}"]`);
+  set(f('Operating'), record.operating_state || 'unknown');
+  set(f('Dispatcher'), dispatcherText(record));
+  set(f('Capacity'), capacityText(record));
+  const live = (record.executions || []).filter(item => LIVE.has(item.state)).length;
+  set(f('Execution'), `${record.execution_state || 'unknown'} · ${live} non-terminal execution${live === 1 ? '' : 's'} (including unknown) across ${slots.filter(s => s.live.length).length} stage${slots.filter(s => s.live.length).length === 1 ? '' : 's'}`);
+  set(f('Latest transition'), transitionText(record, tickets));
+  const next = nextDispatch(record), nextNode = f('Next dispatch');
+  if (next.at) { nextNode.dataset.at = next.at; nextNode.dataset.label = next.text; countdown(nextNode); }
+  else { delete nextNode.dataset.at; set(nextNode, next.text); }
+  const runtime = (record.sources || []).find(s => s.id === 'factory.runtime');
+  set(f('Observation'), `${record.observation || 'unknown'}${record.observation !== 'fresh' ? ' (last known state shown)' : ''} · runtime ${runtime ? `${runtime.observation}, ${age(Number.isFinite(runtime.age_seconds) ? runtime.age_seconds + (state.lastPollAt === null ? 0 : (Date.now() - state.lastPollAt) / 1000) : null)}, observed ${when(runtime.observed_at)}` : 'absent'}`);
+  if (!f('Resources').firstElementChild) {
+    const details=el('details'); details.append(el('summary'), el('p')); f('Resources').append(details);
+  }
+  const resources = record.resources || [], details = f('Resources').firstElementChild;
+  set(details.firstElementChild, `${resources.length} reported · ${resources.filter(r=>r.held === true).length} held · ${resources.filter(r=>r.held === true && r.ownership !== 'known').length} owner unknown · evidence`);
+  set(details.lastElementChild, resourceText(record));
+  set(f('History'), historyText(record));
+  const findings = record.findings || [];
+  sync(card.querySelector('.findings'), findings.length ? findings : [{id:'none'}], item => item.id, item => {
+    const li = el('li'); if (item.id === 'none') { li.className='quiet'; li.textContent='No supported operational findings in this observation'; return li; }
+    const a = el('a'); a.dataset.nav=''; li.append(a, el('small')); return li;
+  }, (li, item) => {
+    if (item.id === 'none') return;
+    li.className = item.severity === 'warning' ? 'warning' : '';
+    const a = li.firstElementChild;
+    set(a, `${item.severity || 'unknown'} — ${item.condition_code || 'unknown'}${item.scope?.kind === 'shared' ? ` · shared scope ${item.scope.id}` : ''}`);
+    a.href = selectURL(slug, 'panel', item.id); a.dataset.panel = item.id;
+    set(a.nextElementSibling, `${item.impact || 'impact unknown'} · observed ${when(item.observed_at)} · ${(item.evidence || []).length} evidence record${(item.evidence || []).length === 1 ? '' : 's'}`);
+  });
+  const unknowns = record.unknowns || [];
+  set(card.querySelector('.unknowns'), unknowns.length ? `${unknowns.length} unknown: ${unknowns.slice(0, 2).join('; ')}${unknowns.length > 2 ? ` (+${unknowns.length - 2} more)` : ''}` : '');
+  set(card.querySelector('.sources'), (record.sources || []).length ? 'Sources: '+record.sources.map(s=>`${s.id || 'unknown'} ${s.observation || 'unknown'}, ${age(s.age_seconds)}`).join(' · ') : 'Sources: unavailable');
+  const actions = card.querySelector('.actions'), destination = factoryURL(record);
+  sync(actions, destination ? [destination] : [], d => d, () => { const link=el('a','Open Factory'); link.target='_blank'; link.rel='noopener'; return link; }, (link, d) => { link.href = d; });
+  const factoryParams = new URLSearchParams(urlFor('flows', slug).slice(2));
+  selectionKeys.forEach(key => factoryParams.delete(key));
+  card.querySelector('h2 a').href = '/?' + factoryParams.toString();
+}
+function renderStrip(entries) {
+  const counts = {normal:0, attention:0, unknown:0};
+  for (const [, record] of entries) counts[record.assessment in counts ? record.assessment : 'unknown']++;
+  const shared = entries.flatMap(([, record]) => (record.findings || []).filter(f => f.scope?.kind === 'shared'));
+  const items = [
+    ['normal', String(counts.normal), 'normal operation'],
+    ['attention', String(counts.attention), 'operational attention'],
+    ['unknown', String(counts.unknown), 'unknown observation (not healthy)'],
+    ['shared', String(shared.length), shared.length ? `shared-scope finding${shared.length === 1 ? '' : 's'}: ${[...new Set(shared.map(f => f.scope.id))].join(', ')}` : 'shared-scope findings; per-factory probes are not fleet outages'],
+    ['total', String(entries.length), `factor${entries.length === 1 ? 'y' : 'ies'} in scope${state.omittedFactories ? ` · ${state.omittedFactories} omitted by projection` : ''}`],
+  ];
+  sync(byId('strip'), items, item => item[0], item => { const div=el('div',undefined,item[0]); div.append(el('strong'), el('span')); return div; },
+    (div, item) => { set(div.firstElementChild, item[1]); set(div.lastElementChild, item[2]); });
+}
+function renderRail(entries) {
+  const rows = [], identities = new Set();
+  for (const [slug, record] of entries) {
+    for (const event of record.activity?.events || []) {
+      const key = `${slug}|${event.event_id}`;
+      if (identities.has(key)) continue;
+      identities.add(key);
+      if (RAIL_KINDS.has(event.kind) && event.at) rows.push({key, at:event.at, slug, stage:event.stage, cls:railClass(event),
+        text:`${event.kind === 'enter' ? 'entered' : event.kind === 'exit' ? `exited (${event.outcome || 'outcome unknown'})` : `result ${event.outcome || '(outcome not reported)'}`} ${event.stage || ''}${event.ticket != null ? ` #${event.ticket}` : ''}${event.reason ? ` — ${event.reason}` : ''}`});
+    }
+  }
+  for (const item of state.recoveries) if (!params().get('factory') || item.slug === params().get('factory')) rows.push(item);
+  for (const gap of state.gaps) rows.push(gap);
+  rows.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+  const shown = rows.slice(0, 30);
+  sync(byId('rail'), shown, row => row.key, () => { const li=el('li'); li.append(el('time'), el('span')); return li; }, (li, row) => {
+    const time = li.firstElementChild, body = li.lastElementChild;
+    set(time, when(row.at)); time.setAttribute('datetime', row.at); li.className = row.cls;
+    if (row.cls === 'gap') { set(body, row.text); return; }
+    if (!body.firstElementChild) { const a=el('a'); a.dataset.nav=''; body.append(a, el('span')); }
+    const a = body.firstElementChild; set(a, row.slug); a.href = row.stage ? selectURL(row.slug, 'stage', row.stage) : urlFor('flows', row.slug);
+    set(a.nextElementSibling, ` ${row.text}`);
+  });
+  const histories = entries.map(([, record]) => record.activity?.history || {}).filter(h => h.status);
+  const starts = histories.map(h => Date.parse(h.start_at || '')).filter(Number.isFinite), ends = histories.map(h => Date.parse(h.end_at || '')).filter(Number.isFinite);
+  const gaps = [...new Set(histories.flatMap(h => h.gaps || []))];
+  set(byId('rail-window'), !histories.length ? 'No event history reported by the factories in scope.'
+    : `Producer history window${starts.length && ends.length ? `: earliest ${when(new Date(Math.min(...starts)).toISOString())} → latest ${when(new Date(Math.max(...ends)).toISOString())}` : ' unknown'} · ${histories.filter(h => h.truncated).length} of ${histories.length} truncated${gaps.length ? ` · gaps: ${gaps.join(', ')}` : ''} · showing ${shown.length} of ${rows.length} entries. Recoveries require newer positive source evidence; finding disappearance alone is unconfirmed. Observation gaps are stamped by this browser.`);
+}
+function renderOverview(entries, loaded) {
+  const region = byId('diagrams');
+  sync(region, entries, ([slug]) => slug, ([slug]) => diagramCard(slug), (card, [slug, record]) => updateDiagram(card, slug, record));
+  if (!entries.length) region.append(el('p', loaded ? 'No factories are present in the current cached fleet observation.' : 'Loading the cached fleet observation…', 'empty'));
+  region.setAttribute('aria-busy', String(!loaded));
+  renderStrip(entries); renderRail(entries);
+  wireNav(byId('overview'));
+  motionNote();
+}
+function motionNote() {
+  const html = document.documentElement, notes = [];
+  if (state.unavailableSince) notes.push(`Fleet observation unavailable since ${when(state.unavailableSince)}; last known state shown, animation stopped.`);
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) notes.push('Reduced motion: system preference disables animation; facts still update.');
+  else if (html.dataset.motion === 'paused') notes.push('Animation paused in this browser only; factories and facts keep updating.');
+  if (html.hasAttribute('data-watch')) notes.push('Watch mode: secondary controls hidden (Esc exits).');
+  set(byId('motion-note'), notes.join(' '));
+}
+function applyMotions(motions) {
+  for (const [slug, list] of motions) for (const motion of list) {
+    const node = byId('diagrams').querySelector(`[data-factory="${CSS.escape(slug)}"] .stage[data-key="${CSS.escape(motion.stage)}"]`);
+    if (!node) continue;
+    node.classList.add(motion.kind);
+    setTimeout(() => node.classList.remove(motion.kind), motion.kind === 'arrive' ? 1000 : 2300);
+  }
+}
+function observe(payload, now = Date.now()) {
+  const gap = state.lastPollAt !== null && now - state.lastPollAt > RECONNECT_GAP_MS;
+  if (gap) state.gaps = [{key:`gap|${now}`, at:new Date(now).toISOString(), cls:'gap', text:`No fleet observation in this browser between ${when(new Date(state.lastPollAt).toISOString())} and ${when(new Date(now).toISOString())}; events from that interval are baselined, not replayed.`}, ...state.gaps].slice(0, 8);
+  const motions = new Map();
+  for (const [slug, record] of Object.entries(payload.fleet || {})) {
+    // A reconnect after any failed poll re-baselines: events missed while unavailable are facts, never fresh motion.
+    const list = observeEvents(state.seen, slug, record.activity?.events, {animate:!document.hidden && view() === 'overview' && document.documentElement.dataset.motion !== 'paused' && !matchMedia('(prefers-reduced-motion: reduce)').matches && !['stale','unavailable'].includes(record.observation), rebaseline:gap || state.unavailableSince !== null || state.rebaseline});
+    if (list.length) motions.set(slug, list);
+    const previous = state.findings.get(slug), current = new Map((record.findings || []).map(f => [f.id, f]));
+    if (previous) for (const [id, finding] of previous) if (!current.has(id)) {
+      const evidence = recoveryEvidence(finding, record);
+      const at = evidence?.observed_at || new Date(now).toISOString();
+      state.recoveries = [{key:`recovery|${slug}|${id}|${at}`, at, slug, stage:null, cls:evidence ? 'recovery' : 'transition', text:evidence
+        ? `${finding.condition_code} recovered: ${record.operating_state} · ${evidence.id} observed ${when(at)}`
+        : `finding ${finding.condition_code} no longer reported; recovery unconfirmed (may have left the evidence window)`}, ...state.recoveries].slice(0, 16);
+    }
+    state.findings.set(slug, current);
+  }
+  for (const slug of [...state.seen.keys()]) if (!(slug in (payload.fleet || {}))) { state.seen.delete(slug); state.findings.delete(slug); }
+  state.lastPollAt = now;
+  if (!document.hidden) state.rebaseline = false;
+  return motions;
 }
 function validateSelection(record) {
   const p=params(), messages=[];
@@ -167,40 +566,77 @@ function render() {
   }
   select.value=selected || '';
   const notice=byId('notice'), messages=[], loaded=state.revision!==null;
-  let entries=Object.entries(state.fleet);
+  let entries=Object.entries(state.fleet).sort(([a],[b])=>a.localeCompare(b));
   if (selected) {
     if (state.fleet[selected]) entries=[[selected,state.fleet[selected]]];
     else { entries=[]; if (loaded) messages.push(`Factory ${selected} was removed or is not present in the current cached fleet. No other factory's facts are substituted.`); }
   }
   if (selected && state.fleet[selected]) messages.push(...validateSelection(state.fleet[selected]));
+  if (state.unavailableSince) messages.push('Cached fleet observation is currently unavailable; last known state is shown.');
   notice.replaceChildren(...messages.map(message=>el('p',message))); notice.classList.toggle('hidden',!messages.length);
-  const region=byId('factories'), fingerprint=JSON.stringify([loaded,messages.length>0,location.search,entries]);
-  if (region.dataset.fingerprint!==fingerprint) {
-    region.dataset.fingerprint=fingerprint;
-    region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
-    if (!entries.length && !loaded) region.append(el('p','Loading the cached fleet observation…','empty'));
-    else if (!entries.length && !messages.length) region.append(el('p','No factories are present in the current cached fleet observation.','empty'));
-    region.querySelectorAll('[data-nav]').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
+  const overview=current==='overview';
+  byId('overview').classList.toggle('hidden',!overview); byId('factories').classList.toggle('hidden',overview);
+  if (!overview) {
+    const region=byId('factories'), fingerprint=JSON.stringify([loaded,messages.length>0,location.search,entries]);
+    if (region.dataset.fingerprint!==fingerprint) {
+      region.dataset.fingerprint=fingerprint;
+      region.replaceChildren(...entries.map(([slug,record])=>factoryCard(slug,record)));
+      if (!entries.length && !loaded) region.append(el('p','Loading the cached fleet observation…','empty'));
+      else if (!entries.length && !messages.length) region.append(el('p','No factories are present in the current cached fleet observation.','empty'));
+      wireNav(region);
+    }
+    region.setAttribute('aria-busy',String(!loaded));
   }
-  region.setAttribute('aria-busy',String(!loaded)); byId('revision').textContent=loaded?`revision ${state.revision}`:'not loaded';
+  renderOverview(entries, loaded);
+  byId('revision').textContent=loaded?`revision ${state.revision}`:'not loaded';
   const selectedContext=selectionKeys.filter(key=>p.get(key)).map(key=>`${key}: ${p.get(key)}`);
   byId('selection').textContent=selectedContext.join(' · '); byId('selection').classList.toggle('hidden',!selectedContext.length);
   if (active===select) select.focus({preventScroll:true});
-  else if (focusedLink) region.querySelector(`[data-factory="${CSS.escape(focusedLink[0])}"]`)?.querySelectorAll('a')[focusedLink[1]]?.focus({preventScroll:true});
+  else if (focusedLink && !document.contains(active)) document.querySelector(`#${overview?'diagrams':'factories'} [data-factory="${CSS.escape(focusedLink[0])}"]`)?.querySelectorAll('a')[focusedLink[1]]?.focus({preventScroll:true});
   if (state.restoreScroll) { const y=history.state?.scrollY || 0; requestAnimationFrame(()=>scrollTo(0,y)); state.restoreScroll=false; }
 }
 async function poll() {
-  try { const response=await fetch('/api/fleet',{cache:'no-store'}); if (!response.ok) throw new Error(); const payload=await response.json(); state.fleet=payload.fleet || {}; state.revision=payload.revision; render(); }
-  catch {
-    byId('notice').textContent='Cached fleet observation is currently unavailable.'; byId('notice').classList.remove('hidden');
-    const region=byId('factories'); region.setAttribute('aria-busy','false');
-    if (state.revision===null) { region.dataset.fingerprint='unavailable'; region.replaceChildren(el('p','No cached fleet observation has been received yet.','empty')); }
+  if (state.polling) return;
+  state.polling = true;
+  try {
+    const response=await fetch('/api/fleet',{cache:'no-store',signal:AbortSignal.timeout(10000)}); if (!response.ok) throw new Error(); const payload=await response.json();
+    const motions=observe(payload);
+    state.fleet=payload.fleet || {}; state.revision=payload.revision; state.omittedFactories=payload.projection?.omitted_factories || 0; state.unavailableSince=null;
+    document.documentElement.removeAttribute('data-connection');
+    render(); applyMotions(motions);
   }
+  catch {
+    state.unavailableSince ??= new Date().toISOString();
+    document.documentElement.dataset.connection='lost';
+    render();
+    if (state.revision===null) for (const id of ['factories','diagrams']) { const region=byId(id); region.dataset.fingerprint='unavailable'; region.setAttribute('aria-busy','false'); region.replaceChildren(el('p','No cached fleet observation has been received yet.','empty')); }
+  }
+  finally { state.polling = false; }
+}
+function clearMotions() {
+  document.querySelectorAll('.arrive,.complete').forEach(node=>node.classList.remove('arrive','complete'));
+}
+function toggle(key, on) {
+  const html=document.documentElement, button=byId(key);
+  if (key === 'motion') clearMotions();
+  if (key==='watch') html.toggleAttribute('data-watch', on); else if (on) html.dataset.motion='paused'; else delete html.dataset.motion;
+  button.setAttribute('aria-pressed', String(on)); sessionStorage.setItem(key, on ? '1' : '');
+  set(button, key==='watch' ? (on ? 'Exit watch mode' : 'Watch mode') : (on ? 'Resume animation' : 'Pause animation'));
+  motionNote();
 }
 document.querySelectorAll('[data-view-link],.brand').forEach(link=>link.addEventListener('click',event=>{event.preventDefault(); navigate(link.href);}));
 byId('scope').addEventListener('change',event=>navigate(urlFor(view(), event.target.value || null)));
-addEventListener('popstate',()=>{state.restoreScroll=true; render(); poll();});
+byId('watch').addEventListener('click',()=>toggle('watch',!document.documentElement.hasAttribute('data-watch')));
+byId('motion').addEventListener('click',()=>toggle('motion',document.documentElement.dataset.motion!=='paused'));
+addEventListener('keydown',event=>{ if (event.key==='Escape' && document.documentElement.hasAttribute('data-watch')) toggle('watch',false); });
+addEventListener('popstate',()=>{state.restoreScroll=true; state.rebaseline=true; clearMotions(); render(); poll();});
+document.addEventListener('visibilitychange',()=>{ state.rebaseline = true; document.documentElement.toggleAttribute('data-hidden',document.hidden); clearMotions(); if (!document.hidden) poll(); });
+matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{clearMotions(); motionNote();});
+setInterval(()=>{ if (!document.hidden) { document.querySelectorAll('[data-at]').forEach(countdown); if (state.unavailableSince) render(); } },1000);
 history.replaceState({...history.state,scrollY:history.state?.scrollY ?? scrollY},'',location.href);
+if (sessionStorage.getItem('watch')) toggle('watch',true);
+if (sessionStorage.getItem('motion')) toggle('motion',true);
+document.documentElement.toggleAttribute('data-hidden',document.hidden);
 render(); poll(); setInterval(poll,5000);
 </script>
 </body>

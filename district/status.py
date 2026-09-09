@@ -231,11 +231,21 @@ def runtime_source(data: dict, slug: str, cadence: float = RUNTIME_INTERVAL) -> 
         if isinstance(identity, str) and identity not in seen:
             seen.add(identity)
             events.append(event)
+    transition = dispatcher.get("latest_transition")
+    capacity = dispatcher.get("capacity")
     activity = {
         "events": events[-EVENT_LIMIT:],
         "history": history if isinstance(history, dict) else {},
         "errors": [error for error in data["errors"] if isinstance(error, dict)][:32]
                   if isinstance(data["errors"], list) else [],
+        # Already-supported F03 dispatcher facts the Overview shows verbatim; not a second classification.
+        "dispatcher": {
+            **{key: dispatcher.get(key) for key in ("service_active", "timer_active", "next_at", "observed_at", "observation")},
+            "capacity": {key: capacity.get(key) for key in ("configured", "active", "complete")}
+                        if isinstance(capacity, dict) else None,
+            "latest_transition": {key: transition.get(key) for key in ("event_id", "at", "execution_id", "kind")}
+                                 if isinstance(transition, dict) else None,
+        },
     }
     return source, activity
 
@@ -401,7 +411,8 @@ class FleetCollector:
                 slug: {**record, "runtime": dict(record["runtime"]) if record["runtime"] else None,
                        "activity": {"events": list(record["activity"]["events"]),
                                     "errors": list(record["activity"].get("errors", [])),
-                                    "history": dict(record["activity"]["history"])}}
+                                    "history": dict(record["activity"]["history"]),
+                                    "dispatcher": record["activity"].get("dispatcher")}}
                 for slug, record in self._records.items()
             }
         result = {}

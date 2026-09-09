@@ -1,0 +1,711 @@
+{
+ "fleet": {
+  "fixture/running": {
+   "table": {
+    "disabled_at": null,
+    "dashboard": {
+     "port": 8765
+    }
+   },
+   "snap": null,
+   "metrics": null,
+   "error": null,
+   "activity": {
+    "dispatcher": {
+     "service_active": true,
+     "timer_active": true,
+     "next_at": "2026-09-08T00:22:50.166124Z",
+     "observed_at": "2026-09-08T00:18:50.166124Z",
+     "observation": "fresh",
+     "capacity": {
+      "configured": 2,
+      "active": 2,
+      "complete": true
+     },
+     "latest_transition": {
+      "event_id": "fx-2",
+      "at": "2026-09-08T00:17:50.166124Z",
+      "execution_id": "run-1/gate",
+      "kind": "enter"
+     }
+    },
+    "events": [
+     {
+      "event_id": "fx-1",
+      "execution_id": "run-1/worker",
+      "sequence": null,
+      "ticket": 12,
+      "stage": "worker",
+      "kind": "enter",
+      "at": "2026-09-08T00:15:50.166124Z",
+      "outcome": null,
+      "reason": null
+     },
+     {
+      "event_id": "fx-2",
+      "execution_id": "run-1/gate",
+      "sequence": null,
+      "ticket": 12,
+      "stage": "gate",
+      "kind": "enter",
+      "at": "2026-09-08T00:17:50.166124Z",
+      "outcome": null,
+      "reason": null
+     },
+     {
+      "event_id": "fx-3",
+      "execution_id": "run-0/merge",
+      "sequence": null,
+      "ticket": 9,
+      "stage": "merge",
+      "kind": "exit",
+      "at": "2026-09-08T00:10:50.166124Z",
+      "outcome": "completed",
+      "reason": null
+     }
+    ],
+    "errors": [],
+    "history": {
+     "source": "fixture",
+     "status": "available",
+     "start_at": "2026-09-07T23:18:50.166124Z",
+     "end_at": "2026-09-08T00:17:50.166124Z",
+     "complete": true,
+     "truncated": false,
+     "gaps": [],
+     "bytes_read": null,
+     "byte_limit": null,
+     "event_limit": null,
+     "retained_events": null
+    }
+   },
+   "collection": {
+    "runtime_collected_at": "2026-09-08T00:18:50.166124Z",
+    "runtime_age_seconds": 1,
+    "full_collected_at": null,
+    "full_age_seconds": null
+   },
+   "schema_version": 1,
+   "assessment": "normal",
+   "operating_state": "running",
+   "execution_state": "stage-active",
+   "observation": "fresh",
+   "findings": [],
+   "sources": [
+    {
+     "id": "factory.runtime",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "cadence_seconds": 5,
+     "age_seconds": 1.000024,
+     "observation": "fresh",
+     "error": null
+    }
+   ],
+   "executions": [
+    {
+     "id": "run-1/worker",
+     "source_id": "factory.runtime",
+     "state": "stage-active",
+     "observation": "fresh",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "entered_at": "2026-09-08T00:15:50.166124Z",
+     "stage": "worker"
+    },
+    {
+     "id": "run-1/gate",
+     "source_id": "factory.runtime",
+     "state": "stage-active",
+     "observation": "fresh",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "entered_at": "2026-09-08T00:17:50.166124Z",
+     "stage": "gate"
+    },
+    {
+     "id": "run-2/review",
+     "source_id": "factory.runtime",
+     "state": "known wait",
+     "observation": "fresh",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "stage": "review",
+     "reason": "capacity"
+    },
+    {
+     "id": "run-0/merge",
+     "source_id": "factory.runtime",
+     "state": "completed",
+     "observation": "fresh",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "stage": "merge"
+    }
+   ],
+   "resources": [
+    {
+     "id": "gate-lock",
+     "source_id": "factory.runtime",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "observation": "fresh",
+     "held": true,
+     "ownership": "known",
+     "owner": {
+      "factory": "fixture/running",
+      "execution_id": "run-1/gate"
+     }
+    }
+   ],
+   "unknowns": [],
+   "projection": {
+    "truncated": false,
+    "omitted": {
+     "findings": 0,
+     "sources": 0,
+     "executions": 0,
+     "resources": 0,
+     "unknowns": 0,
+     "events": 0,
+     "history_gaps": 0,
+     "activity_errors": 0,
+     "tickets": 0,
+     "runs": 0,
+     "gate_checks": 0,
+     "exclusive_checks": 0,
+     "ticket_labels": 0,
+     "factories": 0
+    }
+   }
+  },
+  "fixture/scheduled": {
+   "table": {
+    "disabled_at": null,
+    "dashboard": {
+     "port": 8765
+    }
+   },
+   "snap": null,
+   "metrics": null,
+   "error": null,
+   "activity": {
+    "dispatcher": null,
+    "events": [],
+    "errors": [],
+    "history": {
+     "source": "fixture",
+     "status": "empty",
+     "start_at": null,
+     "end_at": null,
+     "complete": true,
+     "truncated": false,
+     "gaps": [],
+     "bytes_read": null,
+     "byte_limit": null,
+     "event_limit": null,
+     "retained_events": null
+    }
+   },
+   "collection": {
+    "runtime_collected_at": "2026-09-08T00:18:50.166124Z",
+    "runtime_age_seconds": 1,
+    "full_collected_at": null,
+    "full_age_seconds": null
+   },
+   "schema_version": 1,
+   "assessment": "normal",
+   "operating_state": "scheduled waiting",
+   "execution_state": "known wait",
+   "observation": "fresh",
+   "findings": [],
+   "sources": [
+    {
+     "id": "factory.runtime",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "cadence_seconds": 5,
+     "age_seconds": 1.000068,
+     "observation": "fresh",
+     "error": null
+    }
+   ],
+   "executions": [],
+   "resources": [],
+   "unknowns": [],
+   "projection": {
+    "truncated": false,
+    "omitted": {
+     "findings": 0,
+     "sources": 0,
+     "executions": 0,
+     "resources": 0,
+     "unknowns": 0,
+     "events": 0,
+     "history_gaps": 0,
+     "activity_errors": 0,
+     "tickets": 0,
+     "runs": 0,
+     "gate_checks": 0,
+     "exclusive_checks": 0,
+     "ticket_labels": 0,
+     "factories": 0
+    }
+   }
+  },
+  "fixture/capped": {
+   "table": {
+    "disabled_at": "2026-09-07T23:38:50.166124Z",
+    "dashboard": {
+     "port": 8765
+    }
+   },
+   "snap": null,
+   "metrics": null,
+   "error": null,
+   "activity": {
+    "dispatcher": null,
+    "events": [],
+    "errors": [],
+    "history": {
+     "source": "fixture",
+     "status": "empty",
+     "start_at": null,
+     "end_at": null,
+     "complete": true,
+     "truncated": false,
+     "gaps": [],
+     "bytes_read": null,
+     "byte_limit": null,
+     "event_limit": null,
+     "retained_events": null
+    }
+   },
+   "collection": {
+    "runtime_collected_at": "2026-09-08T00:18:50.166124Z",
+    "runtime_age_seconds": 1,
+    "full_collected_at": null,
+    "full_age_seconds": null
+   },
+   "schema_version": 1,
+   "assessment": "attention",
+   "operating_state": "capped",
+   "execution_state": "known wait",
+   "observation": "partial",
+   "findings": [
+    {
+     "id": "[\"factory\",\"fixture/capped\",\"scheduling.capped\",\"dispatcher\"]",
+     "factory": "fixture/capped",
+     "scope": {
+      "kind": "factory",
+      "id": "fixture/capped"
+     },
+     "condition_code": "scheduling.capped",
+     "resource": "dispatcher",
+     "severity": "warning",
+     "observed_at": "2026-09-07T23:38:50.166124Z",
+     "impact": "Automatic dispatch is disabled by its failure cap.",
+     "cause": null,
+     "evidence": [
+      {
+       "source_id": "district.registry",
+       "factory": "fixture/capped",
+       "observed_at": "2026-09-07T23:38:50.166124Z",
+       "observation": "partial",
+       "reference": "dispatcher.capped",
+       "detail": "10 consecutive dispatcher failures"
+      }
+     ],
+     "projection": {
+      "truncated": false,
+      "omitted": {
+       "evidence": 0
+      }
+     }
+    }
+   ],
+   "sources": [
+    {
+     "id": "factory.runtime",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "cadence_seconds": 5,
+     "age_seconds": 1.000086,
+     "observation": "fresh",
+     "error": null
+    },
+    {
+     "id": "district.registry",
+     "observed_at": null,
+     "cadence_seconds": null,
+     "age_seconds": null,
+     "observation": "partial",
+     "error": null
+    }
+   ],
+   "executions": [],
+   "resources": [],
+   "unknowns": [],
+   "projection": {
+    "truncated": false,
+    "omitted": {
+     "findings": 0,
+     "evidence": 0,
+     "sources": 0,
+     "executions": 0,
+     "resources": 0,
+     "unknowns": 0,
+     "events": 0,
+     "history_gaps": 0,
+     "activity_errors": 0,
+     "tickets": 0,
+     "runs": 0,
+     "gate_checks": 0,
+     "exclusive_checks": 0,
+     "ticket_labels": 0,
+     "factories": 0
+    }
+   }
+  },
+  "fixture/stopped": {
+   "table": {
+    "disabled_at": null,
+    "dashboard": {
+     "port": 8765
+    }
+   },
+   "snap": null,
+   "metrics": null,
+   "error": null,
+   "activity": {
+    "dispatcher": null,
+    "events": [],
+    "errors": [],
+    "history": {
+     "source": "fixture",
+     "status": "empty",
+     "start_at": null,
+     "end_at": null,
+     "complete": true,
+     "truncated": false,
+     "gaps": [],
+     "bytes_read": null,
+     "byte_limit": null,
+     "event_limit": null,
+     "retained_events": null
+    }
+   },
+   "collection": {
+    "runtime_collected_at": "2026-09-08T00:18:50.166124Z",
+    "runtime_age_seconds": 1,
+    "full_collected_at": null,
+    "full_age_seconds": null
+   },
+   "schema_version": 1,
+   "assessment": "attention",
+   "operating_state": "unexpectedly stopped",
+   "execution_state": "unknown",
+   "observation": "fresh",
+   "findings": [
+    {
+     "id": "[\"factory\",\"fixture/stopped\",\"scheduling.unexpected_stop\",\"dispatcher\"]",
+     "factory": "fixture/stopped",
+     "scope": {
+      "kind": "factory",
+      "id": "fixture/stopped"
+     },
+     "condition_code": "scheduling.unexpected_stop",
+     "resource": "dispatcher",
+     "severity": "error",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "impact": "Automatic dispatch cannot start.",
+     "cause": null,
+     "evidence": [
+      {
+       "source_id": "factory.runtime",
+       "factory": "fixture/stopped",
+       "observed_at": "2026-09-08T00:18:49.166124Z",
+       "observation": "fresh",
+       "reference": "dispatcher",
+       "detail": "Service and timer are confirmed inactive despite enabled intent."
+      }
+     ],
+     "projection": {
+      "truncated": false,
+      "omitted": {
+       "evidence": 0
+      }
+     }
+    }
+   ],
+   "sources": [
+    {
+     "id": "factory.runtime",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "cadence_seconds": 5,
+     "age_seconds": 1.000116,
+     "observation": "fresh",
+     "error": null
+    }
+   ],
+   "executions": [],
+   "resources": [],
+   "unknowns": [],
+   "projection": {
+    "truncated": false,
+    "omitted": {
+     "findings": 0,
+     "evidence": 0,
+     "sources": 0,
+     "executions": 0,
+     "resources": 0,
+     "unknowns": 0,
+     "events": 0,
+     "history_gaps": 0,
+     "activity_errors": 0,
+     "tickets": 0,
+     "runs": 0,
+     "gate_checks": 0,
+     "exclusive_checks": 0,
+     "ticket_labels": 0,
+     "factories": 0
+    }
+   }
+  },
+  "fixture/stale": {
+   "table": {
+    "disabled_at": null,
+    "dashboard": {
+     "port": 8765
+    }
+   },
+   "snap": null,
+   "metrics": null,
+   "error": null,
+   "activity": {
+    "dispatcher": null,
+    "events": [],
+    "errors": [],
+    "history": {
+     "source": "fixture",
+     "status": "empty",
+     "start_at": null,
+     "end_at": null,
+     "complete": true,
+     "truncated": false,
+     "gaps": [],
+     "bytes_read": null,
+     "byte_limit": null,
+     "event_limit": null,
+     "retained_events": null
+    }
+   },
+   "collection": {
+    "runtime_collected_at": "2026-09-08T00:18:50.166124Z",
+    "runtime_age_seconds": 1,
+    "full_collected_at": null,
+    "full_age_seconds": null
+   },
+   "schema_version": 1,
+   "assessment": "unknown",
+   "operating_state": "running",
+   "execution_state": "stage-active",
+   "observation": "stale",
+   "findings": [],
+   "sources": [
+    {
+     "id": "factory.runtime",
+     "observed_at": "2026-09-08T00:03:50.166124Z",
+     "cadence_seconds": 5,
+     "age_seconds": 900.000138,
+     "observation": "stale",
+     "error": null
+    }
+   ],
+   "executions": [
+    {
+     "id": "run-7/worker",
+     "source_id": "factory.runtime",
+     "state": "stage-active",
+     "observation": "stale",
+     "observed_at": "2026-09-08T00:03:50.166124Z",
+     "stage": "worker"
+    }
+   ],
+   "resources": [],
+   "unknowns": [],
+   "projection": {
+    "truncated": false,
+    "omitted": {
+     "findings": 0,
+     "sources": 0,
+     "executions": 0,
+     "resources": 0,
+     "unknowns": 0,
+     "events": 0,
+     "history_gaps": 0,
+     "activity_errors": 0,
+     "tickets": 0,
+     "runs": 0,
+     "gate_checks": 0,
+     "exclusive_checks": 0,
+     "ticket_labels": 0,
+     "factories": 0
+    }
+   }
+  },
+  "fixture/shared-dependency": {
+   "table": {
+    "disabled_at": null,
+    "dashboard": {
+     "port": 8765
+    }
+   },
+   "snap": null,
+   "metrics": null,
+   "error": null,
+   "activity": {
+    "dispatcher": null,
+    "events": [],
+    "errors": [],
+    "history": {
+     "source": "fixture",
+     "status": "empty",
+     "start_at": null,
+     "end_at": null,
+     "complete": true,
+     "truncated": false,
+     "gaps": [],
+     "bytes_read": null,
+     "byte_limit": null,
+     "event_limit": null,
+     "retained_events": null
+    }
+   },
+   "collection": {
+    "runtime_collected_at": "2026-09-08T00:18:50.166124Z",
+    "runtime_age_seconds": 1,
+    "full_collected_at": null,
+    "full_age_seconds": null
+   },
+   "schema_version": 1,
+   "assessment": "attention",
+   "operating_state": "running",
+   "execution_state": "failed",
+   "observation": "fresh",
+   "findings": [
+    {
+     "id": "[\"shared\",\"model-endpoint\",\"dependency.unavailable\",\"model-endpoint\"]",
+     "factory": "fixture/shared-dependency",
+     "scope": {
+      "kind": "shared",
+      "id": "model-endpoint"
+     },
+     "condition_code": "dependency.unavailable",
+     "resource": "model-endpoint",
+     "severity": "error",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "impact": "Configured triage cannot run for factories using this endpoint.",
+     "cause": null,
+     "evidence": [
+      {
+       "source_id": "factory.runtime",
+       "factory": "fixture/shared-dependency",
+       "observed_at": "2026-09-08T00:18:49.166124Z",
+       "observation": "fresh",
+       "reference": null,
+       "detail": "Endpoint refused the connection three times."
+      }
+     ],
+     "projection": {
+      "truncated": false,
+      "omitted": {
+       "evidence": 0
+      }
+     }
+    },
+    {
+     "id": "[\"factory\",\"fixture/shared-dependency\",\"runtime.mechanism_unavailable\",\"triage\"]",
+     "factory": "fixture/shared-dependency",
+     "scope": {
+      "kind": "factory",
+      "id": "fixture/shared-dependency"
+     },
+     "condition_code": "runtime.mechanism_unavailable",
+     "resource": "triage",
+     "severity": "error",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "impact": "Execution run-3/triage cannot complete its configured mechanism.",
+     "cause": null,
+     "evidence": [
+      {
+       "source_id": "factory.runtime",
+       "factory": "fixture/shared-dependency",
+       "observed_at": "2026-09-08T00:18:49.166124Z",
+       "observation": "fresh",
+       "reference": "run-3/triage",
+       "detail": "configured triage endpoint refused the connection"
+      }
+     ],
+     "projection": {
+      "truncated": false,
+      "omitted": {
+       "evidence": 0
+      }
+     }
+    }
+   ],
+   "sources": [
+    {
+     "id": "factory.runtime",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "cadence_seconds": 5,
+     "age_seconds": 1.000152,
+     "observation": "fresh",
+     "error": null
+    }
+   ],
+   "executions": [
+    {
+     "id": "run-3/triage",
+     "source_id": "factory.runtime",
+     "state": "failed",
+     "observation": "fresh",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "stage": "triage",
+     "reason": "configured triage endpoint refused the connection",
+     "outcome_kind": "mechanism"
+    }
+   ],
+   "resources": [
+    {
+     "id": "model-endpoint-lock",
+     "source_id": "factory.runtime",
+     "observed_at": "2026-09-08T00:18:49.166124Z",
+     "observation": "fresh",
+     "held": true,
+     "ownership": "unknown",
+     "owner": null
+    }
+   ],
+   "unknowns": [],
+   "projection": {
+    "truncated": false,
+    "omitted": {
+     "findings": 0,
+     "evidence": 0,
+     "sources": 0,
+     "executions": 0,
+     "resources": 0,
+     "unknowns": 0,
+     "events": 0,
+     "history_gaps": 0,
+     "activity_errors": 0,
+     "tickets": 0,
+     "runs": 0,
+     "gate_checks": 0,
+     "exclusive_checks": 0,
+     "ticket_labels": 0,
+     "factories": 0
+    }
+   }
+  }
+ },
+ "revision": 1,
+ "cache": {},
+ "projection": {
+  "omitted_factories": 0
+ }
+}

@@ -426,6 +426,35 @@ class ProjectionTest(unittest.TestCase):
                 event = safe_fleet({SLUG: raw})[SLUG]["activity"]["events"][0]
                 self.assertEqual(event["sequence"], expected)
 
+    def test_dispatcher_activity_is_allowlisted_and_active_executions_survive_the_record_limit(self):
+        secret = "ghp_DISPATCHER_CREDENTIAL"
+        raw = {"activity": {"dispatcher": {
+            "service_active": True, "timer_active": "yes", "next_at": "2026-09-05T12:10:00Z",
+            "observed_at": STAMP, "observation": "fresh", "paused": secret,
+            "capacity": {"configured": 2, "active": 1, "complete": True, "extra": secret},
+            "latest_transition": {"event_id": "event-9", "at": STAMP, "execution_id": "run/worker",
+                                  "kind": "enter", "path": "PATH_CANARY"},
+        }}, "executions": [
+            *({"id": f"old-{i}", "state": "completed", "stage": "gate"} for i in range(40)),
+            {"id": "live-worker", "state": "stage-active", "stage": "worker"},
+            {"id": "live-review", "state": "known wait", "stage": "review", "reason": "capacity"},
+        ]}
+        public = safe_fleet({SLUG: raw})[SLUG]
+        self.assertEqual(public["activity"]["dispatcher"], {
+            "service_active": True, "timer_active": None, "next_at": "2026-09-05T12:10:00Z",
+            "observed_at": STAMP, "observation": "fresh",
+            "capacity": {"configured": 2, "active": 1, "complete": True},
+            "latest_transition": {"event_id": "event-9", "at": STAMP, "execution_id": "run/worker", "kind": "enter"},
+        })
+        self.assertNotIn(secret, json.dumps(public))
+        self.assertNotIn("PATH_CANARY", json.dumps(public))
+        ids = [item["id"] for item in public["executions"]]
+        self.assertEqual(ids[:3], ["live-worker", "live-review", "old-39"])
+        self.assertNotIn("old-0", ids)
+        self.assertEqual(len(ids), 32)
+        self.assertEqual(public["projection"]["omitted"]["executions"], 10)
+        self.assertEqual(safe_fleet({SLUG: {"activity": {}}})[SLUG]["activity"]["dispatcher"], None)
+
     def test_collection_bounds_are_disclosed_without_reclassifying(self):
         count = 35
         checks = [check(resource=f"dependency-{i}") for i in range(count)]
