@@ -1,6 +1,6 @@
 ---
 name: district
-description: Operate District, the host-side fleet manager for Factory installations. Use when the user asks to add, adopt, remove, inspect, reconcile, upgrade, or recover managed factory repositories; collect fleet metrics; or install and open the District dashboard.
+description: Operate District, the host-side fleet manager for Factory installations. Use when the user asks to add, adopt, remove, inspect, reconcile, upgrade or recover Factory, update or roll back District itself, collect fleet metrics, or install and open the District dashboard.
 ---
 
 # District
@@ -23,6 +23,7 @@ Confirm `district --version`, `factory --version`, and authenticated `gh auth st
 - Recover a failure-capped timer → **Reset**.
 - Remove a repository from the fleet → **Remove**.
 - Refresh aggregate data or serve the fleet UI → **Metrics and dashboard**.
+- Update or roll back District itself → **Update District**.
 
 ## Inspect
 
@@ -75,6 +76,20 @@ Done when District reports the slug removed and a fresh status no longer contain
 - Resource summaries expand to source-stamped identity/ownership evidence. Unreported stage edges are not drawn. Watch mode applies only to Overview, and its animation control remains available. Lost connections stop motion and retain aging last-known facts; requests time out after ten seconds. A disappearing finding is not a confirmed recovery: only a newer positive scheduling observation confirms recovery from a cap or unexpected stop; other disappearances remain explicitly unconfirmed.
 - `--host 0.0.0.0` enables read-only LAN viewing, not remote management. A LAN URL is read-only even on the host. For manage/detect, open direct HTTP to numeric loopback or `localhost` with the actual server port (default `http://127.0.0.1:8760`); reverse proxies and forwarded headers are unsupported. The page reports capability and keeps unavailable controls disabled.
 - For LAN viewing, use the listener's numeric IP and actual port. DNS aliases other than `localhost` are unsupported. `/api/fleet` is the bounded sanitized projection in `OPERATIONS-CONSOLE-SPEC.md` §§6.2 and 8, not raw `status --json`; inspect cache revision, source/collection ages, history gaps and omission metadata alongside unchanged assessments.
+
+## Update District
+
+Requires Linux with a working user systemd manager, `uv`, Git, authenticated `gh`, and Python 3.11+ outside the managed tool environment. Dry-run reads local install/service state and queries GitHub for the target SHA and CI; it is not an offline command, but creates no state, locks, or service changes. Rollback uses only the retained local artifact and does not require GitHub access.
+
+1. Run `district update --dry-run --json`. Report the installed and immutable target SHAs, exact `ci.yml` / `test` status, affected District service state, and operation list. Pending, failed, or missing CI blocks installation rather than selecting an older commit; an already-installed target is a no-op.
+2. Use `--to REF` only for the user's requested official tag, branch, or SHA. District accepts no alternate repository. Run with `--yes` only after the exact plan is authorized; noninteractive execution requires it.
+3. After success, run `district update --dry-run --json`, inspect the active dashboard and advancing `/api/fleet` revision (a valid empty fleet needs no advance), and confirm its bind and Factory schedules are unchanged.
+4. On a failed transaction, report the helper's explicit rollback result and log path. Use `district update --rollback --yes` to restore the recorded previous installation offline. If the launcher is broken, use the recovery command printed by District (normally `/usr/bin/python3 ~/.local/state/district/update/transaction.py recover ~/.local/state/district/update`).
+5. Self-update supports a non-editable official `uv tool` installation, including a clean official local snapshot whose installed package matches it. Other package managers require migration first. To bootstrap an older CLI, run `uv run python -m district update --to SHA --yes` from a checkout containing the updater, after reviewing its dry run.
+
+State, retained installation artifacts, helper, and transaction logs live under `${XDG_STATE_HOME:-~/.local/state}/district/update`. Keep this directory for offline rollback and interrupted-transaction recovery. Recovery requires confirmation through the CLI; the printed direct helper command is an explicit recovery action and refuses to race another District operation.
+
+Done when installed provenance and CLI match the reported SHA, a formerly active dashboard has a replacement process and current collection evidence, only formerly active District timers are restored, and no Factory unit or registry setting changed.
 
 ## Ownership invariants
 
