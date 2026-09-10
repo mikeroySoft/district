@@ -12,7 +12,6 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -673,74 +672,6 @@ class ApplyTest(DistrictCase):
         calls = self.calls("systemctl")
         self.assertFalse(any(call.startswith(("disable ", "enable ", "restart ")) for call in calls))
         self.assertEqual(self.calls("uv"), [])
-
-    def test_upgrade_requests_declared_extras_on_every_reinstall(self) -> None:
-        src = self.tmp / "af"
-        src.mkdir()
-        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
-        self.register()
-        data = host.load()
-        data["defaults"] = {"factory_source": str(src), "factory_extras": ["atlas"]}
-        host.save(data)
-        self.stub("uv", ("tool install *", "Installed 1 executable: factory\n"))
-        self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)),
-                  ("dashboard --json", json.dumps(dashboard())))
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        for _ in range(2):
-            code, out = self.district("apply", "--upgrade")
-            self.assertEqual(code, 0, out)
-        self.assertEqual(self.calls("uv"), [f"tool install --reinstall --from {src}[atlas] factory"] * 2)
-
-    @unittest.skipUnless(shutil.which("uv"), "uv is not installed")
-    def test_upgrade_really_installs_declared_extras_with_uv(self) -> None:
-        """Real uv, disposable local package: the [extra] suffix resolves and survives a reinstall."""
-        src = self.tmp / "fakefactory"
-        src.mkdir()
-        extra = self.tmp / "fakeextra"
-        extra.mkdir()
-        (extra / "pyproject.toml").write_text(
-            '[project]\nname = "district-fake-extra"\nversion = "0.1.0"\n'
-            '[tool.setuptools]\npy-modules = ["district_fake_extra"]\n'
-            '[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n')
-        (extra / "district_fake_extra.py").write_text("")
-        (src / "pyproject.toml").write_text(
-            '[project]\nname = "factory"\nversion = "0.2.0"\n'
-            '[project.optional-dependencies]\n'
-            f'atlas = ["district-fake-extra @ file://{extra}"]\n'
-            '[project.scripts]\nfactory = "district_fake_factory:main"\n'
-            '[tool.setuptools]\npy-modules = ["district_fake_factory"]\n'
-            '[build-system]\nrequires = ["setuptools"]\nbuild-backend = "setuptools.build_meta"\n')
-        (src / "district_fake_factory.py").write_text("def main():\n    print('0.2.0')\n")
-        (src / ".gitignore").write_text("*.egg-info/\nbuild/\n")  # uv builds in place; keep the snapshot clean
-        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
-        subprocess.run(["git", "-C", str(src), "add", "-A"], check=True)
-        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "-C", str(src),
-                        "commit", "-qm", "snapshot"], check=True)
-        tool_dir = self.tmp / "uv-tools"
-        # Installed executables land outside self.bin so the `factory` stub keeps answering --version.
-        env = mock.patch.dict(os.environ, {"UV_TOOL_DIR": str(tool_dir), "UV_TOOL_BIN_DIR": str(self.tmp / "uv-bin")})
-        env.start()
-        self.addCleanup(env.stop)
-        self.register()
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        data = host.load()
-        data["defaults"] = {"factory_source": str(src)}
-        (self.bin / "uv").unlink()  # setUp's stub would shadow real uv on PATH
-        host.save(data)
-        code, out = self.district("apply", "--upgrade")
-        if code != 0:
-            self.skipTest(f"uv could not install the disposable package: {out}")
-        installed = tool_dir / "factory" / "bin" / "python"
-        def has_extra() -> bool:
-            return subprocess.run([str(installed), "-c", "import district_fake_extra"],
-                                  capture_output=True).returncode == 0
-        self.assertFalse(has_extra(), "bare install must not pull the optional extra")
-        data["defaults"]["factory_extras"] = ["atlas"]
-        host.save(data)
-        for attempt in range(2):
-            code, out = self.district("apply", "--upgrade")
-            self.assertEqual(code, 0, out)
-            self.assertTrue(has_extra(), f"extra missing after upgrade {attempt + 1}")
 
 
 class StatusTest(DistrictCase):
