@@ -654,6 +654,42 @@ class ApplyTest(DistrictCase):
         self.assertIn("uncommitted changes", out)
         self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
 
+    def test_upgrade_rejects_invalid_factory_extras_before_changes(self) -> None:
+        self.register()
+        src = self.repo("engine")
+        data = host.load()
+        data["defaults"] = {"factory_source": str(src)}
+        host.save(data)
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        invalid = ("atlas", [1], [""], ["bad extra"], ["-atlas"], ["atlas-"])
+        for extras in invalid:
+            with self.subTest(extras=extras):
+                data = host.load()
+                data.setdefault("defaults", {})["factory_extras"] = extras
+                host.save(data)
+                code, _ = self.district("apply", "--upgrade")
+                self.assertEqual(code, 1)
+        calls = self.calls("systemctl")
+        self.assertFalse(any(call.startswith(("disable ", "enable ", "restart ")) for call in calls))
+        self.assertEqual(self.calls("uv"), [])
+
+    def test_upgrade_requests_declared_extras_on_every_reinstall(self) -> None:
+        src = self.tmp / "af"
+        src.mkdir()
+        subprocess.run(["git", "-C", str(src), "init", "-q"], check=True)
+        self.register()
+        data = host.load()
+        data["defaults"] = {"factory_source": str(src), "factory_extras": ["atlas"]}
+        host.save(data)
+        self.stub("uv", ("tool install *", "Installed 1 executable: factory\n"))
+        self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)),
+                  ("dashboard --json", json.dumps(dashboard())))
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        for _ in range(2):
+            code, out = self.district("apply", "--upgrade")
+            self.assertEqual(code, 0, out)
+        self.assertEqual(self.calls("uv"), [f"tool install --reinstall --from {src}[atlas] factory"] * 2)
+
 
 class StatusTest(DistrictCase):
     def test_failed_observation_preserves_runtime_and_project_context(self) -> None:

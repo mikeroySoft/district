@@ -26,6 +26,7 @@ POLICY_ENV = ("NPM_CONFIG_MIN_RELEASE_AGE", "UV_EXCLUDE_NEWER")
 DRIFT_LABELS = (".factory.toml keys", "host settings committed", ".github/ISSUE_TEMPLATE/agent_task.md", ".factory.toml committed")
 SERVICE_WAIT = 3600  # seconds for running passes to finish before an upgrade
 DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
+EXTRA_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 
 def now() -> datetime:
@@ -92,6 +93,10 @@ def wait_inactive(services: list[str], timeout: float) -> None:
 
 def upgrade(data: dict, active_timers: list[str]) -> None:
     """Stop → wait → reinstall → restart dashboards. Timers are re-enabled by the caller."""
+    extras = host.default(data, "factory_extras")
+    if not isinstance(extras, list) or any(not isinstance(extra, str) or not EXTRA_NAME.fullmatch(extra)
+                                           for extra in extras):
+        raise DistrictError("[defaults].factory_extras must be an array of valid Python extra names")
     src = Path(os.path.expanduser(host.default(data, "factory_source")))
     if run(["git", "status", "--porcelain"], cwd=src, check=True).stdout.strip():
         raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
@@ -100,7 +105,8 @@ def upgrade(data: dict, active_timers: list[str]) -> None:
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
     # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
     wait_inactive([f"{host.unit_name(s)}.service" for s in host.repos(data)], SERVICE_WAIT)
-    proc = run(["uv", "tool", "install", "--reinstall", "--from", str(src), "factory"])
+    source = f"{src}[{','.join(extras)}]" if extras else str(src)
+    proc = run(["uv", "tool", "install", "--reinstall", "--from", source, "factory"])
     sys.stdout.write(proc.stdout)
     if proc.returncode != 0:
         sys.stderr.write(proc.stderr)

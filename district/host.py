@@ -2,7 +2,7 @@
 
 Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
-clone_dir / factory_source / min_package_age / max_failed_passes, and per repo
+clone_dir / factory_source / factory_extras / min_package_age / max_failed_passes, and per repo
 `path`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
 """
 
@@ -21,6 +21,7 @@ BASE_PORT = 8764  # first allocation is 8765, agent-factory's default
 DEFAULTS = {
     "clone_dir": "~/dev/mikeroysoft",
     "factory_source": "~/dev/mikeroysoft/factory",
+    "factory_extras": [],
     "min_package_age": "24h",
     "max_failed_passes": 10,
 }
