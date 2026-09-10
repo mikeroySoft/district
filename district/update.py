@@ -609,7 +609,7 @@ def execute(plan: dict, context: dict, lock_fd: int) -> dict:
     if code != 0 and not result.get("rollback", {}).get("ok"):
         if not (root / "transaction.json").exists():
             cleanup_transients(root, state)
-        raise UpdateError(result.get("error") or "District transaction and recovery failed")
+        result["ok"] = False
     return result
 
 

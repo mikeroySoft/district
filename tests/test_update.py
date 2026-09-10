@@ -429,6 +429,8 @@ class UpdateCase(unittest.TestCase):
         proc = self.run_update("--yes", "--json")
         self.assertEqual(proc.returncode, 1)
         self.assertIn("ExecStart changed", self.data(proc)["error"])
+        self.assertEqual(self.data(proc)["status"], "recovery-failed")
+        self.assertFalse(self.data(proc)["rollback"]["ok"])
         self.assertEqual(self.identity()["sha"], OLD)
 
     def test_empty_registry_dashboard_needs_no_fabricated_publication(self) -> None:
