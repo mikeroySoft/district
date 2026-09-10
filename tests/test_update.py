@@ -148,6 +148,7 @@ def start(name):
         env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "PYTHONHOME")}
         child = subprocess.Popen(argv, cwd=cfg["tool_dir"], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         row["MainPID"] = str(child.pid)
+        if cfg.get("change_exec_start"): cfg["exec_port"] = cfg["port"] + 1
     row["ActiveState"] = "active"
     return True
 if args[:1] == ["show"]:
@@ -155,7 +156,7 @@ if args[:1] == ["show"]:
     row = units.get(unit, {"LoadState": "not-found", "ActiveState": "inactive", "UnitFileState": "not-found", "MainPID": "0"})
     if prop == "ExecStart":
         python = pathlib.Path(cfg["tool_dir"]) / "district/bin/python3"
-        print(f"{{ path={python} ; argv[]={python} -m district dashboard --host 0.0.0.0 --port {cfg['port']} --no-open ; ignore_errors=no ; }}")
+        print(f"{{ path={python} ; argv[]={python} -m district dashboard --host 0.0.0.0 --port {cfg.get('exec_port', cfg['port'])} --no-open ; ignore_errors=no ; start_time=[Thu 2026-09-10 11:26:04 PDT] ; stop_time=[n/a] ; pid={row.get('MainPID', '0')} ; code=(null) ; status=0/0 }}")
     else: print(row.get(prop, ""))
     raise SystemExit(0)
 if args[:1] == ["stop"]:
@@ -420,6 +421,15 @@ class UpdateCase(unittest.TestCase):
         self.assertEqual((rolled.returncode, result["status"], self.identity()["sha"]), (0, "rolled-back", OLD))
         state = json.loads((self.state_home / "district" / "update" / "state.json").read_text())
         self.assertEqual((state["current"]["sha"], state["previous"]["sha"]), (OLD, NEW))
+
+    def test_changed_dashboard_command_still_blocks_success(self) -> None:
+        self.start_dashboard()
+        self.config["change_exec_start"] = True
+        self.write_config()
+        proc = self.run_update("--yes", "--json")
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("ExecStart changed", self.data(proc)["error"])
+        self.assertEqual(self.identity()["sha"], OLD)
 
     def test_empty_registry_dashboard_needs_no_fabricated_publication(self) -> None:
         self.config["main_source"] = textwrap.dedent(MAIN).replace(

@@ -350,6 +350,16 @@ def stop_services(req: dict, states: dict) -> None:
         systemctl(req, "stop", dashboard)
 
 
+def exec_start_configuration(raw: str) -> tuple[str, str, str]:
+    # systemctl appends execution timestamps, PID, and status after the configured command.
+    match = re.fullmatch(
+        r"\{\s*path=(.*?)\s+;\s+argv\[]=(.*?)\s+;\s+ignore_errors=(yes|no)\s+;[^{}]*\}", raw
+    )
+    if not match:
+        raise TransactionError("cannot parse district-dashboard.service ExecStart")
+    return match[1], match[2], match[3]
+
+
 def restore_services(req: dict, states: dict) -> None:
     dashboard_name = "district-dashboard.service"
     if states[dashboard_name]["loaded"] and states[dashboard_name]["active_state"] == "active":
@@ -373,21 +383,21 @@ def restore_services(req: dict, states: dict) -> None:
         ):
             raise TransactionError(f"{unit} enablement changed during update")
     dashboard = states[dashboard_name]
-    if dashboard["loaded"] and property_value(req, dashboard_name, "ExecStart") != dashboard["exec_start"]:
-        raise TransactionError("district-dashboard.service ExecStart changed during update")
+    if dashboard["loaded"]:
+        current = exec_start_configuration(property_value(req, dashboard_name, "ExecStart"))
+        if current != exec_start_configuration(dashboard["exec_start"]):
+            raise TransactionError("district-dashboard.service ExecStart changed during update")
 
 
 def dashboard_argv(req: dict) -> tuple[list[str], str, int]:
     raw = property_value(req, "district-dashboard.service", "ExecStart")
-    match = re.search(r"argv\[]=(.*?)\s+;\s+ignore_errors=", raw)
-    if not match:
-        raise TransactionError("cannot parse district-dashboard.service ExecStart")
+    executable, command, _ = exec_start_configuration(raw)
     try:
-        argv = shlex.split(match.group(1))
+        argv = shlex.split(command)
     except ValueError as exc:
         raise TransactionError("cannot parse district-dashboard.service argv") from exc
     prefix = [str(Path(req["tool"]) / "bin" / "python3"), "-m", "district", "dashboard"]
-    if argv[:4] != prefix:
+    if executable != prefix[0] or argv[:4] != prefix:
         raise TransactionError("district-dashboard.service does not use the managed District environment")
     host, port = "127.0.0.1", 8760
     for option, cast in (("--host", str), ("--port", int)):
