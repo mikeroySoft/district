@@ -13,6 +13,7 @@ COMMANDS = {
     "rm": ("rm", "main", "remove a repository's units and registry entry; repo files untouched"),
     "metrics": ("metrics", "main", "per-factory git/gh metrics (cached hourly); --refresh recollects"),
     "dashboard": ("dashboard", "main", "serve the District Atlas and management page (default port 8760)"),
+    "update": ("update", "main", "update District from eligible official CI, or roll back offline"),
 }
 
 

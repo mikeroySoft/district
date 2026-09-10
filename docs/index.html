@@ -137,7 +137,7 @@
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
-      <p class="sources">Current milestone: scoped operations console.<br><a href="#changelog">Progress through September 8, 2026</a></p>
+      <p class="sources">Current milestone: scoped operations console and safe self-update.<br><a href="#changelog">Progress through September 10, 2026</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
@@ -206,7 +206,7 @@ rocm-app   capped             <span class="att">attention</span>
 
   <section id="commands">
     <div class="kicker">Commands</div>
-    <h2>Seven verbs. Each one shells out to the host tools it checks or manages.</h2>
+    <h2>Eight verbs. Each one shells out to the host tools it checks or manages.</h2>
     <p class="lede">District never imports from mikeroySoft/factory and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
       <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
@@ -215,6 +215,7 @@ rocm-app   capped             <span class="att">attention</span>
       <div class="k">district status</div><div class="v">Operating state, execution state, observation quality, and evidence-backed findings, with version and project metrics alongside. Text or <code>--json</code>; exit 0 for normal, 1 for operational attention, 2 for unknown without attention.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
       <div class="k">district dashboard</div><div class="v">Serve the shared cached fleet and scoped console. Atlas and management remain at the default route until cutover. Optional LAN viewing is read-only; management stays on direct localhost access. <a href="#console">See current routes and access boundaries.</a></div>
+      <div class="k">district update</div><div class="v">Resolve an official ref to one immutable SHA, require the successful <code>ci.yml</code> <code>test</code> job for that SHA, and transactionally replace only District's uv tool. Supports query-only <code>--dry-run</code>, machine-readable <code>--json</code>, and retained offline <code>--rollback</code>; Factory and unit files are unchanged.</div>
       <div class="k">district rm</div><div class="v">Disable and delete the units, drop the registry entry. Repo files untouched; the factory can be re-added later.</div>
     </div>
   </section>
@@ -282,8 +283,17 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="changelog">
     <div class="kicker">Changelog</div>
     <h2>From fleet registry to operational evidence.</h2>
-    <p class="lede">Selected milestones through September 8, 2026. Dates below use UTC merge history for PRs; these are source milestones, not invented version releases or a claim about every installed host.</p>
+    <p class="lede">Selected milestones through September 10, 2026. Dates below use UTC merge history for PRs; these are source milestones, not invented version releases or a claim about every installed host.</p>
     <ol class="timeline">
+      <li>
+        <div><time datetime="2026-09-10">September 10, 2026</time><span class="status shipped">Shipped</span></div>
+        <div>
+          <h3>District can update itself without updating the fleet.</h3>
+          <p><code>district update</code> pins an official commit with successful CI, prepares it before downtime, preserves the dashboard bind and active District timers, and verifies the replacement collector. Query-only planning, offline rollback, and a retained recovery helper cover both normal upgrades and interrupted replacements.</p>
+          <p class="decision"><strong>Why:</strong> upgrading the fleet manager must not also upgrade Factory, rewrite units, or depend on the installation being replaced for recovery.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/blob/main/skills/district/SKILL.md#update-district">Update and recovery runbook</a></p>
+        </div>
+      </li>
       <li>
         <div><time datetime="2026-09-07">September 7, 2026</time><span class="status shipped">Merged</span></div>
         <div>
@@ -382,10 +392,12 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district add ~/dev/owner/repo        <span class="c"># or a GitHub URL; adopts an existing .factory.toml</span>
 <span class="p">$</span> district apply                        <span class="c"># reconcile units, labels, doctor, caps, policy</span>
 <span class="p">$</span> district dashboard --install          <span class="c"># dashboard + hourly metrics and apply timers</span>
-<span class="p">$</span> district status</pre>
+<span class="p">$</span> district status
+<span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span></pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
     <p style="color:var(--text-muted)">Optional Factory features survive every shared, host-wide engine reinstall when selected in the registry, for example:<br><code>[defaults]<br>factory_extras = ["atlas"]</code><br>Omit the setting or use an empty array to keep installing bare Factory; run <code>district apply --upgrade</code> to apply the selection to the one engine used by every managed repository.</p>
+    <p style="color:var(--text-muted)">District self-update supports only a non-editable uv install from the official repository. It prepares the target before downtime, runs replacement and recovery from a retained stdlib helper outside the managed environment, and keeps the prior successful installation for <code>district update --rollback</code>. Metadata lives under <code>${XDG_STATE_HOME:-~/.local/state}/district/update</code>, never in Factory's registry. A source checkout can bootstrap the installed tool with <code>uv run python -m district update --to &lt;eligible-sha&gt; --yes</code>.</p>
   </section>
   </main>
 

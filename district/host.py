@@ -41,6 +41,11 @@ def unit_dir() -> Path:
     return path().parents[1] / "systemd" / "user"
 
 
+def operation_lock_path() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
+    return Path(base) / "district" / "apply.lock"
+
+
 def load() -> dict:
     p = path()
     if not p.exists():
@@ -133,14 +138,14 @@ def select(data: dict, slug: str | None) -> dict[str, dict]:
 
 
 def run(argv: list[str], cwd: Path | None = None, check: bool = False, quiet: bool = False,
-        timeout: float | None = None) -> subprocess.CompletedProcess:
+        timeout: float | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     if timeout is None:
-        proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False)
+        proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False, env=env)
     else:
         # Collector deadlines cover the command's process group, not just its
         # Python wrapper: inherited output pipes can belong to a surviving child.
         with subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                              text=True, start_new_session=True) as child:
+                              text=True, start_new_session=True, env=env) as child:
             try:
                 stdout, stderr = child.communicate(timeout=timeout)
             except BaseException:

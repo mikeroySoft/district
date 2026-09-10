@@ -8,6 +8,7 @@ hourly `district-metrics.timer` refreshes them so page loads never wait on GitHu
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
@@ -166,14 +167,22 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--refresh", action="store_true", help="collect now even if the cache is fresh")
     parser.add_argument("--max-age", default="1h", help="reuse a cache younger than this (default 1h)")
     args = parser.parse_args(argv)
-    max_age = hours(args.max_age, "--max-age")
-    out, code = {}, 0
-    for slug, table in host.select(host.load(), args.slug).items():
+    lock_path = host.operation_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lock:
         try:
-            out[slug] = cached(slug, table, max_age, args.refresh)
-        except DistrictError as exc:
-            print(f"{slug}: {exc}", file=sys.stderr)
-            out[slug] = {"error": str(exc)}
-            code = 1
-    print(json.dumps(out, indent=2))
-    return code
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f"district metrics: another apply, metrics, or update operation is running ({lock_path})", file=sys.stderr)
+            return 1
+        max_age = hours(args.max_age, "--max-age")
+        out, code = {}, 0
+        for slug, table in host.select(host.load(), args.slug).items():
+            try:
+                out[slug] = cached(slug, table, max_age, args.refresh)
+            except DistrictError as exc:
+                print(f"{slug}: {exc}", file=sys.stderr)
+                out[slug] = {"error": str(exc)}
+                code = 1
+        print(json.dumps(out, indent=2))
+        return code
