@@ -385,6 +385,7 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district status</pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
+    <p style="color:var(--text-muted)">Optional Factory features survive every shared, host-wide engine reinstall when selected in the registry, for example:<br><code>[defaults]<br>factory_extras = ["atlas"]</code><br>Omit the setting or use an empty array to keep installing bare Factory; run <code>district apply --upgrade</code> to apply the selection to the one engine used by every managed repository.</p>
   </section>
   </main>
 
