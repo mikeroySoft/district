@@ -22,6 +22,7 @@ def usage() -> str:
     width = max(len(c) for c in COMMANDS)
     lines = ["usage: district <command> [options]", "", "commands:"]
     lines += [f"  {name.ljust(width)}  {desc}" for name, (_, _, desc) in COMMANDS.items()]
+    lines.append(f"  {'version'.ljust(width)}  print the District version")
     return "\n".join(lines)
 
 
@@ -30,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(usage())
         return 0 if argv else 2
-    if argv[0] in ("-V", "--version"):
+    if argv[0] in ("-V", "--version", "version"):
         from district import __version__
 
         print(__version__)
