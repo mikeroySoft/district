@@ -3,11 +3,17 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
+import os
+from pathlib import Path
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
 
 from district import report
+from district import host, metrics
+from test_collector import runtime
+from test_district import DistrictCase, dashboard
 
 
 AT = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
@@ -116,6 +122,53 @@ class ReportTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as raised:
             report.main(["--week"])
         self.assertEqual(raised.exception.code, 2)
+
+
+class ReportCLITest(DistrictCase):
+    def test_report_reads_disposable_fleet_without_mutation_or_collection(self) -> None:
+        repo = self.repo(toml="")
+        self.units("acme/widgets")
+        for case in ("complete", "partial", "empty"):
+            with self.subTest(case=case):
+                host.save({"repo": {} if case == "empty" else {
+                    "acme/widgets": {"path": str(repo)}}})
+                snap = dashboard()
+                cache = metrics.cache_path("acme/widgets")
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                cache.write_text(json.dumps({
+                    "collected_at": snap["generated_at"],
+                    "merged_prs_30d": 3, "agent_prs_30d": 1, "open_prs": 2,
+                }))
+                self.stub("factory",
+                          ("dashboard --runtime-json", json.dumps(runtime(
+                              "acme/widgets", stamp=snap["generated_at"]))),
+                          ("dashboard --json", "{not json" if case == "partial"
+                           else json.dumps(snap), 1 if case == "partial" else 0),
+                          ("*", "unexpected Factory command", 99))
+                for name in ("gh", "systemctl", "uv"):
+                    self.stub(name, ("*", "unexpected management/collector command", 99))
+                for log in self.bin.glob("*.log"):
+                    log.unlink()
+                roots = [Path(os.environ["XDG_CONFIG_HOME"]),
+                         Path(os.environ["XDG_CACHE_HOME"]), repo]
+                before = {p: p.read_bytes() for root in roots
+                          for p in root.rglob("*") if p.is_file()}
+                registry = host.load()
+                code, out = self.district("report")
+                self.assertEqual(code, 2 if case == "partial" else 0, out)
+                self.assertIn(f"Registered repositories: {0 if case == 'empty' else 1}", out)
+                if case != "empty":
+                    self.assertIn("## acme/widgets", out)
+                    self.assertIn("Merged PRs (trailing 30 days, bounded at 500): 3", out)
+                    self.assertIn("Factory snapshot: " + (
+                        "unavailable" if case == "partial" else "available"), out)
+                self.assertCountEqual(self.calls("factory"), [] if case == "empty" else [
+                    "dashboard --runtime-json", "dashboard --json"])
+                for name in ("gh", "systemctl", "uv"):
+                    self.assertEqual(self.calls(name), [])
+                self.assertEqual(host.load(), registry)
+                self.assertEqual({p: p.read_bytes() for root in roots
+                                  for p in root.rglob("*") if p.is_file()}, before)
 
 
 if __name__ == "__main__":
