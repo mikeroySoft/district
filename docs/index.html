@@ -137,7 +137,7 @@
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
-      <p class="sources">Current milestone: scoped operations console and safe self-update.<br><a href="#changelog">Progress through September 10, 2026</a></p>
+      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Progress through September 18, 2026</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
@@ -210,10 +210,10 @@ rocm-app   capped             <span class="att">attention</span>
     <p class="lede">District never imports from mikeroySoft/factory and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
       <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
-      <div class="k">district apply</div><div class="v">Reconcile units, labels, doctor checks, failure caps, and host policy. Hourly reconciliation is available through <code>dashboard --install</code>. <code>--upgrade</code> waits for all managed passes before replacing the shared engine; <code>--reset SLUG</code> requires a successful pass before restoring a capped timer.</div>
+      <div class="k">district apply</div><div class="v">Reconcile units, labels, doctor checks, failure caps, and host policy. Hourly reconciliation is available through <code>dashboard --install</code>. <code>--upgrade</code> waits for all managed passes, then reinstalls the shared engine with the registry's selected <code>factory_extras</code>; <code>--reset SLUG</code> requires a successful pass before restoring a capped timer.</div>
       <div class="k">district doctor</div><div class="v">Check District's host prerequisites, registered repository remotes, dashboard ports, package policy, and units. Reports every check as <code>PASS</code>, <code>WARN</code>, or <code>FAIL</code>.</div>
       <div class="k">district status</div><div class="v">Operating state, execution state, observation quality, and evidence-backed findings, with version and project metrics alongside. Text or <code>--json</code>; exit 0 for normal, 1 for operational attention, 2 for unknown without attention.</div>
-      <div class="k">district report</div><div class="v">Print one read-only Markdown fleet review from a bounded observation round and existing metric caches. Every repository and source gap stays visible; rates are pooled only from compatible producer counts and windows.</div>
+      <div class="k">district report</div><div class="v">Print one on-demand, read-only Markdown fleet review from a bounded observation round and existing metric caches. Every repository, source age, coverage gap, and actual producer window stays visible; partial counts are labeled and rates are pooled only from compatible producer counts and windows.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
       <div class="k">district dashboard</div><div class="v">Serve the shared cached fleet and scoped console. Atlas and management remain at the default route until cutover. Optional LAN viewing is read-only; management stays on direct localhost access. <a href="#console">See current routes and access boundaries.</a></div>
       <div class="k">district update</div><div class="v">Resolve an official ref to one immutable SHA, require the successful <code>ci.yml</code> <code>test</code> job for that SHA, and transactionally replace only District's uv tool. Supports query-only <code>--dry-run</code>, machine-readable <code>--json</code>, and retained offline <code>--rollback</code>; Factory and unit files are unchanged.</div>
@@ -224,12 +224,12 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="console">
     <div class="kicker">Available now</div>
     <h2>A shared operational picture. Not another project inbox.</h2>
-    <p class="lede">The scoped console is merged: real cached factory state, source ages, findings, and links back to Factory. The richer graphical views are the next milestone, not a feature claim hidden in a preview.</p>
+    <p class="lede">The scoped console and graphical Overview are merged: stable diagrams show real cached state, concurrent stage occupancy, capacity, source ages, findings, and evidence-backed motion. Detailed Flows and Brief work, combined operator acceptance, and console cutover are still pending.</p>
     <div class="grid three">
       <div class="card">
-        <span class="status shipped">Merged · shared state</span>
-        <h3>Collect once. View anywhere.</h3>
-        <p>One server-owned collector refreshes runtime observations about every five seconds and full snapshots every minute. Extra browser tabs read the cache instead of multiplying Factory and GitHub calls.</p>
+        <span class="status shipped">Merged · graphical Overview</span>
+        <h3>Observe state, not decoration.</h3>
+        <p>Equally weighted factory diagrams show concurrent stages and bounded recent activity. Fresh confirmed active stages can pulse, while newly observed transitions and completions move once; watch, pause, hidden-tab, and reduced-motion behavior preserve the facts.</p>
       </div>
       <div class="card">
         <span class="status shipped">Merged · scoped navigation</span>
@@ -242,19 +242,19 @@ rocm-app   capped             <span class="att">attention</span>
         <p>Opt into LAN viewing without exposing host controls. Remote requests cannot run management or detection; browser data is bounded and sanitized rather than a copy of host configuration.</p>
       </div>
     </div>
-    <p class="note"><strong>Try the current console:</strong> after starting the dashboard, open <code>http://127.0.0.1:8760/?view=overview</code>. Change <code>view</code> to <code>flows</code> or <code>brief</code> for the shared scoped views. Detailed flow lanes, the evidence panel, and the full Brief are <a href="#roadmap">still planned</a>. Atlas and existing management remain at <code>/</code> and <code>/legacy</code>.</p>
+    <p class="note"><strong>Try the current console:</strong> after starting the dashboard, open <code>http://127.0.0.1:8760/?view=overview</code> for the implemented graphical watch surface. Change <code>view</code> to <code>flows</code> or <code>brief</code> for the shared scoped shells; detailed flow lanes, the evidence panel, and the full Brief are <a href="#roadmap">still planned</a>. Combined Overview/Flows visual acceptance and the default-route cutover remain pending. Atlas and existing management remain at <code>/</code> and <code>/legacy</code>.</p>
     <p class="sources">LAN viewing requires an explicit bind such as <code>--host 0.0.0.0</code>. Manage and detect require direct HTTP to numeric loopback or <code>localhost</code> at the actual server port. LAN URLs remain read-only even on the host; DNS aliases and reverse proxies are unsupported, and forwarded headers fail closed. <a href="https://github.com/mikeroySoft/district/blob/main/OPERATIONS-CONSOLE-SPEC.md#9-management-and-network-safety">Network policy</a>.</p>
   </section>
 
   <section id="decisions">
     <div class="kicker">Design decisions</div>
     <h2>What we chose. What we chose not to build.</h2>
-    <p class="lede">District started with a city-shaped Atlas. The next operating surface puts work and evidence ahead of architecture and repository size.</p>
+    <p class="lede">District started with a city-shaped Atlas. The new operating surface puts work and evidence ahead of architecture and repository size, while Atlas remains the default until acceptance and cutover.</p>
     <div class="grid two">
       <div class="card"><h3>Host infrastructure, not repo control</h3><p>District owns the shared machinery. Gate commands, reviewable files, and project decisions stay with each Factory. It shells out to public commands rather than importing the engine's internals.</p></div>
       <div class="card"><h3>Operational attention, not project noise</h3><p>A failing runner and a failing product test are different events. Ordinary CI waits, review revisions, and human decisions do not independently turn into fleet incidents.</p></div>
       <div class="card"><h3>Unknown is an answer</h3><p>Missing or stale observations stay visible. Re-reading a cache does not make old evidence fresh, and an unavailable snapshot does not prove that a dispatcher stopped.</p></div>
-      <div class="card"><h3>Evidence before animation</h3><p>The approved graphical direction uses equally weighted factories and concurrent execution lanes, not taller buildings for bigger repos. Motion will describe observed activity, never fictional progress or an invented ETA.</p></div>
+      <div class="card"><h3>Evidence before animation</h3><p>The implemented graphical Overview uses equally weighted factories and concurrent execution lanes, not taller buildings for bigger repos. Its motion describes observed activity, never fictional progress or an invented ETA; detailed Flows and Brief graphics remain separate held work.</p></div>
     </div>
     <p class="sources"><a href="https://github.com/mikeroySoft/district/blob/main/OPERATIONS-CONSOLE-SPEC.md">Read the approved operations-console specification</a> · One operator, one Linux host. Multi-host orchestration, team management, and an LLM-generated Brief are outside this console's scope.</p>
   </section>
@@ -284,15 +284,36 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="changelog">
     <div class="kicker">Changelog</div>
     <h2>From fleet registry to operational evidence.</h2>
-    <p class="lede">Selected milestones through September 10, 2026. Dates below use UTC merge history for PRs; these are source milestones, not invented version releases or a claim about every installed host.</p>
+    <p class="lede">Selected milestones through September 18, 2026. Dates below use UTC merge history for PRs; these are source milestones, not tagged releases or a claim about every installed host.</p>
     <ol class="timeline">
       <li>
-        <div><time datetime="2026-09-10">September 10, 2026</time><span class="status shipped">Shipped</span></div>
+        <div><time datetime="2026-09-18">September 18, 2026</time><span class="status shipped">Merged</span></div>
+        <div>
+          <h3>An on-demand fleet review joins the command line.</h3>
+          <p><code>district report</code> prints one read-only Markdown report from a bounded, non-atomic observation round and existing metric caches. It retains source ages, lists every registered repository and coverage gap, discloses actual producer windows and bounded GitHub queries, labels partial counts, and pools rates only when numerators, denominators, and windows are compatible.</p>
+          <p class="decision"><strong>Boundary:</strong> this is an operator-requested snapshot, not a scheduled report, provider-written narrative, new collector, automatic publication, or claim of autonomous delivery.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/pull/52">Report #52</a> · <a href="https://github.com/mikeroySoft/district/issues/51">Issue #51</a> · <a href="https://github.com/mikeroySoft/district/commit/3ab332d">Source milestone 3ab332d</a></p>
+        </div>
+      </li>
+      <li>
+        <div><time datetime="2026-09-10">September 10, 2026</time><span class="status shipped">Merged</span></div>
         <div>
           <h3>District can update itself without updating the fleet.</h3>
-          <p><code>district update</code> pins an official commit with successful CI, prepares it before downtime, preserves the dashboard bind and active District timers, and verifies the replacement collector. Query-only planning, offline rollback, and a retained recovery helper cover both normal upgrades and interrupted replacements.</p>
-          <p class="decision"><strong>Why:</strong> upgrading the fleet manager must not also upgrade Factory, rewrite units, or depend on the installation being replaced for recovery.</p>
-          <p class="sources"><a href="https://github.com/mikeroySoft/district/blob/main/skills/district/SKILL.md#update-district">Update and recovery runbook</a></p>
+          <ul>
+            <li><code>district update</code> pins an official commit with successful CI, prepares it before downtime, preserves the dashboard bind and active District timers, and verifies the replacement collector. Query-only planning, offline rollback, and a retained recovery helper cover both normal upgrades and interrupted replacements.</li>
+            <li>Separately, a shared Factory engine reinstall now preserves the optional <code>[defaults].factory_extras</code> selected in the host registry instead of silently returning to a bare install.</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> District self-update must not also update Factory or rewrite units; an explicit Factory reinstall must retain the operator's selected extras.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/blob/main/skills/district/SKILL.md#update-district">District update and recovery</a> · <a href="https://github.com/mikeroySoft/district/commit/cc66f1b">Factory extras preservation cc66f1b</a></p>
+        </div>
+      </li>
+      <li>
+        <div><time datetime="2026-09-09">September 9, 2026</time><span class="status shipped">Merged · implementation</span></div>
+        <div>
+          <h3>The graphical Overview renders observed fleet activity.</h3>
+          <p>Stable, equally weighted diagrams show concurrent stage occupancy, capacity, freshness, findings, resources, and bounded recent activity. Fresh confirmed active stages may pulse; distinct observed transitions and completions animate once, with watch, pause, hidden-tab, reduced-motion, keyboard, and narrow-screen safeguards.</p>
+          <p class="decision"><strong>Still gated:</strong> merge is not human acceptance or cutover. A real fresh-active pulse, real resource/capacity waits, and real capped/unexpected-stop observations remain uncaptured or fixture-only; the operator's combined Overview/Flows visual acceptance is pending.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/issues/27">D04 · #27</a> · <a href="https://github.com/mikeroySoft/district/commit/7e17b14">Source milestone 7e17b14</a> · <a href="https://github.com/mikeroySoft/district/blob/main/docs/evidence/d04/README.md">Evidence and remaining exit gap</a></p>
         </div>
       </li>
       <li>
@@ -347,13 +368,13 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="roadmap">
     <div class="kicker">Roadmap</div>
     <h2>Make the machinery readable. Then make it the home screen.</h2>
-    <p class="lede">The shared state, collector, LAN boundary, and scoped shell are merged. This is the remaining console sequence as of September 8, 2026 — not a release-date promise.</p>
+    <p class="lede">Shared state, collection, the LAN boundary, the scoped shell, and D04's graphical Overview implementation are merged. As of September 18, 2026, the current held console milestone is D05 Flows, followed by D06 Brief and the acceptance-gated management/cutover sequence — not a release-date promise.</p>
     <div class="grid three">
       <div class="card">
-        <span class="status next">Next · released to intake</span>
+        <span class="status shipped">Implemented · merged September 9</span>
         <h3>Graphical Overview</h3>
-        <p>Stable factory positions, concurrent stage occupancy, capacity, source freshness, and bounded recent activity. Watch mode and motion tied to real observations, with reduced-motion and pause controls.</p>
-        <p class="sources"><a href="https://github.com/mikeroySoft/district/issues/27">D04 · #27</a> — open, not merged.</p>
+        <p>Stable factory positions, concurrent stage occupancy, capacity, source freshness, bounded activity, and evidence-backed motion are implemented. Real fresh-active pulse, resource/capacity-wait, and capped/stopped observations are still incomplete or fixture-only; combined operator visual acceptance remains pending.</p>
+        <p class="sources"><a href="https://github.com/mikeroySoft/district/issues/27">D04 · #27</a> · <a href="https://github.com/mikeroySoft/district/commit/7e17b14">merged source</a>.</p>
       </div>
       <div class="card">
         <span class="status">Following · held</span>
@@ -368,7 +389,7 @@ rocm-app   capped             <span class="att">attention</span>
         <p class="sources"><a href="https://github.com/mikeroySoft/district/issues/30">D08 · Management #30</a> · <a href="https://github.com/mikeroySoft/district/issues/31">D09 · Cutover #31</a>.</p>
       </div>
     </div>
-    <p class="note"><strong>Release is not completion.</strong> “Released to intake” means eligible for the Factory pipeline, not shipped. Held work waits for its dependencies and operator checkpoints. The current default remains Atlas; successful CI alone does not authorize the console cutover.</p>
+    <p class="note"><strong>Merged is not accepted or cut over.</strong> D04 is implemented in source, but its remaining live-state evidence and the operator's combined Overview/Flows visual checkpoint still apply. D05 Flows #28, D06 Brief #29, management #30, and cutover #31 remain open and held. Atlas remains the default; successful CI alone does not authorize console cutover.</p>
     <details>
       <summary>Also on the horizon — open backlog, not part of the console release promise</summary>
       <ul>
@@ -394,6 +415,7 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district apply                        <span class="c"># reconcile units, labels, doctor, caps, policy</span>
 <span class="p">$</span> district dashboard --install          <span class="c"># dashboard + hourly metrics and apply timers</span>
 <span class="p">$</span> district status
+<span class="p">$</span> district report                       <span class="c"># on-demand read-only Markdown review on stdout</span>
 <span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span></pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
