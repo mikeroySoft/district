@@ -10,6 +10,7 @@ COMMANDS = {
     "apply": ("apply", "main", "reconcile the host to the registry; --upgrade reinstalls factory"),
     "doctor": ("doctor", "main", "check District's host prerequisites"),
     "status": ("status", "main", "fleet operations: exit 1 attention, 2 unknown observation, 0 normal"),
+    "report": ("report", "main", "print a read-only Markdown fleet review"),
     "rm": ("rm", "main", "remove a repository's units and registry entry; repo files untouched"),
     "metrics": ("metrics", "main", "per-factory git/gh metrics (cached hourly); --refresh recollects"),
     "dashboard": ("dashboard", "main", "serve the District Atlas and management page (default port 8760)"),

@@ -206,13 +206,14 @@ rocm-app   capped             <span class="att">attention</span>
 
   <section id="commands">
     <div class="kicker">Commands</div>
-    <h2>Eight verbs. Each one shells out to the host tools it checks or manages.</h2>
+    <h2>Nine verbs. Each one shells out to the host tools it checks or manages.</h2>
     <p class="lede">District never imports from mikeroySoft/factory and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
       <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
       <div class="k">district apply</div><div class="v">Reconcile units, labels, doctor checks, failure caps, and host policy. Hourly reconciliation is available through <code>dashboard --install</code>. <code>--upgrade</code> waits for all managed passes before replacing the shared engine; <code>--reset SLUG</code> requires a successful pass before restoring a capped timer.</div>
       <div class="k">district doctor</div><div class="v">Check District's host prerequisites, registered repository remotes, dashboard ports, package policy, and units. Reports every check as <code>PASS</code>, <code>WARN</code>, or <code>FAIL</code>.</div>
       <div class="k">district status</div><div class="v">Operating state, execution state, observation quality, and evidence-backed findings, with version and project metrics alongside. Text or <code>--json</code>; exit 0 for normal, 1 for operational attention, 2 for unknown without attention.</div>
+      <div class="k">district report</div><div class="v">Print one read-only Markdown fleet review from a bounded observation round and existing metric caches. Every repository and source gap stays visible; rates are pooled only from compatible producer counts and windows.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
       <div class="k">district dashboard</div><div class="v">Serve the shared cached fleet and scoped console. Atlas and management remain at the default route until cutover. Optional LAN viewing is read-only; management stays on direct localhost access. <a href="#console">See current routes and access boundaries.</a></div>
       <div class="k">district update</div><div class="v">Resolve an official ref to one immutable SHA, require the successful <code>ci.yml</code> <code>test</code> job for that SHA, and transactionally replace only District's uv tool. Supports query-only <code>--dry-run</code>, machine-readable <code>--json</code>, and retained offline <code>--rollback</code>; Factory and unit files are unchanged.</div>

@@ -252,6 +252,13 @@ estimated:
 the atlas share one source. Metrics that need `git`/`gh` are collected on a
 timer (hourly is enough), not on page load.
 
+`district report` prints an explicitly requested, read-only Markdown review from
+one bounded fleet observation and the metric caches attached to it. It retains
+each source timestamp, unavailable or stale fields, bounded GitHub query limits,
+and the `status` operational exit semantics. Fleet totals disclose incomplete
+coverage; rates are pooled only from compatible producer numerators,
+denominators and windows. It does not refresh caches or reconstruct history.
+
 ### 5.8 Per-factory engine version
 
 A factory may pin an engine version: `[repo."owner/name".engine] version =
