@@ -20,12 +20,12 @@ AT = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
 
 
 def entry(*, assessment="normal", observed="2026-09-17T11:59:00Z", cache=True,
-          snapshot=True, quality="fresh") -> dict:
+          snapshot=True, quality="fresh", tickets=None, error=None) -> dict:
     snap = None
     if snapshot:
         snap = {
             "generated_at": observed,
-            "tickets": [{"stage": "escalated"}, {"stage": "worker"}],
+            "tickets": [{"stage": "escalated"}, {"stage": "worker"}] if tickets is None else tickets,
             "metrics": {
                 "first_pass": 0.75,
                 "first_pass_numerator": 3,
@@ -46,12 +46,12 @@ def entry(*, assessment="normal", observed="2026-09-17T11:59:00Z", cache=True,
             "agent_prs_30d": 2, "open_prs": 1,
             "open_by_label": {"ready-for-human": 4},
         }
+    failure = error if snapshot else "factory dashboard unavailable"
     return {
         "assessment": assessment, "observation": quality, "snap": snap, "metrics": metrics,
-        "error": None if snapshot else "factory dashboard unavailable",
+        "error": failure,
         "sources": [{"id": "factory.snapshot", "observed_at": observed if snapshot else None,
-                     "observation": quality if snapshot else "unavailable",
-                     "error": None if snapshot else "factory dashboard unavailable"}],
+                     "observation": quality if snapshot else "unavailable", "error": failure}],
     }
 
 
@@ -103,6 +103,19 @@ class ReportTest(unittest.TestCase):
         self.assertIn("First-gate pass aggregate: unavailable", output)
         self.assertIn("Review-bounce aggregate: unavailable", output)
 
+    def test_errored_snapshot_ticket_counts_are_unavailable_not_zero(self) -> None:
+        output = report.render({"a/errored": entry(assessment="unknown", tickets=[],
+                                                  error="github: unavailable")}, AT)
+        self.assertIn("Source notes: factory.snapshot: github: unavailable", output)
+        self.assertIn("- Current escalated tickets: unavailable", output)
+        self.assertIn("Comparable count coverage: 0/1 repositories", output)
+        self.assertIn("Totals below are partial", output)
+        self.assertIn("- Current escalated tickets: unavailable\n- Observation-time range", output)
+        clean = report.render({"a/clean": entry(tickets=[])}, AT)
+        self.assertIn("- Current escalated tickets: 0\n", clean)
+        self.assertIn("Comparable count coverage: 1/1 repositories", clean)
+        self.assertIn("- Current escalated tickets: 0 (from 1/1 repositories)", clean)
+
     def test_empty_fleet_and_operational_exit_semantics(self) -> None:
         self.assertIn("Registered repositories: 0", report.render({}, AT))
         cases = [({}, 0), ({"a/repo": entry(assessment="unknown")}, 2),
@@ -125,6 +138,55 @@ class ReportTest(unittest.TestCase):
 
 
 class ReportCLITest(DistrictCase):
+    def _cache(self, snap: dict) -> None:
+        cache = metrics.cache_path("acme/widgets")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({
+            "collected_at": snap["generated_at"],
+            "merged_prs_30d": 3, "agent_prs_30d": 1, "open_prs": 2,
+        }))
+
+    def test_errored_snapshot_reports_unavailable_escalations_like_status(self) -> None:
+        repo = self.repo(toml="")
+        self.units("acme/widgets")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        snap = dashboard(errors=["github: unavailable"])
+        snap["tickets"] = []
+        self._cache(snap)
+        self.stub("factory",
+                  ("dashboard --runtime-json", json.dumps(runtime(
+                      "acme/widgets", stamp=snap["generated_at"]))),
+                  ("dashboard --json", json.dumps(snap), 1),
+                  ("*", "unexpected Factory command", 99))
+        for name in ("gh", "systemctl", "uv"):
+            self.stub(name, ("*", "unexpected management/collector command", 99))
+        for log in self.bin.glob("*.log"):
+            log.unlink()
+        roots = [Path(os.environ["XDG_CONFIG_HOME"]),
+                 Path(os.environ["XDG_CACHE_HOME"]), repo]
+        before = {p: p.read_bytes() for root in roots
+                  for p in root.rglob("*") if p.is_file()}
+        registry = host.load()
+        code, out = self.district("report")
+        self.assertEqual(code, 2, out)
+        self.assertIn("- Current escalated tickets: unavailable\n", out)
+        self.assertIn("- Current escalated tickets: unavailable\n- Observation-time range", out)
+        self.assertIn("github: unavailable", out)
+        self.assertIn("Merged PRs (trailing 30 days, bounded at 500): 3", out)
+        self.assertIn("Merged PRs (trailing 30 days): 3 (from 1/1 repositories)", out)
+        self.assertIn("Comparable count coverage: 0/1 repositories", out)
+        self.assertIn("Totals below are partial", out)
+        self.assertCountEqual(self.calls("factory"),
+                              ["dashboard --runtime-json", "dashboard --json"])
+        for name in ("gh", "systemctl", "uv"):
+            self.assertEqual(self.calls(name), [])
+        self.assertEqual(host.load(), registry)
+        self.assertEqual({p: p.read_bytes() for root in roots
+                          for p in root.rglob("*") if p.is_file()}, before)
+        status_code, status_out = self.district("status")
+        self.assertEqual(status_code, code, status_out)
+        self.assertRegex(status_out, r"unknown.*\?")
+
     def test_report_reads_disposable_fleet_without_mutation_or_collection(self) -> None:
         repo = self.repo(toml="")
         self.units("acme/widgets")
@@ -133,12 +195,7 @@ class ReportCLITest(DistrictCase):
                 host.save({"repo": {} if case == "empty" else {
                     "acme/widgets": {"path": str(repo)}}})
                 snap = dashboard()
-                cache = metrics.cache_path("acme/widgets")
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                cache.write_text(json.dumps({
-                    "collected_at": snap["generated_at"],
-                    "merged_prs_30d": 3, "agent_prs_30d": 1, "open_prs": 2,
-                }))
+                self._cache(snap)
                 self.stub("factory",
                           ("dashboard --runtime-json", json.dumps(runtime(
                               "acme/widgets", stamp=snap["generated_at"]))),

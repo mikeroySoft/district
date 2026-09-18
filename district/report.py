@@ -10,6 +10,8 @@ from district import host, status
 
 
 GITHUB_LIMIT_NOTE = "GitHub query limits: merged PRs 500; open PRs 1000; caches have no completeness flag."
+COUNT_LABELS = ("Merged PRs (trailing 30 days)", "Merged PRs from `agent/` branches (trailing 30 days)",
+                "Current open PRs", "Current escalated tickets")
 UNAVAILABLE_AGGREGATE = "unavailable (incompatible or unspecified producer windows/cohorts)"
 
 
@@ -112,8 +114,10 @@ def _repository(slug: str, entry: dict, at: datetime) -> tuple[list[str], dict]:
     cached = _mapping(entry.get("metrics"))
     snapshot_metrics = _mapping(snap.get("metrics"))
     tickets = snap.get("tickets")
+    # A snapshot the producer reported an error for carries no authoritative ticket list, so
+    # its counts stay unavailable rather than zero (same condition as `status.row`'s `esc`).
     current_escalated = (sum(item.get("stage") == "escalated" for item in tickets if isinstance(item, dict))
-                         if isinstance(tickets, list) else None)
+                         if isinstance(tickets, list) and not entry.get("error") else None)
     timestamps = _source_times(entry)
     lines = [f"## {slug}", "", f"- Operational assessment: {entry.get('assessment', 'unknown')}",
              f"- Observation quality: {entry.get('observation', 'unavailable')}",
@@ -148,7 +152,7 @@ def _repository(slug: str, entry: dict, at: datetime) -> tuple[list[str], dict]:
     lines += human or ["- Human resolution/intervention measurements: unavailable"]
     lines.append("")
     counts = tuple(_integer(cached.get(key)) for key in ("merged_prs_30d", "agent_prs_30d", "open_prs")) if cached else (None,) * 3
-    return lines, {"slug": slug, "counts": counts, "current_escalated": current_escalated,
+    return lines, {"slug": slug, "counts": counts + (current_escalated,),
                    "first_pass": first_pool, "bounce_rate": bounce_pool, "timestamps": timestamps}
 
 
@@ -180,7 +184,11 @@ def render(entries: dict[str, dict], generated_at: datetime | None = None) -> st
         lines += section
         summaries.append(summary)
     covered = sum(all(value is not None for value in item["counts"]) for item in summaries)
-    totals = [sum(item["counts"][index] for item in summaries if item["counts"][index] is not None) for index in range(3)]
+    totals = []
+    for index, label in enumerate(COUNT_LABELS):
+        available = [item["counts"][index] for item in summaries if item["counts"][index] is not None]
+        totals.append(f"- {label}: " + (f"{sum(available)} (from {len(available)}/{registered} repositories)"
+                                        if available else "unavailable"))
     times = sorted({timestamp for item in summaries for timestamp in item["timestamps"]})
     rate_windows = "; ".join(
         f"{item['slug']}={json.dumps((item['first_pass'] or item['bounce_rate'] or (None, None, None))[2], sort_keys=True)}"
@@ -188,11 +196,9 @@ def render(entries: dict[str, dict], generated_at: datetime | None = None) -> st
     ) or "none"
     partial = covered != registered
     lines += ["## Fleet summary", "", f"Comparable count coverage: {covered}/{registered} repositories",
-              "Totals below are partial because comparable cached metrics are unavailable for one or more repositories."
+              "Totals below are partial because comparable measurements are unavailable for one or more repositories."
               if partial else "Totals below cover every registered repository but remain bounded by the disclosed GitHub query limits.",
-              f"- Merged PRs (trailing 30 days): {totals[0]}",
-              f"- Merged PRs from `agent/` branches (trailing 30 days): {totals[1]}",
-              f"- Current open PRs: {totals[2]}",
+              *totals,
               f"- Observation-time range: {times[0]} to {times[-1]}" if times else "- Observation-time range: unavailable",
               f"- Producer rate windows: {rate_windows}",
               f"- {_aggregate_rate(summaries, 'first_pass', 'First-gate pass', registered)}",
