@@ -1,0 +1,17 @@
+[package]
+name = "district-app"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "PROTOTYPE: native District operator console (throwaway)"
+
+[dependencies]
+gpui-kit = "0.6.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "3", features = ["json"] }
+chrono = "0.4"
+parking_lot = "0.12"
+
+[profile.dev]
+opt-level = 1
