@@ -403,6 +403,25 @@ class ApplyTest(DistrictCase):
         self.assertIn("start factory-widgets.service", self.calls("systemctl"))
         self.assertIn("install", self.calls("factory"))
 
+    def test_upgrade_installs_renamed_factory_package(self) -> None:
+        src = self.tmp / "factory"
+        responses = [
+            subprocess.CompletedProcess([], 0, stdout=""),
+            subprocess.CompletedProcess([], 0, stdout="installed\n", stderr=""),
+            subprocess.CompletedProcess([], 0, stdout="0.2.0\n"),
+        ]
+        with mock.patch("district.host.run", side_effect=responses) as run:
+            apply.upgrade({"defaults": {"factory_source": str(src)}}, [])
+        self.assertEqual(
+            run.call_args_list,
+            [
+                mock.call(["git", "status", "--porcelain"], cwd=src, check=True),
+                mock.call(["uv", "tool", "install", "--reinstall", "--from", str(src), "factory"]),
+                mock.call(["factory", "--version"], check=True),
+            ],
+        )
+
+
     def test_upgrade_restores_timers_on_failure(self) -> None:
         src = self.tmp / "af"
         src.mkdir()
