@@ -459,6 +459,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--no-edit", action="store_true", help="do not ask or open $EDITOR")
     parser.add_argument("--dry-run", action="store_true", help="print the proposal (slug, port, fork parent, checks) and write nothing")
     args = parser.parse_args(argv)
+    os.environ["PATH"] = host.service_path()
 
     data = host.load()
     if args.dry_run:

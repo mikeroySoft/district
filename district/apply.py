@@ -237,6 +237,8 @@ def main(argv: list[str]) -> int:
                         help="reinstall factory from [defaults].factory_source first, at REF (tag, branch, sha; default HEAD)")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
     args = parser.parse_args(argv)
+    # Factory units bake the installing process PATH; keep wrappers after real installs.
+    os.environ["PATH"] = host.service_path()
     lock_path = host.operation_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("a") as lock:
