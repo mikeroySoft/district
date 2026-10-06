@@ -47,7 +47,7 @@ const ASSESSMENT_COLOR = { normal: '#4CBB6C', attention: '#E3A83B', unknown: '#8
 # Buildings that describe code, not fleet state. gx,gy grid position; w,d footprint; h height px; kind = silhouette.
 STATIC_BLOCKS = r"""  // GitHub (back row)
   { id:'issues', name:'Issues & labels', cat:'ext', gx:7.5, gy:0.3, w:2.2, d:2, h:8, kind:'pad',
-    blurb:'The ticket queue for every factory. Factory labels carry state: needs-viability/needs-review (manager opt-in), needs-triage → ready-for-agent (or needs-info) → ready-for-human on escalation; factory-approved marks a reviewed PR; chore/initiative/wontfix-proposal/factory-protected-override round out the set.',
+    blurb:'The ticket queue for every factory. Issue labels carry state: needs-viability/needs-review (manager opt-in), needs-triage → ready-for-agent (or needs-info) → ready-for-human on escalation; chore, initiative, and wontfix-proposal round out the issue set. factory-approved is a PR label, not an issue metric.',
     files:[ ['mikeroySoft/factory@8f9baad/agent_factory/config.py',21,'the six label constants'], ['mikeroySoft/factory@8f9baad/agent_factory/dispatch.py',150,'frontier(): ready-for-agent, unassigned, unblocked'] ],
     conn:'Claimed and escalated by the dispatcher; labelled by triage.' },
   { id:'prs', name:'Pull requests + CI', cat:'ext', gx:14, gy:0.3, w:2.2, d:2, h:8, kind:'pad',

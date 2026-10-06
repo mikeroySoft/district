@@ -22,12 +22,12 @@ from district import host
 from district.apply import hours
 from district.host import DistrictError, run
 
-# Labels factory.config.LABELS creates (factory tip bb37c85). Keep in sync with Factory
+# Issue labels from factory.config.LABELS (factory tip bb37c85). Excludes PR-only
+# labels factory-approved and factory-protected-override. Keep in sync with Factory
 # until Factory exports a machine-readable contract for the label set.
 FACTORY_LABELS = (
     "needs-viability", "needs-review", "needs-triage", "needs-info", "ready-for-agent",
-    "ready-for-human", "factory-approved", "chore", "factory-protected-override",
-    "wontfix-proposal", "initiative",
+    "ready-for-human", "chore", "wontfix-proposal", "initiative",
 )
 LANGUAGES = {
     ".rs": "Rust", ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript",

@@ -507,10 +507,11 @@ class AddTest(DistrictCase):
         self.assertEqual(set(host.SHARED_TABLES) - {"gate"}, set(add.HOST_TABLES))
         self.assertEqual(metrics.FACTORY_LABELS, (
             "needs-viability", "needs-review", "needs-triage", "needs-info", "ready-for-agent",
-            "ready-for-human", "factory-approved", "chore", "factory-protected-override",
-            "wontfix-proposal", "initiative",
+            "ready-for-human", "chore", "wontfix-proposal", "initiative",
         ))
         self.assertNotIn("wontfix", metrics.FACTORY_LABELS)
+        self.assertNotIn("factory-approved", metrics.FACTORY_LABELS)
+        self.assertNotIn("factory-protected-override", metrics.FACTORY_LABELS)
 
 
 class ApplyTest(DistrictCase):
