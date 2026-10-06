@@ -95,5 +95,5 @@ Done when installed provenance and CLI match the reported SHA, a formerly active
 
 - Use `district apply` for generated systemd units; host files are District-owned.
 - Keep `[[gate.check]]`, `[leak_scan]`, `[repo].upstream`, the issue template, and lessons committed in each managed repository.
-- Keep triage, workers, reviewer, dashboard port, timer cadence, bind host, gate lock, package-age policy, and the managed-repo registry in the host config.
+- Keep triage, workers, worker_wrap, reviewer, manager, dashboard port, timer cadence, bind host, gate lock, package-age policy, and the managed-repo registry in the host config.
 - District shells out to `factory`; diagnose per-repository pipeline behavior with the `factory` skill rather than reproducing it here.

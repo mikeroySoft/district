@@ -24,9 +24,10 @@ from district import host
 from district.host import DistrictError, run
 
 CONFIG_NAME = ".factory.toml"
-# Same split as agent-factory's config.HOST_TABLES / HOST_KEYS; `factory doctor`
-# reports these as "host settings committed" (the adopt signal).
-HOST_TABLES = ("triage", "workers", "review", "install")
+# Same split as factory.config.HOST_TABLES / HOST_KEYS (factory tip bb37c85);
+# `factory doctor` reports these as "host settings committed" (the adopt signal).
+# Longer-term: Factory should export a machine-readable contract flag for these lists.
+HOST_TABLES = ("triage", "workers", "worker_wrap", "review", "manager", "install")
 HOST_KEYS = {"dashboard": ("port",), "gate": ("lock",)}
 
 HEADER = re.compile(r"^\s*(\[\[?)\s*([^\]]*?)\s*\]\]?\s*(?:#.*)?$")

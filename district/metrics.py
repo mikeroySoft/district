@@ -22,8 +22,13 @@ from district import host
 from district.apply import hours
 from district.host import DistrictError, run
 
-# Issue labels agent-factory creates (config.py LABELS); factory-approved is a PR label.
-FACTORY_LABELS = ("needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix")
+# Labels factory.config.LABELS creates (factory tip bb37c85). Keep in sync with Factory
+# until Factory exports a machine-readable contract for the label set.
+FACTORY_LABELS = (
+    "needs-viability", "needs-review", "needs-triage", "needs-info", "ready-for-agent",
+    "ready-for-human", "factory-approved", "chore", "factory-protected-override",
+    "wontfix-proposal", "initiative",
+)
 LANGUAGES = {
     ".rs": "Rust", ".py": "Python", ".ts": "TypeScript", ".tsx": "TypeScript", ".js": "JavaScript", ".jsx": "JavaScript",
     ".mjs": "JavaScript", ".html": "HTML", ".css": "CSS", ".md": "Markdown", ".toml": "TOML", ".yml": "YAML", ".yaml": "YAML",

@@ -86,7 +86,7 @@ def next_port(data: dict) -> int:
     return max([BASE_PORT, *ports]) + 1
 
 
-SHARED_TABLES = ("triage", "workers", "review", "install", "gate")  # never dashboard: port is per-repo
+SHARED_TABLES = ("triage", "workers", "worker_wrap", "review", "manager", "install", "gate")  # never dashboard: port is per-repo
 
 
 def dedupe(data: dict) -> list[str]:
