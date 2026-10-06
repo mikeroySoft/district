@@ -47,7 +47,7 @@ const ASSESSMENT_COLOR = { normal: '#4CBB6C', attention: '#E3A83B', unknown: '#8
 # Buildings that describe code, not fleet state. gx,gy grid position; w,d footprint; h height px; kind = silhouette.
 STATIC_BLOCKS = r"""  // GitHub (back row)
   { id:'issues', name:'Issues & labels', cat:'ext', gx:7.5, gy:0.3, w:2.2, d:2, h:8, kind:'pad',
-    blurb:'The ticket queue for every factory. Six fixed labels carry state: needs-triage → ready-for-agent (or needs-info) → ready-for-human on escalation; factory-approved marks a reviewed PR.',
+    blurb:'The ticket queue for every factory. Issue labels carry state: needs-viability/needs-review (manager opt-in), needs-triage → ready-for-agent (or needs-info) → ready-for-human on escalation; chore, initiative, and wontfix-proposal round out the issue set. factory-approved is a PR label, not an issue metric.',
     files:[ ['mikeroySoft/factory@8f9baad/agent_factory/config.py',21,'the six label constants'], ['mikeroySoft/factory@8f9baad/agent_factory/dispatch.py',150,'frontier(): ready-for-agent, unassigned, unblocked'] ],
     conn:'Claimed and escalated by the dispatcher; labelled by triage.' },
   { id:'prs', name:'Pull requests + CI', cat:'ext', gx:14, gy:0.3, w:2.2, d:2, h:8, kind:'pad',
@@ -61,7 +61,7 @@ STATIC_BLOCKS = r"""  // GitHub (back row)
 
   // Host runtime (right)
   { id:'llm', name:'Local triage model', cat:'runtime', gx:27.5, gy:13, w:2.2, d:2, h:8, kind:'pad',
-    blurb:'An OpenAI-compatible chat endpoint on this host running an open model. Only triage talks to it: a deterministic lint first (body ≥ 80 chars, acceptance criteria present), then one JSON completion decides the label. wontfix is only ever proposed.',
+    blurb:'An OpenAI-compatible chat endpoint on this host running an open model. Only triage talks to it: a deterministic lint first (body ≥ 80 chars, acceptance criteria present), then one JSON completion decides the label. wontfix-proposal is only ever proposed.',
     files:[ ['mikeroySoft/factory@8f9baad/agent_factory/triage.py',108,'call_llm(): one chat completion per issue'], ['mikeroySoft/factory@8f9baad/agent_factory/triage.py',203,'decision → label'] ],
     conn:'Endpoint and model name come from the host file, not the repos.' },
   { id:'gpulock', name:'Host lock (exclusive checks)', cat:'runtime', gx:32, gy:13.2, w:2, d:1.6, h:10, kind:'gate',
@@ -79,11 +79,11 @@ STATIC_BLOCKS = r"""  // GitHub (back row)
 
   // Engine (middle band) — LOC-scaled at 8f9baad
   { id:'config', name:'config.py (host layer)', cat:'engine', gx:6.8, gy:6, w:2.2, d:2, h:16, kind:'slab',
-    blurb:'267 lines: the single source of every repo-specific value. Loads the committed .factory.toml over the host file: [defaults] < [repo."owner/name"] < repo. Only host-owned tables (triage, workers, review, install, dashboard.port, gate.lock) may come from the host; gate checks and upstream never do, so a clone elsewhere runs the same gate.',
+    blurb:'267 lines: the single source of every repo-specific value. Loads the committed .factory.toml over the host file: [defaults] < [repo."owner/name"] < repo. Only host-owned tables (triage, workers, worker_wrap, review, manager, install, dashboard.port, gate.lock) may come from the host; gate checks and upstream never do, so a clone elsewhere runs the same gate.',
     files:[ ['mikeroySoft/factory@8f9baad/agent_factory/config.py',218,'load(): layered merge'], ['mikeroySoft/factory@8f9baad/agent_factory/config.py',49,'HOST_TABLES / HOST_KEYS'] ],
     conn:'Read by every command; reads the host file District writes.' },
   { id:'triage', name:'triage.py', cat:'engine', gx:10.2, gy:6, w:2, d:2, h:16, kind:'hall',
-    blurb:'289 lines. Labels every needs-triage issue: lint, then the local model. Outcomes: ready-for-agent with an agent brief, needs-info with the question, ready-for-human, or a wontfix proposal comment.',
+    blurb:'289 lines. Labels every needs-triage issue: lint, then the local model. Outcomes: ready-for-agent with an agent brief, needs-info with the question, ready-for-human, or a wontfix-proposal comment.',
     files:[ ['mikeroySoft/factory@8f9baad/agent_factory/triage.py',247,'main()'], ['mikeroySoft/factory@8f9baad/agent_factory/triage.py',30,'endpoint from host config (FACTORY_LLM_URL override)'] ],
     conn:'Talks to the model and to Issues.' },
   { id:'dispatch', name:'dispatch.py', cat:'engine', gx:13.6, gy:6, w:3, d:3, h:20, kind:'hall',
@@ -189,7 +189,7 @@ STATIC_PATHS = r"""  { id:'p1', kind:'control', from:'systemd', to:'dispatch',
   { id:'p12', kind:'data', from:'triage', to:'issues',
     label:'triage → label',
     pts:[[11.2,7],[6.6,5.0],[6.6,2.6],[8.6,1.3]], lt:0.5, ldy:-10,
-    what:'Deterministic lint first (short body, missing acceptance criteria → needs-info with a question), then the model’s label. wontfix is proposed as a comment, never applied.',
+    what:'Deterministic lint first (short body, missing acceptance criteria → needs-info with a question), then the model’s label. wontfix-proposal is proposed as a comment, never applied.',
     cite:[[AF+'triage.py',203,'decision → label']],
     payload:{r:2.6, dur:4.2, kind:'data'} },
   { id:'p13', kind:'data', from:'dispatch', to:'state',

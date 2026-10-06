@@ -483,7 +483,35 @@ class AddTest(DistrictCase):
         with self.assertRaises(add.Refuse):
             add.lift("dashboard.port = 1\n")
         with self.assertRaises(add.Refuse):
-            add.lift("[gate]\nlock = '''\n/l'''\ntimeout = 1\n")
+            add.lift('[gate]\nlock = ' + "'''" + '\n/l' + "'''" + '\ntimeout = 1\n')
+
+    def test_lift_moves_worker_wrap_and_manager(self) -> None:
+        text = (
+            "[worker_wrap]\ncommand = ['sandbox', 'run']\n"
+            "[manager]\nmodel = 'qwen3:30b'\nrounds = 2\n"
+            "[gate]\ntimeout = 3\n"
+        )
+        new, lifted = add.lift(text)
+        self.assertEqual(lifted, {
+            "worker_wrap": {"command": ["sandbox", "run"]},
+            "manager": {"model": "qwen3:30b", "rounds": 2},
+        })
+        self.assertEqual(new, "[gate]\ntimeout = 3\n")
+
+    def test_factory_contract_lists_match_current_factory(self) -> None:
+        # Hardcoded against mikeroySoft/factory@bb37c85 until Factory exports a contract flag.
+        self.assertEqual(set(add.HOST_TABLES), {
+            "triage", "workers", "worker_wrap", "review", "manager", "install",
+        })
+        self.assertEqual(add.HOST_KEYS, {"dashboard": ("port",), "gate": ("lock",)})
+        self.assertEqual(set(host.SHARED_TABLES) - {"gate"}, set(add.HOST_TABLES))
+        self.assertEqual(metrics.FACTORY_LABELS, (
+            "needs-viability", "needs-review", "needs-triage", "needs-info", "ready-for-agent",
+            "ready-for-human", "chore", "wontfix-proposal", "initiative",
+        ))
+        self.assertNotIn("wontfix", metrics.FACTORY_LABELS)
+        self.assertNotIn("factory-approved", metrics.FACTORY_LABELS)
+        self.assertNotIn("factory-protected-override", metrics.FACTORY_LABELS)
 
 
 class ApplyTest(DistrictCase):
@@ -1029,7 +1057,11 @@ class DoctorTest(DistrictCase):
 GH_METRICS = [
     ("repo view *", json.dumps({"stargazerCount": 3, "forkCount": 1, "watchers": {"totalCount": 2}})),
     ("issue list * --state open *", json.dumps([
-        {"labels": [{"name": "ready-for-human"}, {"name": "bug"}]}, {"labels": [{"name": "needs-triage"}]}, {"labels": []},
+        {"labels": [{"name": "ready-for-human"}, {"name": "bug"}]},
+        {"labels": [{"name": "needs-triage"}]},
+        {"labels": [{"name": "needs-viability"}, {"name": "wontfix-proposal"}]},
+        {"labels": [{"name": "wontfix"}]},  # obsolete name: ignored
+        {"labels": []},
     ])),
     ("issue list * --state closed *", json.dumps([
         {"createdAt": "2026-09-01T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": [{"name": "Bug"}]},
@@ -1067,7 +1099,7 @@ class MetricsTest(DistrictCase):
         self.assertEqual((m["test_loc"], m["test_files"]), (2, 1))
         self.assertEqual((m["contributors"], m["commits"], m["top3_share"], m["commits_30d"], m["commits_7d"]), (1, 1, 1.0, 1, 1))
         self.assertEqual((m["stars"], m["forks"], m["watchers"]), (3, 1, 2))
-        self.assertEqual((m["open_issues"], m["open_by_label"], m["open_bugs"]), (3, {"ready-for-human": 1, "needs-triage": 1}, 1))
+        self.assertEqual((m["open_issues"], m["open_by_label"], m["open_bugs"]), (5, {"ready-for-human": 1, "needs-triage": 1, "needs-viability": 1, "wontfix-proposal": 1}, 1))
         self.assertEqual((m["open_prs"], m["merged_prs_30d"], m["agent_prs_30d"]), (2, 2, 1))
         self.assertEqual((m["closed_issues_30d"], m["closed_bugs_30d"], m["median_days_to_close"]), (3, 1, 1.0))
         self.assertEqual(m["traffic"], {"views": "unavailable", "clones": {"count": 40, "uniques": 9}})
