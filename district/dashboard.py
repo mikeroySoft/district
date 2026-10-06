@@ -247,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
 def units(host_arg: str | None, port: int) -> dict[str, str]:
     """District dashboard, metrics, and apply services and timers."""
     exe = f"{sys.executable} -m district"
-    env = f"Environment=PATH={os.environ['PATH']}\n"
+    env = f"Environment=PATH={host.service_path()}\n"
     bind = f" --host {host_arg}" if host_arg else ""
     return {
         "district-dashboard.service": (

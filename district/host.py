@@ -123,6 +123,80 @@ def unit_name(slug: str) -> str:
     return f"factory-{slug.rsplit('/', 1)[-1]}"
 
 
+def _home_local_bin() -> Path:
+    return Path.home() / ".local" / "bin"
+
+
+def _is_user_local_bin(entry: str) -> bool:
+    """True for ~/.local/bin and path-equivalent spellings (e.g. ~/.local/share/../bin)."""
+    if not entry:
+        return False
+    target = _home_local_bin()
+    if entry in {str(target), os.path.expanduser("~/.local/bin")}:
+        return True
+    try:
+        return Path(entry).resolve() == target.resolve()
+    except OSError:
+        return False
+
+
+def _is_tool_install(entry: str) -> bool:
+    """Real tool roots that should win over mise activation wrappers in ~/.local/bin."""
+    if not entry or _is_user_local_bin(entry):
+        return False
+    norm = entry.replace("\\", "/")
+    if "/.local/share/mise/installs/" in norm:
+        return True
+    if norm.rstrip("/").endswith("/.local/share/mise/shims") or "/.local/share/mise/shims/" in norm:
+        return True
+    if norm.rstrip("/").endswith("/.cargo/bin"):
+        return True
+    if "/.local/share/uv/tools/" in norm and norm.rstrip("/").endswith("/bin"):
+        return True
+    return False
+
+
+def service_path(raw: str | None = None) -> str:
+    """PATH for systemd units and for `factory install` subprocesses.
+
+    Interactive shells often put ~/.local/bin early. That directory holds mise
+    wrappers (e.g. `gh` → `mise use -g`) that stall under oneshot services.
+    Prefer real mise/cargo/uv install dirs, then keep ~/.local/bin afterward so
+    District, Factory, and other user tools remain reachable. When no tool-install
+    roots are present, only collapse duplicate ~/.local/bin entries.
+    """
+    path = os.environ.get("PATH", "") if raw is None else raw
+    parts = path.split(":")
+    deferred: list[str] = []
+    seen_deferred: set[str] = set()
+    remaining: list[str] = []
+    first_deferred_at: int | None = None
+    for entry in parts:
+        if entry and _is_user_local_bin(entry):
+            try:
+                key = str(Path(entry).resolve())
+            except OSError:
+                key = entry
+            if key not in seen_deferred:
+                seen_deferred.add(key)
+                deferred.append(entry)
+                if first_deferred_at is None:
+                    first_deferred_at = len(remaining)
+            continue
+        remaining.append(entry)
+    if not deferred:
+        return path
+    insert_at = 0
+    for i, entry in enumerate(remaining):
+        if entry and _is_tool_install(entry):
+            insert_at = i + 1
+    if insert_at == 0:
+        # No preferred roots: restore the first ~/.local/bin where it originally sat.
+        at = 0 if first_deferred_at is None else first_deferred_at
+        return ":".join(remaining[:at] + deferred + remaining[at:])
+    return ":".join(remaining[:insert_at] + deferred + remaining[insert_at:])
+
+
 def select(data: dict, slug: str | None) -> dict[str, dict]:
     """Registry entries to act on: all, or the one named (by slug or basename)."""
     all_repos = repos(data)

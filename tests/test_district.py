@@ -1402,11 +1402,11 @@ class DashboardTest(DistrictCase):
             ],
         )
         dashboard_service = (host.unit_dir() / "district-dashboard.service").read_text()
-        self.assertIn(f"Environment=PATH={os.environ['PATH']}", dashboard_service)
+        self.assertIn(f"Environment=PATH={host.service_path()}", dashboard_service)
         self.assertIn(f"ExecStart={sys.executable} -m district dashboard --port 8761 --no-open", dashboard_service)
         apply_service = (host.unit_dir() / "district-apply.service").read_text()
         self.assertIn("Type=oneshot", apply_service)
-        self.assertIn(f"Environment=PATH={os.environ['PATH']}", apply_service)
+        self.assertIn(f"Environment=PATH={host.service_path()}", apply_service)
         self.assertIn(f"ExecStart={sys.executable} -m district apply\n", apply_service)
         self.assertNotIn("--upgrade", apply_service)
         apply_timer = (host.unit_dir() / "district-apply.timer").read_text()
@@ -1420,6 +1420,46 @@ class DashboardTest(DistrictCase):
         self.assertIn("enable --now district-apply.timer", calls)
         self.assertIn("enable --now district-metrics.timer", calls)
         self.assertLess(calls.index("daemon-reload"), calls.index("enable --now district-apply.timer"))
+
+
+class ServicePathTest(unittest.TestCase):
+    def test_demotes_local_bin_after_mise_installs(self) -> None:
+        home = Path.home()
+        local = str(home / ".local" / "bin")
+        alias = str(home / ".local" / "share" / ".." / "bin")
+        cargo = str(home / ".cargo" / "bin")
+        mise_gh = str(home / ".local" / "share" / "mise" / "installs" / "gh" / "latest" / "bin")
+        shims = str(home / ".local" / "share" / "mise" / "shims")
+        raw = f"{cargo}:{local}:{mise_gh}:{shims}:/usr/bin:{alias}"
+        parts = host.service_path(raw).split(":")
+        self.assertEqual(parts[0], cargo)
+        self.assertLess(parts.index(mise_gh), parts.index(local))
+        self.assertLess(parts.index(shims), parts.index(local))
+        self.assertEqual(parts.count(local) + parts.count(alias), 1)
+        self.assertIn("/usr/bin", parts)
+
+    def test_keeps_local_bin_when_no_tool_roots(self) -> None:
+        home = Path.home()
+        local = str(home / ".local" / "bin")
+        raw = f"/opt/bin:{local}:/usr/bin:{local}"
+        parts = host.service_path(raw).split(":")
+        self.assertEqual(parts, ["/opt/bin", local, "/usr/bin"])
+
+    def test_apply_exports_service_path_for_factory(self) -> None:
+        home = Path.home()
+        local = str(home / ".local" / "bin")
+        mise_gh = str(home / ".local" / "share" / "mise" / "installs" / "gh" / "latest" / "bin")
+        bad = f"{local}:{mise_gh}:/usr/bin"
+        with mock.patch.dict(os.environ, {"PATH": bad}, clear=False):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                xdg = root / "xdg"
+                with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg), "XDG_CACHE_HOME": str(root / "cache")}):
+                    code = apply.main([])
+                    self.assertEqual(code, 0)
+                    self.assertEqual(os.environ["PATH"], host.service_path(bad))
+                    self.assertLess(os.environ["PATH"].split(":").index(mise_gh),
+                                    os.environ["PATH"].split(":").index(local))
 
 
 class DryRunTest(DistrictCase):
