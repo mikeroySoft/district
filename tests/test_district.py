@@ -548,6 +548,16 @@ class ApplyTest(DistrictCase):
     def test_npm_day_conversion_and_policy_env(self) -> None:
         self.assertEqual((apply.npm_days("24h"), apply.npm_days("36h"), apply.npm_days("1h"), apply.npm_days("3d")), (1, 2, 1, 3))
         self.assertEqual(apply.hours("90min"), 1.5)
+        self.assertEqual([apply.uv_exclude_newer(a) for a in ("24h", "2d", "120min", "90min", "1.5d", "0.4s")],
+                         ["24 hours", "48 hours", "2 hours", "5400 seconds", "36 hours", "1 seconds"])
+        envs = []
+        for at in (datetime(2026, 10, 7, 12, tzinfo=timezone.utc), datetime(2026, 10, 7, 13, tzinfo=timezone.utc)):
+            data = {"defaults": {"min_package_age": "24h"}}
+            with mock.patch.object(apply, "now", return_value=at):
+                status, _ = apply.policy(data)
+            envs.append(data["defaults"]["install"]["env"])
+        self.assertEqual(envs[0], envs[1])
+        self.assertEqual(status, "policy 24h (npm 1d, uv 24 hours)")
         with self.assertRaises(SystemExit):
             apply.hours("soon")
         self.register()
@@ -555,7 +565,7 @@ class ApplyTest(DistrictCase):
         self.assertEqual(code, 0, out)
         env = host.load()["defaults"]["install"]["env"]
         self.assertEqual(env["NPM_CONFIG_MIN_RELEASE_AGE"], "1")
-        self.assertRegex(env["UV_EXCLUDE_NEWER"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertEqual(env["UV_EXCLUDE_NEWER"], "24 hours")
         self.assertIn("policy 24h", out)
         self.assertIn("drift: .github/ISSUE_TEMPLATE/agent_task.md", out)
         self.assertEqual(self.calls("factory"), ["install", "init --labels-only", "doctor --json", "dashboard --json"])
