@@ -16,7 +16,7 @@ import shutil
 import sys
 import tempfile
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from district import host
@@ -54,8 +54,10 @@ def npm_days(age: str) -> int:
     return max(1, math.ceil(hours(age) / 24))
 
 
-def uv_exclude_newer(age: str, at: datetime | None = None) -> str:
-    return iso((at or now()) - timedelta(hours=hours(age)))
+def uv_exclude_newer(age: str) -> str:
+    """Relative uv duration (uv rejects fractional days); seconds round up so the cutoff never shrinks."""
+    s = math.ceil(round(hours(age) * 3600, 6))
+    return f"{s // 3600} hours" if s % 3600 == 0 else f"{s} seconds"
 
 
 def policy(data: dict) -> tuple[str, list[str]]:

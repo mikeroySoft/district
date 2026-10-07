@@ -206,10 +206,11 @@ Non-interactive: `--exclusive a,b --no-edit --check …`.
    Failure anywhere after disabling re-enables the timers before exiting.
 2. Supply-chain policy → **host `[install].env`**, not global package-manager
    config: `NPM_CONFIG_MIN_RELEASE_AGE=<days>` (duration → whole days, minimum
-   1), `UV_EXCLUDE_NEWER=<now − age, RFC 3339>`. `[defaults.min_package_age]`
-   default `"24h"`; `"0"` removes both. `cargo` on PATH → one WARN line.
-   Because `UV_EXCLUDE_NEWER` is absolute, units are re-rendered on every
-   `apply`; the value drifts by one apply interval (ponytail ledger).
+   1), `UV_EXCLUDE_NEWER=<age as relative uv duration>` (whole hours →
+   `"<N> hours"`, else whole seconds rounded up; uv rejects fractional days).
+   `[defaults.min_package_age]` default `"24h"`; `"0"` removes both. `cargo`
+   on PATH → one WARN line. The value is stable, so unchanged config leaves
+   units untouched.
 3. Per repo: `factory install` (host defaults; nonzero exit is a FAIL row),
    `factory init --labels-only`, `factory doctor --json`, `factory dashboard
    --json` (for `consecutive_failures` and `version`).
@@ -291,8 +292,6 @@ unavailable observation; `--upgrade` restores timers on failure.
 
 ## Ponytail ledger
 
-- `UV_EXCLUDE_NEWER` is absolute; refreshed per `apply`. Upgrade: relative
-  form if uv ships one.
 - KPIs computed in Python and HTML until the HTML reads `snapshot.metrics`.
 - Failure cap counts unit-level failures only; handled pipeline failures
   escalate (bounded by `max_attempts`) and are visible in `status` as
