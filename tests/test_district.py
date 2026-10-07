@@ -582,6 +582,37 @@ class ApplyTest(DistrictCase):
         self.assertEqual(code, 1)
         self.assertIn("FAIL install: units: nope", out)
 
+    def test_smoke_checks_installed_units_under_their_path(self) -> None:
+        self.register()
+        good = self.tmp / "good"
+        good.mkdir()
+        for name in ("gh", "factory"):
+            (good / name).write_text("#!/bin/sh\necho ok\n")
+            (good / name).chmod(0o755)
+        _, baseline = self.district("apply")
+        host.unit_dir().mkdir(parents=True, exist_ok=True)
+        for unit in ("factory-widgets.service", "factory-widgets-dashboard.service"):
+            (host.unit_dir() / unit).write_text(f"[Service]\nEnvironment=PATH={good}\nExecStart=x\n")
+        code, out = self.district("apply")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[:-1], baseline.splitlines()[:-1])
+        self.assertEqual(out.splitlines()[-1], "smoke OK: gh, factory --version under 2 unit(s)")
+
+        bad = self.tmp / "bad"
+        bad.mkdir()
+        (bad / "gh").write_text("#!/bin/sh\nwhile :; do :; done\n")  # the recursing mise wrapper never returns
+        (bad / "factory").write_text("#!/bin/sh\necho broken >&2\nexit 2\n")
+        for exe in bad.iterdir():
+            exe.chmod(0o755)
+        (host.unit_dir() / "factory-widgets-dashboard.service").write_text(f"[Service]\nEnvironment=PATH={bad}\nExecStart=x\n")
+        with mock.patch.object(apply, "SMOKE_TIMEOUT", 0.3):
+            code, out = self.district("apply")
+        self.assertEqual(code, 1, out)
+        self.assertIn("smoke FAIL factory-widgets-dashboard.service: gh --version timed out after 0.3s", out)
+        self.assertIn("smoke FAIL factory-widgets-dashboard.service: factory --version exited 2: broken", out)
+        self.assertNotIn("smoke FAIL factory-widgets.service", out)
+        self.assertNotIn("smoke OK", out)
+
     def test_failure_cap(self) -> None:
         self.register(failures=9)
         code, out = self.district("apply")
