@@ -13,6 +13,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -26,6 +27,8 @@ POLICY_ENV = ("NPM_CONFIG_MIN_RELEASE_AGE", "UV_EXCLUDE_NEWER")
 # doctor rows about committed files: drift the repo owner decides on
 DRIFT_LABELS = (".factory.toml keys", "host settings committed", ".github/ISSUE_TEMPLATE/agent_task.md", ".factory.toml committed")
 SERVICE_WAIT = 3600  # seconds for running passes to finish before an upgrade
+SMOKE_TIMEOUT = 10  # seconds per `--version` probe under a unit's PATH
+SMOKE_BINARIES = ("gh", "factory")
 DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
 EXTRA_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
@@ -232,6 +235,36 @@ def line(row: dict, status: str) -> str:
     return "  ".join(parts)
 
 
+def smoke(slugs) -> tuple[int, list[str]]:
+    """`<binary> --version` under each installed dispatch/dashboard unit's baked PATH; returns (units, failures)."""
+    units, fails = 0, []
+    for slug in slugs:
+        for name in (f"{host.unit_name(slug)}.service", f"{host.unit_name(slug)}-dashboard.service"):
+            unit_file = host.unit_dir() / name
+            if not unit_file.exists():
+                continue
+            units += 1
+            path = next((ln.removeprefix("Environment=PATH=") for ln in unit_file.read_text().splitlines()
+                         if ln.startswith("Environment=PATH=")), None)
+            if path is None:
+                fails.append(f"{name}: no Environment=PATH")
+                continue
+            for binary in SMOKE_BINARIES:
+                exe = shutil.which(binary, path=path)
+                if exe is None:
+                    fails.append(f"{name}: {binary} not on unit PATH")
+                    continue
+                try:
+                    proc = run([exe, "--version"], timeout=SMOKE_TIMEOUT, env={**os.environ, "PATH": path})
+                except subprocess.TimeoutExpired:
+                    fails.append(f"{name}: {binary} --version timed out after {SMOKE_TIMEOUT}s")
+                    continue
+                if proc.returncode != 0:
+                    tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
+                    fails.append(f"{name}: {binary} --version exited {proc.returncode}: {tail[0]}")
+    return units, fails
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district apply", description=__doc__.split("\n", 1)[0])
     parser.add_argument("slug", nargs="?", help="one repo (owner/name or basename); default all")
@@ -285,4 +318,11 @@ def main(argv: list[str]) -> int:
         if len(versions) > 1:
             print(f"versions differ across the fleet: {', '.join(str(v) for v in sorted(versions, key=str))}")
             code = 1
+        units, smoke_fails = smoke(targets)
+        for fail in smoke_fails:
+            print(f"smoke FAIL {fail}")
+        if smoke_fails:
+            code = 1
+        else:
+            print(f"smoke OK: {', '.join(SMOKE_BINARIES)} --version under {units} unit(s)")
         return code
