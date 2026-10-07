@@ -503,10 +503,21 @@ def table(rows: list[dict]) -> str:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district status", description=__doc__.split("\n", 1)[0])
     parser.add_argument("--json", action="store_true", help="dump shared operational classification, evidence, snapshot and project metrics keyed by slug")
+    parser.add_argument("--slug", action="append", metavar="OWNER/REPO", help="limit output and collection to this slug (repeatable)")
+    parser.add_argument("--unhealthy", action="store_true", help="limit output to slugs whose assessment is not normal")
     args = parser.parse_args(argv)
-    entries = fleet(host.load())
+    data = host.load()
+    if args.slug:
+        known = host.repos(data)
+        unknown = [s for s in args.slug if s not in known]
+        if unknown:
+            parser.error(f"unknown slug: {', '.join(unknown)}")
+        data = {**data, "repo": {s: known[s] for s in args.slug}}
+    entries = fleet(data)
+    if args.unhealthy:
+        entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}
     if not entries and not args.json:
-        print("no repositories registered (district add)")
+        print("no unhealthy repositories" if args.unhealthy else "no repositories registered (district add)")
         return 0
     if args.json:
         print(json.dumps(entries, indent=2))
