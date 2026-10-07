@@ -893,6 +893,56 @@ class StatusTest(DistrictCase):
         self.assertIn("acme/nope", out)
         snap.assert_not_called()
 
+    def test_gh_auth_failure_is_one_host_level_failure(self) -> None:
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}, "acme/gadgets": {"path": str(repo)}}})
+        code, out = self.district("status")
+        self.assertEqual(code, 2, out)
+        self.assertNotIn("gh auth", out)
+        self.assertNotIn("host", json.loads(self.district("status", "--json")[1]))
+        self.stub("gh", ("auth status", "github.com\n  X Failed to log in to github.com account x (default)\n  - The token in default is invalid.\n", 1))
+        code, out = self.district("status")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(out.count("gh auth"), 1, out)
+        self.assertIn("FAIL  gh auth: - The token in default is invalid.", out)
+        code, out = self.district("status", "--json")
+        report = json.loads(out)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["host"], {"status": "FAIL", "label": "gh auth", "detail": "- The token in default is invalid."})
+        self.assertEqual(set(report) - {"host"}, {"acme/widgets", "acme/gadgets"})
+        self.assertEqual(self.calls("gh").count("auth status"), 4)
+
+    def test_gh_auth_failure_survives_empty_and_filtered_fleets(self) -> None:
+        self.three()
+        detail = "HTTP 401: the token in default is invalid"
+        self.stub("gh", ("auth status", f"earlier stderr line\n{detail}\n", 1))
+        gh = self.bin / "gh"
+        gh.write_text(gh.read_text().replace("sys.stdout.write(out)",
+                      'sys.stdout.write("irrelevant stdout\\n"); sys.stderr.write(out)'))
+        real = health.classify
+        fake = lambda slug, sources, table: {**real(slug, sources, table), "assessment": "normal"}  # noqa: E731
+        with mock.patch.object(health, "classify", fake):
+            for filters in (["--slug", "acme/b"], ["--unhealthy"], ["--unhealthy", "--slug", "acme/a"], []):
+                if not filters:
+                    host.save({})
+                for mode in ([], ["--json"]):
+                    with self.subTest(filters=filters, mode=mode):
+                        before = self.calls("gh").count("auth status")
+                        code, out = self.district("status", *filters, *mode)
+                        self.assertEqual(code, 1, out)
+                        self.assertEqual(self.calls("gh").count("auth status"), before + 1)
+                        self.assertEqual(out.count(detail), 1, out)
+                        if mode:
+                            report = json.loads(out)
+                            self.assertEqual(report["host"], {"status": "FAIL", "label": "gh auth", "detail": detail})
+                            self.assertEqual(set(report) - {"host"}, {"acme/b"} if filters == ["--slug", "acme/b"] else set())
+                        else:
+                            self.assertEqual(out.splitlines()[0], f"  FAIL  gh auth: {detail}")
+                            if "--unhealthy" in filters:
+                                self.assertEqual(out.splitlines()[1], "no unhealthy repositories")
+                            elif not filters:
+                                self.assertEqual(out.splitlines()[1], "no repositories registered (district add)")
+
 
 class RmTest(DistrictCase):
     def test_rm_removes_units_and_entry(self) -> None:
@@ -967,7 +1017,7 @@ class DoctorTest(DistrictCase):
         rendered = "\n".join(f"{r['status']} {r['label']}: {r['detail']}" for r in rows)
         self.assertEqual(code, 1)
         self.assertIn("WARN factory: installed abc9999, expected abc1234", rendered)
-        self.assertIn("FAIL gh auth: gh auth status exited 1", rendered)
+        self.assertIn("FAIL gh auth: not logged in", rendered)
         self.assertIn("FAIL systemd user manager: offline", rendered)
         self.assertIn("WARN linger: timers stop at logout: loginctl enable-linger", rendered)
         self.assertIn(f"FAIL repo acme/widgets: {missing} does not exist", rendered)

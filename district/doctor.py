@@ -37,9 +37,12 @@ def systemctl(*args: str) -> subprocess.CompletedProcess:
     return run(["systemctl", "--user", *args])
 
 
-def command(label: str, argv: list[str], detail: str) -> dict[str, str]:
-    proc = run(argv)
-    return row("PASS", label, detail) if proc.returncode == 0 else row("FAIL", label, f"{' '.join(argv)} exited {proc.returncode}")
+def gh_auth() -> dict[str, str]:
+    proc = run(["gh", "auth", "status"])
+    if proc.returncode == 0:
+        return row("PASS", "gh auth", "authenticated")
+    lines = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+    return row("FAIL", "gh auth", lines[-1].strip() if lines else f"gh auth status exited {proc.returncode}")
 
 
 def factory_rows(data: dict) -> list[dict[str, str]]:
@@ -147,7 +150,7 @@ def check() -> list[dict[str, str]]:
         rows.append(row("FAIL", "host file", str(exc).removeprefix("district: ")))
 
     rows += factory_rows(data)
-    rows.append(command("gh auth", ["gh", "auth", "status"], "authenticated"))
+    rows.append(gh_auth())
 
     manager = systemctl("is-system-running")
     state = manager.stdout.strip() or manager.stderr.strip() or f"exited {manager.returncode}"

@@ -22,7 +22,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from district import atlas, cli, dashboard, health, host, metrics, status  # noqa: E402
+from district import atlas, cli, dashboard, doctor, health, host, metrics, status  # noqa: E402
 from district.dashboard_read import safe_fleet  # noqa: E402
 
 AT = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
@@ -73,6 +73,7 @@ class ProjectionTest(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(health, "datetime", Clock))
             stack.enter_context(mock.patch.object(status, "datetime", Clock))
+            stack.enter_context(mock.patch.object(doctor, "gh_auth", return_value=doctor.row("PASS", "gh auth", "authenticated")))
             if sources is not None:
                 stack.enter_context(mock.patch.object(status.FleetCollector, "collect_runtime"))
                 stack.enter_context(mock.patch.object(status.FleetCollector, "collect_full"))

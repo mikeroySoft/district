@@ -15,7 +15,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from district import health, host, metrics
+from district import doctor, health, host, metrics
 from district.host import run
 
 COLUMNS = ("repo", "operating", "execution", "observation", "assessment", "version", "next", "last", "pass", "esc", "gate1", "bounce", "fails", "upstream", "evidence")
@@ -502,10 +502,12 @@ def table(rows: list[dict]) -> str:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district status", description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--json", action="store_true", help="dump shared operational classification, evidence, snapshot and project metrics keyed by slug")
+    parser.add_argument("--json", action="store_true", help="dump shared operational classification, evidence, snapshot and project metrics keyed by slug; a failed `gh auth status` adds a top-level `host` row")
     parser.add_argument("--slug", action="append", metavar="OWNER/REPO", help="limit output and collection to this slug (repeatable)")
     parser.add_argument("--unhealthy", action="store_true", help="limit output to slugs whose assessment is not normal")
     args = parser.parse_args(argv)
+    gh = doctor.gh_auth()
+    failed = gh["status"] == "FAIL"
     data = host.load()
     if args.slug:
         known = host.repos(data)
@@ -516,13 +518,15 @@ def main(argv: list[str]) -> int:
     entries = fleet(data)
     if args.unhealthy:
         entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}
-    if not entries and not args.json:
-        print("no unhealthy repositories" if args.unhealthy else "no repositories registered (district add)")
-        return 0
     if args.json:
-        print(json.dumps(entries, indent=2))
+        print(json.dumps({"host": gh, **entries} if failed else entries, indent=2))
     else:
-        print(table([row(slug, e) for slug, e in entries.items()]))
-    if any(e["assessment"] == "attention" for e in entries.values()):
+        if failed:
+            print(f"  FAIL  {gh['label']}: {gh['detail']}")
+        if entries:
+            print(table([row(slug, e) for slug, e in entries.items()]))
+        else:
+            print("no unhealthy repositories" if args.unhealthy else "no repositories registered (district add)")
+    if failed or any(e["assessment"] == "attention" for e in entries.values()):
         return 1
     return 2 if any(e["assessment"] == "unknown" for e in entries.values()) else 0
