@@ -183,6 +183,7 @@ class ReportCLITest(DistrictCase):
         self.assertEqual(host.load(), registry)
         self.assertEqual({p: p.read_bytes() for root in roots
                           for p in root.rglob("*") if p.is_file()}, before)
+        self.stub("gh", ("auth status", ""))
         status_code, status_out = self.district("status")
         self.assertEqual(status_code, code, status_out)
         self.assertRegex(status_out, r"unknown.*\?")
