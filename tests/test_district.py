@@ -862,6 +862,37 @@ class StatusTest(DistrictCase):
         e = json.loads(out)["acme/widgets"]
         self.assertEqual((code, e["operating_state"], e["observation"], e["findings"]), (2, "unknown", "unavailable", []))
 
+    def three(self) -> None:
+        host.save({"repo": {s: {"path": str(self.tmp)} for s in ("acme/a", "acme/b", "acme/c")}})
+
+    def test_slug_collects_only_selected(self) -> None:
+        self.three()
+        snap = mock.Mock(side_effect=lambda slug, table, timeout=None: {"slug": slug, "error": "down"})
+        with mock.patch.object(status, "snapshot", snap):
+            code, out = self.district("status", "--json", "--slug", "acme/b")
+            self.assertEqual(list(json.loads(out)), ["acme/b"], out)
+            self.assertEqual([c.args[0] for c in snap.call_args_list], ["acme/b"])
+            code, out = self.district("status", "--slug", "acme/c", "--slug", "acme/a")
+        self.assertEqual([line.split()[0] for line in out.splitlines()[1:]], ["acme/c", "acme/a"])
+
+    def test_unhealthy_omits_healthy(self) -> None:
+        self.three()
+        real = health.classify
+        fake = lambda slug, sources, table: {**real(slug, sources, table), "assessment": "normal" if slug == "acme/a" else "attention"}  # noqa: E731
+        with mock.patch.object(health, "classify", fake):
+            code, out = self.district("status", "--json", "--unhealthy")
+            self.assertEqual((code, sorted(json.loads(out))), (1, ["acme/b", "acme/c"]))
+            code, out = self.district("status", "--unhealthy", "--slug", "acme/a")
+        self.assertEqual((code, out.strip()), (0, "no unhealthy repositories"))
+
+    def test_unknown_slug_is_named(self) -> None:
+        self.three()
+        with mock.patch.object(status, "snapshot") as snap:
+            code, out = self.district("status", "--json", "--slug", "acme/b", "--slug", "acme/nope")
+        self.assertNotEqual(code, 0)
+        self.assertIn("acme/nope", out)
+        snap.assert_not_called()
+
 
 class RmTest(DistrictCase):
     def test_rm_removes_units_and_entry(self) -> None:

@@ -27,7 +27,7 @@ Confirm `district --version`, `factory --version`, and authenticated `gh auth st
 
 ## Inspect
 
-Run `district status`. Exit 0 means all registered factories classify normal (or the fleet is empty); exit 1 means supported operational attention; exit 2 means unknown/partial/stale observation without attention. Exit 1 takes precedence over 2. For diagnosis, run `district status --json` and report each affected slug's `operating_state`, `execution_state`, `observation`, and `findings`, retaining `sources` timestamps and evidence. Missing telemetry remains unknown, not stopped. Project escalations and review bounces remain context, not incidents. See `OPERATIONS-CONSOLE-SPEC.md` §6 for the shared JSON contract.
+Run `district status`. Exit 0 means all registered factories classify normal (or the fleet is empty); exit 1 means supported operational attention; exit 2 means unknown/partial/stale observation without attention. Exit 1 takes precedence over 2. For diagnosis, run `district status --json --unhealthy` (or `--slug owner/repo`, repeatable, to collect only those slugs; full fleet JSON is very large) and report each affected slug's `operating_state`, `execution_state`, `observation`, and `findings`, retaining `sources` timestamps and evidence. Missing telemetry remains unknown, not stopped. Project escalations and review bounces remain context, not incidents. See `OPERATIONS-CONSOLE-SPEC.md` §6 for the shared JSON contract.
 
 Done when every operational finding and observation gap has a stated scope and evidence source.
 
