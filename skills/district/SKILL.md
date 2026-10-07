@@ -27,7 +27,7 @@ Confirm `district --version`, `factory --version`, and authenticated `gh auth st
 
 ## Inspect
 
-Run `district status`. Exit 0 means all registered factories classify normal (or the fleet is empty); exit 1 means supported operational attention or a failed `gh auth status` (one fleet-level `FAIL  gh auth` row; `--json` carries it as top-level `host`, not per slug); exit 2 means unknown/partial/stale observation without attention. Exit 1 takes precedence over 2. For diagnosis, run `district status --json --unhealthy` (or `--slug owner/repo`, repeatable, to collect only those slugs; full fleet JSON is very large) and report each affected slug's `operating_state`, `execution_state`, `observation`, and `findings`, retaining `sources` timestamps and evidence. Missing telemetry remains unknown, not stopped. Project escalations and review bounces remain context, not incidents. See `OPERATIONS-CONSOLE-SPEC.md` §6 for the shared JSON contract.
+Run `district status`. Exit 0 means all registered factories classify normal (or the fleet is empty); exit 1 means supported operational attention or a failed `gh auth status` (one fleet-level `FAIL  gh auth` row; `--json` carries it as top-level `host`, not per slug); exit 2 means unknown/partial/stale observation without attention. Exit 1 takes precedence over 2. For diagnosis, run `district status --unhealthy --json` (or `--slug owner/repo`, repeatable, to collect only those slugs; full fleet JSON is very large) and report each affected slug's `operating_state`, `execution_state`, `observation`, and `findings`, retaining `sources` timestamps and evidence. Missing telemetry remains unknown, not stopped. Project escalations and review bounces remain context, not incidents. See `OPERATIONS-CONSOLE-SPEC.md` §6 for the shared JSON contract.
 
 Done when every operational finding and observation gap has a stated scope and evidence source.
 
@@ -51,7 +51,7 @@ Done when every selected row has a version, `doctor OK` or an explained warning,
 
 ## Reset
 
-Read `district status --json` and fix the recorded cause first. Then run:
+Read `district status --slug owner/repo --json` and fix the recorded cause first. Then run:
 
 ```sh
 district apply --reset owner/repo
@@ -59,11 +59,11 @@ district apply --reset owner/repo
 
 Reset runs one dispatcher pass. It clears the cap and re-enables the timer only after that pass succeeds.
 
-Done when the command reports `pass succeeded`, the timer is re-enabled, and `district status --json` no longer reports `capped`; report any remaining findings or observation gaps separately.
+Done when the command reports `pass succeeded`, the timer is re-enabled, and `district status --slug owner/repo --json` no longer reports `capped`; report any remaining findings or observation gaps separately.
 
 ## Remove
 
-Use the exact registered slug from `district status --json`. `district rm <slug>` disables and removes its timer, service, and dashboard unit, then drops the registry entry; repository files remain untouched. If a pass is active, report that fact and use `--wait` only when the user asked to wait for removal. Use `--keep-units` only when the user explicitly wants the registry entry removed while services remain.
+Use the exact registered slug from `district status --slug <slug> --json`. `district rm <slug>` disables and removes its timer, service, and dashboard unit, then drops the registry entry; repository files remain untouched. If a pass is active, report that fact and use `--wait` only when the user asked to wait for removal. Use `--keep-units` only when the user explicitly wants the registry entry removed while services remain.
 
 Done when District reports the slug removed and a fresh status no longer contains it.
 
