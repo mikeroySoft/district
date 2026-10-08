@@ -108,6 +108,7 @@
     .timeline > li { grid-template-columns: 1fr; gap: 4px; }
     section { padding: 48px 0; }
   }
+  .reel video { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; border: 1px solid var(--border-hairline); border-radius: 8px; background: var(--surface-terminal); }
   @media (prefers-reduced-motion: reduce) {
     html { scroll-behavior: auto; }
   }
@@ -153,6 +154,16 @@ rocm-app   capped             <span class="att">attention</span>
 # exit: 0 normal · 1 attention · 2 unknown</span></pre>
     </div>
   </header>
+
+  <section id="reel" class="reel">
+    <div class="kicker">Reel</div>
+    <h2>From issue to fleet in 45 seconds.</h2>
+    <p class="lede">Factory works each ticket from triage to merge; District runs the fleet of factories on one host.</p>
+    <video controls preload="metadata" playsinline poster="media/showreel-poster.jpg">
+      <source src="media/showreel.mp4" type="video/mp4">
+      <a href="media/showreel.mp4">Download the reel (MP4, 45 s)</a>
+    </video>
+  </section>
 
   <section id="problem">
     <div class="kicker">The problem</div>
