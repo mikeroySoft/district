@@ -56,7 +56,7 @@ class FleetCollectorTest(unittest.TestCase):
         started = monotonic()
 
         def run(argv, cwd=None, **kwargs):
-            calls.append((tuple(argv), str(cwd)))
+            calls.append((tuple(argv), str(cwd), threading.current_thread()))
             if str(cwd) == "/slow" and "--runtime-json" in argv:
                 release.wait(2)
             payload = runtime("acme/slow" if str(cwd) == "/slow" else "acme/fast")
@@ -76,10 +76,10 @@ class FleetCollectorTest(unittest.TestCase):
                 first = collector.fleet()
             self.assertIn("acme/fast", first)
             self.assertEqual(first["acme/fast"]["execution_state"], "stage-active")
-            before = len(calls)
             for _ in range(20):
                 collector.fleet()
-            self.assertEqual(len(calls), before)
+            # The scheduler keeps collecting in the background; only the reading thread must stay idle.
+            self.assertNotIn(threading.current_thread(), [thread for *_, thread in calls])
             release.set()
 
     def test_one_shot_fleet_collects_the_same_runtime_evidence(self):
