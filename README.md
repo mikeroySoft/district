@@ -39,7 +39,7 @@ only once.
 | Command | What one invocation does |
 |---|---|
 | `district add <path\|url>` | Onboard a repo, or adopt one that already has `.factory.toml`. `--dry-run` prints the proposal (slug, clone path, fork parent, port, gate checks); `--check NAME=CMD`, `--exclusive a,b`, `--no-edit`. |
-| `district apply [slug]` | Reconcile the host to the registry: units, labels, `factory doctor`, failure cap, package-age policy. `--upgrade` reinstalls Factory from `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
+| `district apply [slug]` | Reconcile the host to the registry: units, labels, `factory doctor`, failure cap, package-age policy. Then runs `gh --version` and `factory --version` under each dispatch/dashboard unit's PATH (10 s timeout); any failure exits 1 naming the unit and binary. `--upgrade` reinstalls Factory from `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district status` | Fleet operations table. Exit 1 on operational attention or a failed `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row), 2 on unknown/stale observation, 0 when every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
 | `district doctor` | Check District's own host prerequisites. `--json`. |
 | `district report` | Print a read-only Markdown fleet review. |
