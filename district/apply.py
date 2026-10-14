@@ -259,6 +259,9 @@ def smoke(slugs) -> tuple[int, list[str]]:
                 except subprocess.TimeoutExpired:
                     fails.append(f"{name}: {binary} --version timed out after {SMOKE_TIMEOUT}s")
                     continue
+                except OSError as exc:  # passes shutil.which but won't start: dead shebang interpreter, ENOEXEC, EACCES
+                    fails.append(f"{name}: {binary} --version: {exc}")
+                    continue
                 if proc.returncode != 0:
                     tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
                     fails.append(f"{name}: {binary} --version exited {proc.returncode}: {tail[0]}")

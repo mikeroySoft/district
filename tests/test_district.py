@@ -605,12 +605,14 @@ class ApplyTest(DistrictCase):
         for exe in bad.iterdir():
             exe.chmod(0o755)
         (host.unit_dir() / "factory-widgets-dashboard.service").write_text(f"[Service]\nEnvironment=PATH={bad}\nExecStart=x\n")
+        (good / "factory").write_text("#!/nonexistent/python\n")  # passes shutil.which, Popen raises OSError
         with mock.patch.object(apply, "SMOKE_TIMEOUT", 0.3):
             code, out = self.district("apply")
         self.assertEqual(code, 1, out)
         self.assertIn("smoke FAIL factory-widgets-dashboard.service: gh --version timed out after 0.3s", out)
         self.assertIn("smoke FAIL factory-widgets-dashboard.service: factory --version exited 2: broken", out)
-        self.assertNotIn("smoke FAIL factory-widgets.service", out)
+        self.assertIn("smoke FAIL factory-widgets.service: factory --version: [Errno 2]", out)
+        self.assertNotIn("smoke FAIL factory-widgets.service: gh", out)
         self.assertNotIn("smoke OK", out)
 
     def test_failure_cap(self) -> None:
