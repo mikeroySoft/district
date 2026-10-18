@@ -70,7 +70,7 @@ class FactoryRefTest(unittest.TestCase):
     def test_green_sha_installs_once_and_records_sha(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
         result, calls, document = self.calls(checks)
-        installs = [call for call in calls if call[:3] == ["uv", "tool", "install"]
+        installs = [call for call in calls if call[:3] == ["uv", "tool", "install"]]
         self.assertTrue(result)
         self.assertEqual(len(installs), 1)
         self.assertIn(f"git+{ORIGIN}@{SHA}", installs[0])
