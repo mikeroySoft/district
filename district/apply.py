@@ -31,6 +31,111 @@ SMOKE_TIMEOUT = 10  # seconds per `--version` probe under a unit's PATH
 SMOKE_BINARIES = ("gh", "factory")
 DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
 EXTRA_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+def factory_extras(data: dict) -> list[str]:
+    extras = host.default(data, "factory_extras")
+    if not isinstance(extras, list) or any(not isinstance(extra, str) or not EXTRA_NAME.fullmatch(extra)
+                                           for extra in extras):
+        raise DistrictError("[defaults].factory_extras must be an array of valid Python extra names")
+    return extras
+
+
+def github_slug(url: str) -> str | None:
+    for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/"):
+        if url.startswith(prefix):
+            slug = url[len(prefix):].removesuffix(".git").strip("/")
+            return slug if len(slug.split("/")) == 2 else None
+    return None
+
+
+def installed_engine_commit(data: dict, targets: dict[str, dict]) -> str | None:
+    sha = data.get("defaults", {}).get("engine", {}).get("sha")
+    if isinstance(sha, str) and SHA.fullmatch(sha):
+        return sha
+    table = next(iter(targets.values()), None)
+    if table is None:
+        return None
+    proc = run(["factory", "dashboard", "--json"], cwd=Path(table["path"]))
+    if proc.returncode:
+        return None
+    try:
+        sha = json.loads(proc.stdout).get("engine", {}).get("commit")
+    except (ValueError, AttributeError):
+        return None
+    return sha if isinstance(sha, str) and SHA.fullmatch(sha) else None
+
+
+def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[str]) -> bool:
+    """Install a changed, CI-green remote Factory ref without modifying its checkout."""
+    ref = data.get("defaults", {}).get("factory_ref")
+    if ref is None:
+        return True
+    if not isinstance(ref, str) or not ref.strip():
+        raise DistrictError("[defaults].factory_ref must be a non-empty string")
+    extras = factory_extras(data)
+    src = Path(os.path.expanduser(host.default(data, "factory_source")))
+    origin = run(["git", "remote", "get-url", "origin"], cwd=src, check=True).stdout.strip()
+    slug = github_slug(origin)
+    if slug is None:
+        raise DistrictError(f"{src} origin is not a GitHub repository")
+    resolved = run(["git", "ls-remote", "--exit-code", origin, ref], cwd=src)
+    shas = {line.split()[0].lower() for line in resolved.stdout.splitlines() if line.split()}
+    if resolved.returncode or len(shas) != 1 or not SHA.fullmatch(next(iter(shas), "")):
+        raise DistrictError(f"{ref}: could not resolve one remote commit from {origin}")
+    sha = shas.pop()
+    if installed_engine_commit(data, targets) == sha:
+        return True
+    checks = run(["gh", "api", f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
+    if checks.returncode:
+        print(f"engine {sha[:12]} CI unavailable; keeping installed engine")
+        return True
+    try:
+        response = json.loads(checks.stdout)
+        runs = response.get("check_runs")
+        total = response.get("total_count")
+    except (ValueError, AttributeError):
+        runs, total = None, None
+    valid_runs = [run for run in runs if isinstance(run, dict)] if isinstance(runs, list) else []
+    if not valid_runs or len(valid_runs) != len(runs) or total != len(runs):
+        state = "missing"
+    elif any(run.get("status") != "completed" for run in valid_runs):
+        state = "pending"
+    elif any(run.get("conclusion") != "success" for run in valid_runs):
+        state = "failed"
+    else:
+        state = "success"
+    if state != "success":
+        print(f"engine {sha[:12]} CI {state}; keeping installed engine")
+        return True
+
+    for timer in active_timers:
+        systemctl("disable", "--now", timer)
+    try:
+        wait_inactive([f"{host.unit_name(s)}.service" for s in host.repos(data)], SERVICE_WAIT)
+        install_url = origin
+        if origin.startswith("git@"):
+            install_url = "ssh://" + origin.replace(":", "/", 1)
+        source = f"git+{install_url}@{sha}"
+        if extras:
+            source += f"[{','.join(extras)}]"
+        proc = run(["uv", "tool", "install", "--reinstall", "--from", source, "factory"])
+        if proc.returncode:
+            detail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+            print(f"engine {sha[:12]} install failed" + (f": {detail[-1]}" if detail else ""))
+            return False
+        previous = data.get("defaults", {}).get("engine", {}).get("sha")
+        data.setdefault("defaults", {})["engine"] = {
+            "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
+        }
+        host.save(data)
+        print(f"installed factory engine {sha[:12]} ({ref})")
+        return True
+    finally:
+        restore(active_timers, data)
+
+
 
 
 def now() -> datetime:
@@ -102,10 +207,7 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
 
     Records `[defaults.engine]` (ref, sha, previous, installed_at) and prints the rollback command.
     """
-    extras = host.default(data, "factory_extras")
-    if not isinstance(extras, list) or any(not isinstance(extra, str) or not EXTRA_NAME.fullmatch(extra)
-                                           for extra in extras):
-        raise DistrictError("[defaults].factory_extras must be an array of valid Python extra names")
+    extras = factory_extras(data)
     src = Path(os.path.expanduser(host.default(data, "factory_source")))
     proc = run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=src)
     if proc.returncode != 0:
@@ -303,13 +405,15 @@ def main(argv: list[str]) -> int:
                 upgrade(data, active, args.upgrade)
             finally:
                 restore(active, data)
+        elif not reconcile_engine(data, targets, active):
+            code = 1
         for slug, table in targets.items():
             if args.reset and not reset(slug, table, data):
                 code = 1
             rows.append(repo_pass(slug, table, data))
 
         engine = data.get("defaults", {}).get("engine")
-        if engine and not args.upgrade:
+        if engine and not args.upgrade and "factory_ref" not in data.get("defaults", {}):
             print(f"engine {engine['sha'][:7]} ({engine['ref']})")
         for row in rows:
             print(line(row, status))
