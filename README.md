@@ -39,7 +39,7 @@ only once.
 | Command | What one invocation does |
 |---|---|
 | `district add <path\|url>` | Onboard a repo, or adopt one that already has `.factory.toml`. `--dry-run` prints the proposal (slug, clone path, fork parent, port, gate checks); `--check NAME=CMD`, `--exclusive a,b`, `--no-edit`. |
-| `district apply [slug]` | Reconcile the host to the registry: units, labels, `factory doctor`, failure cap, package-age policy. Then runs `gh --version` and `factory --version` under each dispatch/dashboard unit's PATH (10 s timeout); any failure exits 1 naming the unit and binary. `--upgrade` reinstalls Factory from `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
+| `district apply [slug]` | Reconcile the host to the registry: units, labels, `factory doctor`, failure cap, package-age policy. If `[defaults].factory_ref` is set (for example, `"main"`), every apply resolves that ref from the `factory_source` origin and installs its exact commit only after all GitHub check runs succeed; already-current, pending, and failed commits are left alone. Then runs `gh --version` and `factory --version` under each dispatch/dashboard unit's PATH (10 s timeout); any failure exits 1 naming the unit and binary. `--upgrade` explicitly reinstalls Factory from the local `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district status` | Fleet operations table. Exit 1 on operational attention or a failed `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row), 2 on unknown/stale observation, 0 when every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
 | `district doctor` | Check District's own host prerequisites. `--json`. |
 | `district report` | Print a read-only Markdown fleet review. |
@@ -66,6 +66,15 @@ and only reports drift on them afterwards; it rewrites host artifacts on every
 
 The registry *is* the config: `$XDG_CONFIG_HOME/factory/config.toml`. A repo is
 managed iff it has a `[repo."owner/name"]` table with a `path`. No second store.
+
+Set `factory_ref = "main"` under `[defaults]` to let the hourly plain
+`district apply` follow Factory's remote `main` branch. District never checks
+out or requires a clean developer clone: it resolves that branch on the clone's
+GitHub `origin`, requires successful check runs for the resolved SHA, installs
+that immutable Git revision with `factory_extras`, and records it in
+`[defaults.engine]`. Remove `factory_ref` before rolling back, or the next apply
+will reinstall the branch's SHA. Omit `factory_ref` to retain explicit
+`district apply --upgrade` behavior.
 
 ## Agent use
 

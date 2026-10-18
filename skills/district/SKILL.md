@@ -43,8 +43,8 @@ Done when the repository is registered, its timer is active, and `factory doctor
 
 ## Apply
 
-- `district apply [slug]` reconciles units, labels, doctor state, failure caps, and package-age policy, then smoke-checks `gh --version` and `factory --version` under each installed unit's PATH; a `smoke FAIL <unit>: <binary> ...` line means that unit cannot run the tool. Omit the slug only when the whole fleet is intended.
-- Add `--upgrade [REF]` only when the user requests a Factory upgrade. It validates a local commit, requires a clean checkout for `HEAD` (the default), stops active timers, waits for every registered factory service, installs an export of that commit, records engine metadata and a rollback command when a previous SHA is known, restarts dashboards, and restores timers.
+- `district apply [slug]` reconciles units, labels, doctor state, failure caps, and package-age policy, then smoke-checks `gh --version` and `factory --version` under each installed unit's PATH. If `[defaults].factory_ref` is set, every apply follows that branch on the Factory checkout's GitHub origin and installs its exact changed SHA only after every check run succeeds. Omit the slug only when the whole fleet is intended.
+- Add `--upgrade [REF]` only when the user requests a Factory upgrade from the local checkout. It validates a local commit, requires a clean checkout for `HEAD` (the default), stops active timers, waits for every registered factory service, installs an export of that commit, records engine metadata and a rollback command when a previous SHA is known, restarts dashboards, and restores timers. Remove `factory_ref` before rolling back so the next apply does not reinstall its branch. Without `factory_ref`, engine upgrades remain explicit.
 - Report committed-file drift; leave those files for the repository owner. Apply owns host state only.
 
 Done when every selected row has a version, `doctor OK` or an explained warning, no command failure, and an active timer unless District has deliberately capped it.
