@@ -68,11 +68,13 @@ The registry *is* the config: `$XDG_CONFIG_HOME/factory/config.toml`. A repo is
 managed iff it has a `[repo."owner/name"]` table with a `path`. No second store.
 
 Set `factory_ref = "main"` under `[defaults]` to let the hourly plain
-`district apply` follow Factory's remote `main`. District never checks out or
-requires a clean developer clone: it resolves the clone's GitHub `origin`,
-requires successful check runs for the resolved SHA, installs that immutable
-Git revision with `factory_extras`, and records it in `[defaults.engine]`.
-Omit `factory_ref` to retain explicit `district apply --upgrade` behavior.
+`district apply` follow Factory's remote `main` branch. District never checks
+out or requires a clean developer clone: it resolves that branch on the clone's
+GitHub `origin`, requires successful check runs for the resolved SHA, installs
+that immutable Git revision with `factory_extras`, and records it in
+`[defaults.engine]`. Remove `factory_ref` before rolling back, or the next apply
+will reinstall the branch's SHA. Omit `factory_ref` to retain explicit
+`district apply --upgrade` behavior.
 
 ## Agent use
 

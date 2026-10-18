@@ -50,20 +50,8 @@ def github_slug(url: str) -> str | None:
     return None
 
 
-def installed_engine_commit(data: dict, targets: dict[str, dict]) -> str | None:
+def installed_engine_commit(data: dict) -> str | None:
     sha = data.get("defaults", {}).get("engine", {}).get("sha")
-    if isinstance(sha, str) and SHA.fullmatch(sha):
-        return sha
-    table = next(iter(targets.values()), None)
-    if table is None:
-        return None
-    proc = run(["factory", "dashboard", "--json"], cwd=Path(table["path"]))
-    if proc.returncode:
-        return None
-    try:
-        sha = json.loads(proc.stdout).get("engine", {}).get("commit")
-    except (ValueError, AttributeError):
-        return None
     return sha if isinstance(sha, str) and SHA.fullmatch(sha) else None
 
 
@@ -76,33 +64,47 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
         raise DistrictError("[defaults].factory_ref must be a non-empty string")
     extras = factory_extras(data)
     src = Path(os.path.expanduser(host.default(data, "factory_source")))
-    origin = run(["git", "remote", "get-url", "origin"], cwd=src, check=True).stdout.strip()
-    slug = github_slug(origin)
-    if slug is None:
-        raise DistrictError(f"{src} origin is not a GitHub repository")
-    resolved = run(["git", "ls-remote", "--exit-code", origin, ref], cwd=src)
-    shas = {line.split()[0].lower() for line in resolved.stdout.splitlines() if line.split()}
-    if resolved.returncode or len(shas) != 1 or not SHA.fullmatch(next(iter(shas), "")):
-        raise DistrictError(f"{ref}: could not resolve one remote commit from {origin}")
-    sha = shas.pop()
-    if installed_engine_commit(data, targets) == sha:
+    try:
+        if not src.is_dir():
+            raise OSError(f"{src} does not exist")
+        origin_proc = run(["git", "remote", "get-url", "origin"], cwd=src)
+        if origin_proc.returncode:
+            raise OSError(origin_proc.stderr.strip() or "could not read origin")
+        origin = origin_proc.stdout.strip()
+        slug = github_slug(origin)
+        if slug is None:
+            raise OSError(f"{src} origin is not a GitHub repository")
+        resolved = run(["git", "ls-remote", "--exit-code", origin, f"refs/heads/{ref}"], cwd=src)
+        shas = {line.split()[0].lower() for line in resolved.stdout.splitlines() if line.split()}
+        if resolved.returncode:
+            raise OSError(resolved.stderr.strip() or "ls-remote failed")
+        if len(shas) != 1 or not SHA.fullmatch(next(iter(shas), "")):
+            raise OSError("remote branch did not resolve to one commit")
+        sha = shas.pop()
+    except OSError as exc:
+        print(f"engine {ref} unresolved: {exc}; keeping installed engine")
         return True
-    checks = run(["gh", "api", f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
+    if installed_engine_commit(data) == sha:
+        print(f"engine {sha[:7]} ({ref})")
+        return True
+    checks = run(["gh", "api", "--paginate", "--slurp",
+                  f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
     if checks.returncode:
         print(f"engine {sha[:12]} CI unavailable; keeping installed engine")
         return True
     try:
-        response = json.loads(checks.stdout)
-        runs = response.get("check_runs")
-        total = response.get("total_count")
-    except (ValueError, AttributeError):
-        runs, total = None, None
-    valid_runs = [run for run in runs if isinstance(run, dict)] if isinstance(runs, list) else []
+        payload = json.loads(checks.stdout)
+        pages = payload if isinstance(payload, list) else [payload]
+        runs = [check for page in pages for check in page["check_runs"]]
+        total = pages[0]["total_count"]
+    except (ValueError, KeyError, TypeError, IndexError):
+        runs, total = [], None
+    valid_runs = [check for check in runs if isinstance(check, dict)]
     if not valid_runs or len(valid_runs) != len(runs) or total != len(runs):
         state = "missing"
-    elif any(run.get("status") != "completed" for run in valid_runs):
+    elif any(check.get("status") != "completed" for check in valid_runs):
         state = "pending"
-    elif any(run.get("conclusion") != "success" for run in valid_runs):
+    elif any(check.get("conclusion") not in {"success", "skipped", "neutral"} for check in valid_runs):
         state = "failed"
     else:
         state = "success"
@@ -110,9 +112,9 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
         print(f"engine {sha[:12]} CI {state}; keeping installed engine")
         return True
 
-    for timer in active_timers:
-        systemctl("disable", "--now", timer)
     try:
+        for timer in active_timers:
+            systemctl("disable", "--now", timer)
         wait_inactive([f"{host.unit_name(s)}.service" for s in host.repos(data)], SERVICE_WAIT)
         install_url = origin
         if origin.startswith("git@"):
@@ -130,6 +132,7 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
             "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
         }
         host.save(data)
+        restart_dashboards(data)
         print(f"installed factory engine {sha[:12]} ({ref})")
         return True
     finally:
@@ -202,6 +205,13 @@ def wait_inactive(services: list[str], timeout: float) -> None:
         time.sleep(5)
 
 
+def restart_dashboards(data: dict) -> None:
+    for slug in host.repos(data):
+        dash = f"{host.unit_name(slug)}-dashboard.service"
+        if (host.unit_dir() / dash).exists():
+            systemctl("restart", dash, check=False)
+
+
 def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
     """Stop → wait → reinstall an export of `ref` → restart dashboards. Timers are re-enabled by the caller.
 
@@ -239,10 +249,7 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
     host.save(data)
     if previous:
         print(f"rollback: district apply --upgrade {previous}")
-    for slug in host.repos(data):
-        dash = f"{host.unit_name(slug)}-dashboard.service"
-        if (host.unit_dir() / dash).exists():
-            systemctl("restart", dash, check=False)
+    restart_dashboards(data)
 
 
 def restore(timers: list[str], data: dict) -> None:
