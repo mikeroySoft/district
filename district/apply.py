@@ -166,8 +166,8 @@ def npm_days(age: str) -> int:
 
 
 def uv_exclude_newer(age: str) -> str:
-    """Relative uv duration as ISO 8601 (no spaces: factory writes it unquoted into systemd `Environment=`,
-    which splits on whitespace). uv rejects fractional days; seconds round up so the cutoff never shrinks."""
+    """Relative uv duration as ISO 8601 (no spaces, so an unquoted systemd `Environment=` line, which splits
+    on whitespace, keeps it whole). uv rejects fractional days; seconds round up so the cutoff never shrinks."""
     s = math.ceil(round(hours(age) * 3600, 6))
     return f"PT{s // 3600}H" if s % 3600 == 0 else f"PT{s}S"
 
