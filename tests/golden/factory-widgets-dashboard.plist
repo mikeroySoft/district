@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>factory-widgets-dashboard</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/opt/factory/bin/python3</string>
+		<string>-P</string>
+		<string>-m</string>
+		<string>factory</string>
+		<string>dashboard</string>
+		<string>--host</string>
+		<string>127.0.0.1</string>
+		<string>--port</string>
+		<string>8765</string>
+		<string>--no-open</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/mike/factories/widgets</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/Users/mike/.local/share/mise/installs/gh/latest/bin:/Users/mike/.local/bin:/usr/bin:/opt/homebrew/bin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/mike/factories/widgets/.factory/logs/factory-widgets-dashboard.stdout.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/mike/factories/widgets/.factory/logs/factory-widgets-dashboard.stderr.log</string>
+</dict>
+</plist>
