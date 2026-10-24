@@ -74,7 +74,7 @@ then assign it with `district add --host ultron …` or a repo table:
 
 ```toml
 [hosts.ultron]
-ssh = "mike@ultron.lan"
+ssh = "factory@ultron.example"
 platform = "macos"
 root = "~/factories" # optional
 

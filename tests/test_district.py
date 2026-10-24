@@ -219,7 +219,7 @@ class HostTest(DistrictCase):
         self.assertFalse(host.path().with_suffix(".toml.tmp").exists())
 
     def test_hosts_default_local_and_named_remote(self) -> None:
-        ultron = {"ssh": "mike@ultron.lan", "platform": "macos", "root": "~/factories"}
+        ultron = {"ssh": "factory@ultron.example", "platform": "macos", "root": "~/factories"}
         data = {
             "hosts": {"ultron": ultron},
             "repo": {
@@ -238,7 +238,7 @@ class HostTest(DistrictCase):
     def test_hosts_reject_invalid_entries_and_unknown_repo_host(self) -> None:
         for entry, detail in (
             ({"platform": "macos"}, "[hosts.ultron].ssh"),
-            ({"ssh": "mike@ultron.lan", "platform": "windows"}, "[hosts.ultron].platform"),
+            ({"ssh": "factory@ultron.example", "platform": "windows"}, "[hosts.ultron].platform"),
         ):
             with self.subTest(entry=entry):
                 with self.assertRaisesRegex(host.DistrictError, re.escape(detail)):
@@ -331,7 +331,7 @@ class AddTest(DistrictCase):
         self.assertEqual(list(host.load()["repo"]), ["other/name"])
 
     def test_add_records_existing_host(self) -> None:
-        host.save({"hosts": {"ultron": {"ssh": "mike@ultron.lan", "platform": "macos"}}})
+        host.save({"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}}})
         repo = self.repo(toml="")
         code, out = self.district("add", str(repo), "--host", "ultron")
         self.assertEqual(code, 0, out)
@@ -601,7 +601,7 @@ class ApplyTest(DistrictCase):
 
     def test_remote_factory_is_skipped_without_commands(self) -> None:
         host.save({
-            "hosts": {"ultron": {"ssh": "mike@ultron.lan", "platform": "macos"}},
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
         })
         code, out = self.district("apply")
@@ -939,7 +939,7 @@ class StatusTest(DistrictCase):
 
     def test_remote_factory_is_skipped_without_collection(self) -> None:
         host.save({
-            "hosts": {"ultron": {"ssh": "mike@ultron.lan", "platform": "macos"}},
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
         })
         code, out = self.district("status")
@@ -1081,7 +1081,7 @@ class RmTest(DistrictCase):
 
     def test_remote_factory_is_not_removed(self) -> None:
         data = {
-            "hosts": {"ultron": {"ssh": "mike@ultron.lan", "platform": "macos"}},
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
         }
         host.save(data)
