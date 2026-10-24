@@ -13,6 +13,7 @@ from pathlib import Path
 from district import host
 from district.add import remote_slug
 from district.apply import POLICY_ENV
+from district.service import SystemdUserBackend
 
 UNITS = (
     "district-apply.timer",
@@ -33,8 +34,6 @@ def run(argv: list[str]) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(argv, 127, "", str(exc))
 
 
-def systemctl(*args: str) -> subprocess.CompletedProcess:
-    return run(["systemctl", "--user", *args])
 
 
 def gh_auth() -> dict[str, str]:
@@ -78,7 +77,7 @@ def repo_rows(data: dict) -> list[dict[str, str]]:
     return rows
 
 
-def port_rows(data: dict) -> list[dict[str, str]]:
+def port_rows(data: dict, backend) -> list[dict[str, str]]:
     rows = []
     by_port: dict[int, list[str]] = {}
     for slug, table in host.repos(data).items():
@@ -101,7 +100,7 @@ def port_rows(data: dict) -> list[dict[str, str]]:
         if not sockets:
             rows.append(row("PASS", f"dashboard port {port}", "free"))
             continue
-        main_pid = systemctl("show", "-p", "MainPID", "--value", unit).stdout.strip()
+        main_pid = str(backend.status(unit).main_pid)
         for socket in sockets:
             listeners = re.findall(r'\("([^"\n]+)",pid=(\d+)', socket)
             if not listeners:
@@ -130,14 +129,13 @@ def policy_rows(data: dict) -> list[dict[str, str]]:
     return rows
 
 
-def unit_rows() -> list[dict[str, str]]:
+def unit_rows(backend) -> list[dict[str, str]]:
     rows = []
     for unit in UNITS:
-        loaded = systemctl("show", "-p", "LoadState", "--value", unit).stdout.strip()
+        loaded = backend.status(unit).load_state
         if loaded in ("", "not-found"):
             continue
-        active = systemctl("is-active", unit)
-        state = active.stdout.strip()
+        state = backend.is_active(unit)
         status = "PASS" if state == "active" else "WARN"
         detail = "active" if status == "PASS" else f"{state or 'inactive'}: district dashboard --install"
         rows.append(row(status, unit, detail))
@@ -155,24 +153,26 @@ def check() -> list[dict[str, str]]:
     host.hosts(data)
     for slug in host.repos(data):
         host.factory_host(data, slug)
+    backend = host.service_backend()
 
     rows += factory_rows(data)
     rows.append(gh_auth())
 
-    manager = systemctl("is-system-running")
-    state = manager.stdout.strip() or manager.stderr.strip() or f"exited {manager.returncode}"
-    rows.append(row("PASS" if state in ("running", "degraded") else "FAIL", "systemd user manager", state))
+    state = backend.manager_status()
+    manager = "systemd user manager" if isinstance(backend, SystemdUserBackend) else "launchd user manager"
+    rows.append(row("PASS" if state in ("running", "degraded") else "FAIL", manager, state))
 
-    linger = run(["loginctl", "show-user", os.environ.get("USER", ""), "-p", "Linger", "--value"])
-    rows.append(row("PASS", "linger", "yes") if linger.returncode == 0 and linger.stdout.strip() == "yes" else row("WARN", "linger", "timers stop at logout: loginctl enable-linger"))
+    if isinstance(backend, SystemdUserBackend):
+        linger = run(["loginctl", "show-user", os.environ.get("USER", ""), "-p", "Linger", "--value"])
+        rows.append(row("PASS", "linger", "yes") if linger.returncode == 0 and linger.stdout.strip() == "yes" else row("WARN", "linger", "timers stop at logout: loginctl enable-linger"))
 
     rows += repo_rows(data)
-    rows += port_rows(data)
+    rows += port_rows(data, backend)
 
     clone_dir = Path(os.path.expanduser(host.default(data, "clone_dir")))
     rows.append(row("PASS", "clone_dir", str(clone_dir)) if clone_dir.is_dir() else row("WARN", "clone_dir", f"{clone_dir} is not a directory"))
     rows += policy_rows(data)
-    rows += unit_rows()
+    rows += unit_rows(backend)
     return rows
 
 

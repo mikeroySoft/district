@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from district import host
+from district import host, service
 from district import update_transaction as transaction
 
 REPOSITORY = "mikeroySoft/district"
@@ -224,20 +224,16 @@ def python_version(tool: Path) -> str:
     return version
 
 
-def unit_property(systemctl: Path, unit: str, prop: str) -> str:
-    proc = command([str(systemctl), "--user", "show", unit, f"--property={prop}", "--value", "--no-pager"])
-    if proc.returncode:
-        raise UpdateError(f"cannot query {unit} {prop}")
-    return proc.stdout.strip()
 
 
-def service_plan(systemctl: Path, tool: Path) -> dict:
+def service_plan(backend, tool: Path) -> dict:
     result = {}
     for unit in transaction.UNITS:
-        load = unit_property(systemctl, unit, "LoadState")
+        status = backend.status(unit)
+        load = status.load_state
         if load not in ("loaded", "not-found"):
             raise UpdateError(f"unsupported {unit} load state: {load or 'empty'}")
-        active = unit_property(systemctl, unit, "ActiveState") if load == "loaded" else "inactive"
+        active = status.active_state if load == "loaded" else "inactive"
         if active not in ("active", "inactive", "failed", "activating", "deactivating"):
             raise UpdateError(f"unsupported {unit} active state: {active or 'empty'}")
         if unit in (*transaction.TIMERS, "district-dashboard.service") and active in ("activating", "deactivating"):
@@ -245,13 +241,13 @@ def service_plan(systemctl: Path, tool: Path) -> dict:
         result[unit] = {
             "loaded": load == "loaded",
             "active_state": active,
-            "unit_file_state": unit_property(systemctl, unit, "UnitFileState") if load == "loaded" else "not-found",
+            "unit_file_state": status.unit_file_state if load == "loaded" else "not-found",
         }
     dashboard = result["district-dashboard.service"]
     if dashboard["loaded"]:
-        raw = unit_property(systemctl, "district-dashboard.service", "ExecStart")
-        expected = f"argv[]={tool / 'bin' / 'python3'} -m district dashboard "
-        if expected not in raw:
+        status = backend.status("district-dashboard.service")
+        expected = (str(tool / "bin" / "python3"), "-m", "district", "dashboard")
+        if status.argv is None or status.argv[:4] != expected:
             raise UpdateError("district-dashboard.service does not target the uv-managed District environment")
     return result
 
@@ -313,7 +309,9 @@ def operations(mode: str, services: dict) -> list[str]:
 
 
 def make_plan(args: argparse.Namespace) -> tuple[dict, dict]:
-    uv, systemctl = executable("uv"), executable("systemctl")
+    uv = executable("uv")
+    manager = executable("launchctl" if sys.platform == "darwin" else "systemctl")
+    backend = host.service_backend(executable=str(manager))
     tool, entrypoint = uv_paths(uv)
     root = state_root()
     current = transaction.current_identity(tool, entrypoint, root)
@@ -322,7 +320,7 @@ def make_plan(args: argparse.Namespace) -> tuple[dict, dict]:
     except transaction.TransactionError as exc:
         raise UpdateError(str(exc)) from exc
     state = load_state(root, current, require_previous=args.rollback)
-    services = service_plan(systemctl, tool)
+    services = service_plan(backend, tool)
     if args.rollback:
         previous = state.get("previous") if state else None
         if not previous:
@@ -359,7 +357,7 @@ def make_plan(args: argparse.Namespace) -> tuple[dict, dict]:
         "state": state,
         "uv": uv,
         "gh": None if args.rollback else gh,
-        "systemctl": systemctl,
+        "service": backend.configuration(),
         "tool": tool,
         "entrypoint": entrypoint,
         "python": external_python(tool),
@@ -427,13 +425,13 @@ def operation_lock():
 
 
 def install_helper(root: Path) -> Path:
-    source = Path(transaction.__file__)
-    target = root / "transaction.py"
     root.mkdir(parents=True, exist_ok=True)
-    temp = root / f".transaction.{os.getpid()}.tmp"
-    shutil.copy2(source, temp)
-    os.replace(temp, target)
-    return target
+    for source, name in ((Path(transaction.__file__), "transaction.py"), (Path(service.__file__), "service.py")):
+        target = root / name
+        temp = root / f".{name}.{os.getpid()}.tmp"
+        shutil.copy2(source, temp)
+        os.replace(temp, target)
+    return root / "transaction.py"
 
 
 def write_request(path: Path, data: dict) -> None:
@@ -588,7 +586,7 @@ def execute(plan: dict, context: dict, lock_fd: int) -> dict:
         "entrypoint": str(context["entrypoint"]),
         "lock": str(host.operation_lock_path()),
         "uv": str(context["uv"]),
-        "systemctl": str(context["systemctl"]),
+        "service": context["service"],
         "python_version": context["python_version"],
         "current": plan["installed"],
         "target": plan["target"],
