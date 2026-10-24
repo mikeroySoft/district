@@ -4,9 +4,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from district import host
-from district.service import LaunchdBackend, ServiceDefinition
+from district import host, rm
+from district.host import DistrictError
+from district.service import LaunchdBackend, ServiceDefinition, SystemdUserBackend
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,12 +26,40 @@ class FakeRun:
         self.calls: list[list[str]] = []
         self.print_output = ""
         self.print_code = 0
+        self.print_results: list[tuple[int, str, str]] = []
 
     def __call__(self, argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
         self.calls.append(argv)
         if argv[1:2] == ["print"]:
+            if self.print_results:
+                code, stdout, stderr = self.print_results.pop(0)
+                return subprocess.CompletedProcess(argv, code, stdout, stderr)
             return subprocess.CompletedProcess(argv, self.print_code, self.print_output, "")
         return subprocess.CompletedProcess(argv, 0, "", "")
+
+class RunningRun:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.loaded = True
+
+    def __call__(self, argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
+        self.calls.append(argv)
+        if argv[1:2] == ["print"]:
+            if self.loaded:
+                return subprocess.CompletedProcess(argv, 0, "state = running\npid = 4242\n", "")
+            return subprocess.CompletedProcess(argv, 3, "", "not found")
+        if argv[1:2] == ["bootout"]:
+            self.loaded = False
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+
+class FailedSystemctlRun:
+    def __call__(self, argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
+        proc = subprocess.CompletedProcess(argv, 1, "", "cannot connect to bus")
+        if check:
+            raise subprocess.CalledProcessError(proc.returncode, argv, proc.stdout, proc.stderr)
+        return proc
+
 
 
 class LaunchdBackendTest(unittest.TestCase):
@@ -84,6 +114,69 @@ class LaunchdBackendTest(unittest.TestCase):
             backend.remove("factory-widgets")
             self.assertIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)
             self.assertFalse(path.exists())
+
+    def test_install_reloads_an_existing_plist_after_manual_bootout(self) -> None:
+        run = FakeRun()
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            definition = self.definition(root=Path(directory) / "factory")
+            path = backend.install(definition)
+            run.print_code = 3
+            backend.install(definition)
+            self.assertEqual(run.calls.count(["launchctl", "bootstrap", "gui/501", str(path)]), 2)
+
+    def test_remove_refuses_to_unload_a_running_pass_without_wait(self) -> None:
+        run = RunningRun()
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            data = {"repo": {"acme/widgets": {"path": "/tmp/widgets"}}}
+            with (
+                mock.patch.object(rm.host, "load", return_value=data),
+                mock.patch.object(rm.host, "select", return_value={"acme/widgets": data["repo"]["acme/widgets"]}),
+                mock.patch.object(rm.host, "unit_name", return_value="factory-widgets"),
+                mock.patch.object(rm.host, "service_backend", return_value=backend),
+                self.assertRaisesRegex(DistrictError, "is running a pass"),
+            ):
+                rm.main(["acme/widgets"])
+        self.assertNotIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)
+
+    def test_disabling_timer_waits_for_running_job_before_bootout(self) -> None:
+        run = FakeRun()
+        run.print_results = [
+            (0, "state = running\npid = 4242\n", ""),
+            (0, "state = exited\nlast exit code = 0\n", ""),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            backend.enable("factory-widgets.timer", False)
+        print_calls = [index for index, call in enumerate(run.calls) if call[1:2] == ["print"]]
+        bootout = run.calls.index(["launchctl", "bootout", "gui/501/factory-widgets"])
+        self.assertEqual(len(print_calls), 2)
+        self.assertLess(print_calls[-1], bootout)
+
+
+    def test_start_loads_scheduled_job_and_returns_its_last_exit_code(self) -> None:
+        run = FakeRun()
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            path = backend.agent_dir / "factory-widgets.plist"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(backend.render(self.definition(root=Path(directory) / "factory")))
+            run.print_results = [
+                (3, "", "not found"),
+                (0, "state = running\npid = 4242\n", ""),
+                (0, "state = exited\nlast exit code = 3\n", ""),
+            ]
+            proc = backend.start("factory-widgets.service", check=False)
+            self.assertEqual(proc.returncode, 3)
+            self.assertIn(["launchctl", "bootstrap", "gui/501", str(path)], run.calls)
+            self.assertIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)
+
+    def test_systemd_status_propagates_show_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            backend = SystemdUserBackend(FailedSystemctlRun(), unit_dir=Path(directory))
+            with self.assertRaises(subprocess.CalledProcessError):
+                backend.status("factory-widgets.service")
 
     def test_running_scheduled_job_is_activating_while_timer_stays_active(self) -> None:
         run = FakeRun()

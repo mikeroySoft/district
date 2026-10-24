@@ -24,10 +24,13 @@ def main(argv: list[str]) -> int:
     unit = host.unit_name(slug)
     backend = host.service_backend()
     if not args.keep_units:
+        service = f"{unit}.service"
+        if backend.is_active(service) in ("active", "activating") and not args.wait:
+            raise DistrictError(f"{service} is running a pass; wait for it or pass --wait")
         backend.enable(f"{unit}.timer", False, check=False)
-        while backend.is_active(f"{unit}.service") in ("active", "activating"):
+        while backend.is_active(service) in ("active", "activating"):
             if not args.wait:
-                raise DistrictError(f"{unit}.service is running a pass; wait for it or pass --wait")
+                raise DistrictError(f"{service} is running a pass; wait for it or pass --wait")
             time.sleep(5)
         backend.enable(f"{unit}-dashboard.service", False, check=False)
         backend.remove(unit)
