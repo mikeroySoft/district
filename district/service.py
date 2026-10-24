@@ -7,6 +7,7 @@ import plistlib
 import re
 import shlex
 import subprocess
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -264,9 +265,9 @@ class SystemdUserBackend(ServiceBackend):
         return self._run("is-active", name, check=False).stdout.strip()
 
     def _property(self, name: str, prop: str) -> str:
-        value = self._run("show", name, f"--property={prop}", "--value", "--no-pager", check=False).stdout.strip()
+        value = self._run("show", name, f"--property={prop}", "--value", "--no-pager").stdout.strip()
         if not value:
-            value = self._run("show", "-p", prop, "--value", name, check=False).stdout.strip()
+            value = self._run("show", "-p", prop, "--value", name).stdout.strip()
         return value
 
     def status(self, name: str) -> ServiceStatus:
@@ -395,18 +396,50 @@ class LaunchdBackend(ServiceBackend):
 
     def start(self, name: str, *, restart: bool = False, check: bool = True) -> subprocess.CompletedProcess:
         label = self._label(name)
-        if name.endswith(".timer"):
-            return self._run("bootstrap", self.domain, str(self._path(label)), check=check)
-        args = ["kickstart"]
-        if restart:
-            args.append("-k")
-        args.append(f"{self.domain}/{label}")
-        return self._run(*args, check=check)
+        path = self._path(label)
+        try:
+            scheduled = "StartInterval" in plistlib.loads(path.read_bytes())
+        except (OSError, plistlib.InvalidFileException):
+            scheduled = False
+        was_loaded = self.status(name).loaded
+        if not was_loaded:
+            proc = self._run("bootstrap", self.domain, str(path), check=check)
+        elif name.endswith(".timer"):
+            return self._run("bootstrap", self.domain, str(path), check=check)
+        else:
+            args = ["kickstart"]
+            if restart:
+                args.append("-k")
+            args.append(f"{self.domain}/{label}")
+            proc = self._run(*args, check=check)
+        if proc.returncode or not scheduled or name.endswith(".timer"):
+            return proc
+        while True:
+            status = self._run("print", f"{self.domain}/{label}", check=False)
+            if status.returncode:
+                result = subprocess.CompletedProcess(proc.args, status.returncode, proc.stdout, status.stderr)
+            elif re.search(r"^\s*state\s*=\s*running\s*$", status.stdout, re.MULTILINE):
+                time.sleep(0.1)
+                continue
+            else:
+                exit_code = re.search(r"^\s*last exit code\s*=\s*(-?\d+)\s*$", status.stdout, re.MULTILINE)
+                if not exit_code:
+                    time.sleep(0.1)
+                    continue
+                result = subprocess.CompletedProcess(proc.args, int(exit_code.group(1)), proc.stdout, proc.stderr)
+            if not was_loaded:
+                self._run("bootout", f"{self.domain}/{label}", check=False)
+            return result
+
+    def _unload_when_idle(self, label: str, *, check: bool) -> subprocess.CompletedProcess:
+        while self.is_active(f"{label}.service") in ("active", "activating", "deactivating"):
+            time.sleep(0.1)
+        return self._run("bootout", f"{self.domain}/{label}", check=check)
 
     def stop(self, name: str, *, check: bool = True) -> subprocess.CompletedProcess:
         label = self._label(name)
         if name.endswith(".timer"):
-            return self._run("bootout", f"{self.domain}/{label}", check=check)
+            return self._unload_when_idle(label, check=check)
         return self._run("kill", "SIGTERM", f"{self.domain}/{label}", check=check)
 
     def enable(self, name: str, enabled: bool = True, *, now: bool = True,
@@ -414,7 +447,7 @@ class LaunchdBackend(ServiceBackend):
         label = self._label(name)
         if enabled:
             return self._run("bootstrap", self.domain, str(self._path(label)), check=check)
-        return self._run("bootout", f"{self.domain}/{label}", check=check)
+        return self._unload_when_idle(label, check=check)
 
     def status(self, name: str) -> ServiceStatus:
         label = self._label(name)
@@ -429,7 +462,7 @@ class LaunchdBackend(ServiceBackend):
         proc = self._run("print", f"{self.domain}/{label}", check=False)
         if proc.returncode:
             return ServiceStatus(
-                "loaded" if path.exists() else "not-found",
+                "not-found",
                 "inactive",
                 "disabled" if path.exists() else "not-found",
                 environment=environment,
