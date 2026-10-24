@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -217,6 +218,35 @@ class HostTest(DistrictCase):
         self.assertEqual(host.repos(data), {"acme/widgets": {"path": "/x", "dashboard": {"port": 8765}}})
         self.assertFalse(host.path().with_suffix(".toml.tmp").exists())
 
+    def test_hosts_default_local_and_named_remote(self) -> None:
+        ultron = {"ssh": "mike@ultron.lan", "platform": "macos", "root": "~/factories"}
+        data = {
+            "hosts": {"ultron": ultron},
+            "repo": {
+                "acme/local": {"path": "/local"},
+                "acme/remote": {"path": "/remote", "host": "ultron"},
+            },
+        }
+        host.save(data)
+        loaded = host.load()
+        self.assertEqual(host.hosts(loaded), {"ultron": ultron})
+        self.assertEqual(host.factory_host(loaded, "acme/local"), "local")
+        self.assertEqual(host.factory_host(loaded, "acme/remote"), ultron)
+        self.assertFalse(host.is_remote(loaded, "acme/local"))
+        self.assertTrue(host.is_remote(loaded, "acme/remote"))
+
+    def test_hosts_reject_invalid_entries_and_unknown_repo_host(self) -> None:
+        for entry, detail in (
+            ({"platform": "macos"}, "[hosts.ultron].ssh"),
+            ({"ssh": "mike@ultron.lan", "platform": "windows"}, "[hosts.ultron].platform"),
+        ):
+            with self.subTest(entry=entry):
+                with self.assertRaisesRegex(host.DistrictError, re.escape(detail)):
+                    host.hosts({"hosts": {"ultron": entry}})
+        data = {"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}}
+        with self.assertRaisesRegex(host.DistrictError, "acme/widgets.*missing"):
+            host.factory_host(data, "acme/widgets")
+
     def test_next_port_after_gap_and_default_port_rejected(self) -> None:
         data = {"repo": {"a/b": {"path": "/a", "dashboard": {"port": 8765}}, "c/d": {"path": "/c", "dashboard": {"port": 8770}}}}
         self.assertEqual(host.next_port(data), 8771)
@@ -299,6 +329,21 @@ class AddTest(DistrictCase):
         code, out = self.district("add", str(repo))
         self.assertEqual(code, 0, out)
         self.assertEqual(list(host.load()["repo"]), ["other/name"])
+
+    def test_add_records_existing_host(self) -> None:
+        host.save({"hosts": {"ultron": {"ssh": "mike@ultron.lan", "platform": "macos"}}})
+        repo = self.repo(toml="")
+        code, out = self.district("add", str(repo), "--host", "ultron")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(host.load()["repo"]["acme/widgets"]["host"], "ultron")
+
+    def test_add_rejects_unknown_host_before_touching_repo(self) -> None:
+        repo = self.repo(toml="")
+        code, out = self.district("add", str(repo), "--host", "ultron")
+        self.assertEqual(code, 1)
+        self.assertIn("ultron", out)
+        self.assertEqual(host.load(), {})
+        self.assertEqual(self.calls("factory"), [])
 
     def test_basename_collision_refused(self) -> None:
         host.save({"repo": {"someone/widgets": {"path": "/elsewhere", "dashboard": {"port": 8765}}}})
@@ -544,6 +589,26 @@ class ApplyTest(DistrictCase):
             registry.parent.mkdir(parents=True, exist_ok=True)
             registry.write_text(f'[repo."acme/{name}"]\npath = "/tmp/{name}"\n')
         self.assertEqual(set(host.repos(host.load())), {"acme/factory"})
+
+    def test_unknown_factory_host_fails_before_commands(self) -> None:
+        host.save({"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}})
+        code, out = self.district("apply")
+        self.assertEqual(code, 1)
+        self.assertIn("acme/widgets", out)
+        self.assertIn("missing", out)
+        self.assertEqual(self.calls("factory"), [])
+        self.assertEqual(self.calls("systemctl"), [])
+
+    def test_remote_factory_is_skipped_without_commands(self) -> None:
+        host.save({
+            "hosts": {"ultron": {"ssh": "mike@ultron.lan", "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
+        })
+        code, out = self.district("apply")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip(), "acme/widgets: on host ultron (remote hosts not supported yet, #96)")
+        self.assertEqual(self.calls("factory"), [])
+        self.assertEqual(self.calls("systemctl"), [])
 
     def test_npm_day_conversion_and_policy_env(self) -> None:
         self.assertEqual((apply.npm_days("24h"), apply.npm_days("36h"), apply.npm_days("1h"), apply.npm_days("3d")), (1, 2, 1, 3))
@@ -872,6 +937,25 @@ class StatusTest(DistrictCase):
         code, out = self.district("status", "--json")
         self.assertEqual((code, json.loads(out)), (0, {}))
 
+    def test_remote_factory_is_skipped_without_collection(self) -> None:
+        host.save({
+            "hosts": {"ultron": {"ssh": "mike@ultron.lan", "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
+        })
+        code, out = self.district("status")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip(), "acme/widgets: on host ultron (remote hosts not supported yet, #96)")
+        self.assertEqual(self.calls("factory"), [])
+        self.assertEqual(self.calls("systemctl"), [])
+
+    def test_unknown_factory_host_fails_before_collection(self) -> None:
+        host.save({"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}})
+        code, out = self.district("status")
+        self.assertEqual(code, 1)
+        self.assertIn("acme/widgets", out)
+        self.assertIn("missing", out)
+        self.assertEqual(self.calls("factory"), [])
+
     def test_nonzero_snapshot_with_usable_local_facts(self) -> None:
         repo = self.repo(toml="")
         host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
@@ -995,6 +1079,18 @@ class RmTest(DistrictCase):
         calls = self.calls("systemctl")
         self.assertLess(calls.index("disable --now factory-widgets.timer"), calls.index("daemon-reload"))
 
+    def test_remote_factory_is_not_removed(self) -> None:
+        data = {
+            "hosts": {"ultron": {"ssh": "mike@ultron.lan", "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
+        }
+        host.save(data)
+        code, out = self.district("rm", "widgets")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.strip(), "acme/widgets: on host ultron (remote hosts not supported yet, #96)")
+        self.assertEqual(host.load(), data)
+        self.assertEqual(self.calls("systemctl"), [])
+
 
 class DoctorTest(DistrictCase):
     def doctor_tools(self, factory=("factory 0.2.0 (abc1234)\n", 0), gh=("", 0), system="running\n", linger="yes\n",
@@ -1010,6 +1106,14 @@ class DoctorTest(DistrictCase):
         )
         self.stub("loginctl", ("show-user * -p Linger --value", linger))
         self.stub("ss", ("-ltnp sport = :*", ss))
+
+    def test_doctor_rejects_invalid_host_before_checks(self) -> None:
+        host.save({"hosts": {"ultron": {"platform": "macos"}}})
+        code, out = self.district("doctor")
+        self.assertEqual(code, 1)
+        self.assertIn("[hosts.ultron].ssh", out)
+        self.assertEqual(self.calls("factory"), [])
+        self.assertEqual(self.calls("systemctl"), [])
 
     def test_doctor_json_passes_host_prerequisites(self) -> None:
         repo = self.repo()
