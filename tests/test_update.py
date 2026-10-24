@@ -476,7 +476,7 @@ class UpdateCase(unittest.TestCase):
         self.assertFalse(any("install" in line for line in self.log("uv")))
 
     def test_next_invocation_recovers_a_hard_interruption_without_github(self) -> None:
-        from district import update_transaction as tx
+        from district import service, update_transaction as tx
 
         root = self.state_home / "district" / "update"
         current = tx.installed_identity(self.tools / "district")
@@ -489,6 +489,7 @@ class UpdateCase(unittest.TestCase):
             current,
         )
         shutil.copy2(tx.__file__, root / "transaction.py")
+        shutil.copy2(service.__file__, root / "service.py")
         services = {
             name: {"loaded": False, "active_state": "inactive", "unit_file_state": "not-found", "main_pid": "0"}
             for name in tx.UNITS
@@ -497,7 +498,11 @@ class UpdateCase(unittest.TestCase):
             "schema": 1, "action": "update", "state_root": str(root), "tool": str(self.tools / "district"),
             "entrypoint": str(self.tool_bin / "district"), "uv": str(self.bin / "uv"),
             "lock": str(self.cache_home / "district" / "apply.lock"),
-            "systemctl": str(self.bin / "systemctl"), "python_version": "3.14.0", "current": current,
+            "service": {
+                "platform": "linux", "executable": str(self.bin / "systemctl"),
+                "unit_dir": str(self.config_home / "systemd" / "user"),
+            },
+            "python_version": "3.14.0", "current": current,
             "target": {"sha": NEW, "version": "0.2.0", "source": f"https://github.com/mikeroySoft/district.git?rev={NEW}"},
             "install_source": f"git+https://github.com/mikeroySoft/district.git@{NEW}", "target_artifact": None,
             "previous_artifact": None, "stage": str(root / "stage"),

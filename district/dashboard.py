@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from district import atlas, host, status
+from district import atlas, host, service, status
 from district.dashboard_read import detect, safe_fleet, safe_text
 
 DEFAULT_PORT = 8760
@@ -244,51 +244,52 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def units(host_arg: str | None, port: int) -> dict[str, str]:
+def services(host_arg: str | None, port: int) -> tuple[service.ServiceDefinition, ...]:
     """District dashboard, metrics, and apply services and timers."""
-    exe = f"{sys.executable} -m district"
-    env = f"Environment=PATH={host.service_path()}\n"
-    bind = f" --host {host_arg}" if host_arg else ""
-    return {
-        "district-dashboard.service": (
-            "[Unit]\nDescription=District dashboard (fleet atlas + management)\nAfter=network.target\n\n"
-            f"[Service]\n{env}ExecStart={exe} dashboard{bind} --port {port} --no-open\n"
-            "Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
+    root = host.operation_lock_path().parent
+    environment = {"PATH": host.service_path()}
+    bind = ("--host", host_arg) if host_arg else ()
+    common = {"root": root, "environment": environment, "working_directory": False}
+    return (
+        service.ServiceDefinition(
+            label="district-dashboard",
+            description="District dashboard (fleet atlas + management)",
+            argv=(sys.executable, "-m", "district", "dashboard", *bind, "--port", str(port), "--no-open"),
+            keep_alive=True,
+            after_network=True,
+            **common,
         ),
-        "district-metrics.service": (
-            "[Unit]\nDescription=District metrics refresh (git + gh per factory)\n\n"
-            f"[Service]\nType=oneshot\n{env}ExecStart={exe} metrics --refresh\n"
+        service.ServiceDefinition(
+            label="district-metrics",
+            description="District metrics refresh (git + gh per factory)",
+            argv=(sys.executable, "-m", "district", "metrics", "--refresh"),
+            interval="1h",
+            boot_delay="5min",
+            timer_description="Refresh District metrics hourly",
+            **common,
         ),
-        "district-metrics.timer": (
-            "[Unit]\nDescription=Refresh District metrics hourly\n\n"
-            "[Timer]\nOnBootSec=5min\nOnUnitActiveSec=1h\n\n[Install]\nWantedBy=timers.target\n"
+        service.ServiceDefinition(
+            label="district-apply",
+            description="Reconcile District factories",
+            argv=(sys.executable, "-m", "district", "apply"),
+            interval="1h",
+            boot_delay="10min",
+            timer_description="Apply District configuration hourly",
+            **common,
         ),
-        "district-apply.service": (
-            "[Unit]\nDescription=Reconcile District factories\n\n"
-            f"[Service]\nType=oneshot\n{env}ExecStart={exe} apply\n"
-        ),
-        "district-apply.timer": (
-            "[Unit]\nDescription=Apply District configuration hourly\n\n"
-            "[Timer]\nOnBootSec=10min\nOnUnitActiveSec=1h\n\n[Install]\nWantedBy=timers.target\n"
-        ),
-    }
+    )
 
 
 def install(host_arg: str | None, port: int) -> int:
-    udir = host.unit_dir()
-    udir.mkdir(parents=True, exist_ok=True)
-    wanted = units(host_arg, port)
-    for name, body in wanted.items():
-        path = udir / name
-        if not path.exists() or path.read_text() != body:
-            path.write_text(body)
-            print(f"wrote {path}")
-    host.systemctl("daemon-reload")
-    for unit in ("district-dashboard.service", "district-metrics.timer", "district-apply.timer"):
-        host.systemctl("enable", "--now", unit)
-    host.systemctl("restart", "district-dashboard.service")
+    backend = host.service_backend()
+    for definition in services(host_arg, port):
+        backend.install(definition)
+    backend.start("district-dashboard.service", restart=True)
     print("started district-dashboard.service, district-metrics.timer, and district-apply.timer")
-    print("stop with: systemctl --user disable --now district-dashboard.service district-metrics.timer district-apply.timer")
+    if isinstance(backend, service.SystemdUserBackend):
+        print("stop with: systemctl --user disable --now district-dashboard.service district-metrics.timer district-apply.timer")
+    else:
+        print("stop with: launchctl bootout gui/$UID/district-dashboard gui/$UID/district-metrics gui/$UID/district-apply")
     return 0
 
 

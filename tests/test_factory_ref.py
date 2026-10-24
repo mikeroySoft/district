@@ -81,24 +81,23 @@ class FactoryRefTest(unittest.TestCase):
 
     def test_install_restarts_installed_dashboard(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
-        with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.object(host, "unit_dir", return_value=Path(directory)), \
-                mock.patch.object(apply, "systemctl") as systemctl:
-            (Path(directory) / f"{host.unit_name('acme/widgets')}-dashboard.service").touch()
+        backend = mock.Mock()
+        backend.status.return_value.loaded = True
+        with mock.patch.object(host, "service_backend", return_value=backend):
             self.calls(checks)
-        systemctl.assert_called_once_with(
-            "restart", f"{host.unit_name('acme/widgets')}-dashboard.service", check=False)
+        backend.start.assert_called_once_with(
+            f"{host.unit_name('acme/widgets')}-dashboard.service", restart=True, check=False)
 
     def test_partial_timer_disable_failure_still_restores(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
         timers = ["one.timer", "two.timer"]
-        with mock.patch.object(apply, "systemctl",
-                               side_effect=[self.proc([], returncode=0), host.DistrictError("disable failed")]), \
+        backend = mock.Mock()
+        backend.enable.side_effect = [self.proc([], returncode=0), host.DistrictError("disable failed")]
+        with mock.patch.object(host, "service_backend", return_value=backend), \
                 mock.patch.object(apply, "restore") as restore:
             with self.assertRaises(host.DistrictError):
                 self.calls(checks, active_timers=timers)
-        restore.assert_called_once()
-        self.assertEqual(restore.call_args.args[0], timers)
+        restore.assert_called_once_with(timers, mock.ANY, backend)
 
     def test_unresolvable_ref_keeps_installed_engine(self) -> None:
         out = io.StringIO()

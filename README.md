@@ -3,10 +3,10 @@
 Host-side fleet manager for [Factory](https://github.com/mikeroySoft/factory) installs.
 
 Factory runs an autonomous ticket pipeline for **one** repository: a `.factory.toml`
-at the repo root, a systemd user timer, a dashboard. District owns everything that
-belongs to the **host** instead of the repo — the registry of managed repos, the
-engine install and its version pins, triage endpoint, dashboard ports, timer
-cadence, systemd units, labels, supply-chain policy, and the failure cap.
+at the repo root, a host service timer, and a dashboard. District owns everything
+that belongs to the **host** instead of the repo — the registry of managed repos,
+the engine install and its version pins, triage endpoint, dashboard ports, timer
+cadence, service definitions, labels, supply-chain policy, and the failure cap.
 
 Full rationale: [PRD.md](PRD.md). Project page: <https://mikeroysoft.github.io/district/>.
 
@@ -57,7 +57,7 @@ only once.
 | triage endpoint and model | `.github/ISSUE_TEMPLATE/agent_task.md` |
 | worker/reviewer argv, gate lock path | `.factory-lessons.md` |
 | dashboard port, timer cadence, bind host | `.gitignore` lines |
-| systemd units, labels, registry, policy | |
+| systemd user units / launchd agents, labels, registry, policy | |
 
 Three rules follow: District writes committed files exactly once, at onboarding,
 and only reports drift on them afterwards; it rewrites host artifacts on every
@@ -83,8 +83,12 @@ path = "/Users/mike/factories/benito-app"
 host = "ultron"
 ```
 
-`local` is reserved for this machine. Remote factories are recorded but skipped
-until remote execution support lands in #96.
+`platform` selects systemd user units for Linux and
+`~/Library/LaunchAgents/<label>.plist` for macOS. Launchd jobs add
+`/opt/homebrew/bin` to the service PATH and write stdout/stderr under the
+factory's `.factory/logs/` directory. `local` is reserved for this machine.
+Remote factories are recorded but skipped until remote execution support lands
+in #96.
 
 Set `factory_ref = "main"` under `[defaults]` to let the hourly plain
 `district apply` follow Factory's remote `main` branch. District never checks
