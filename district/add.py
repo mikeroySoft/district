@@ -468,16 +468,19 @@ def main(argv: list[str]) -> int:
     if args.dry_run:
         return dry_run(args.target, args, data)
     root = resolve_target(args.target, data)
-    report = doctor(root)
-    slug = report["repo"]
+    repo_file = root / CONFIG_NAME
+    adopt = repo_file.exists()
+    existing = tomllib.loads(repo_file.read_text()) if adopt else {}
+    if args.host not in (None, "local"):
+        slug = existing.get("repo", {}).get("slug") or remote_slug(remotes(root).get("origin", ""))
+        if not slug:
+            raise DistrictError(f"cannot identify the GitHub repository for {root}")
+    else:
+        slug = doctor(root)["repo"]
     registered = host.repos(data)
     for other in registered:
         if other != slug and host.unit_name(other) == host.unit_name(slug):
             raise DistrictError(f"{slug} would share unit {host.unit_name(slug)} with {other}; rename one checkout's origin")
-
-    repo_file = root / CONFIG_NAME
-    adopt = repo_file.exists()
-    existing = tomllib.loads(repo_file.read_text()) if adopt else {}
 
     # 1. registry entry first: both paths depend on the port and path being persisted
     table = host.repo_table(data, slug)
@@ -490,6 +493,9 @@ def main(argv: list[str]) -> int:
     table.setdefault("dashboard", {})["port"] = port
     host.save(data)
     print(f"registered {slug} at {root} (dashboard port {port})")
+    if args.host not in (None, "local"):
+        print(f"{slug}: on host {args.host} (remote hosts not supported yet, #96)")
+        return 0
 
     # 2. fork detection
     parent = fork_parent(slug)

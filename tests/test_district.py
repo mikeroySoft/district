@@ -336,6 +336,9 @@ class AddTest(DistrictCase):
         code, out = self.district("add", str(repo), "--host", "ultron")
         self.assertEqual(code, 0, out)
         self.assertEqual(host.load()["repo"]["acme/widgets"]["host"], "ultron")
+        self.assertIn("acme/widgets: on host ultron (remote hosts not supported yet, #96)", out)
+        self.assertEqual(self.calls("factory"), [])
+        self.assertEqual(self.calls("systemctl"), [])
 
     def test_add_rejects_unknown_host_before_touching_repo(self) -> None:
         repo = self.repo(toml="")
