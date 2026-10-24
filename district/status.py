@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -506,15 +507,23 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--slug", action="append", metavar="OWNER/REPO", help="limit output and collection to this slug (repeatable)")
     parser.add_argument("--unhealthy", action="store_true", help="limit output to slugs whose assessment is not normal")
     args = parser.parse_args(argv)
-    gh = doctor.gh_auth()
-    failed = gh["status"] == "FAIL"
     data = host.load()
+    host.hosts(data)
+    known = host.repos(data)
+    for slug in known:
+        host.factory_host(data, slug)
     if args.slug:
-        known = host.repos(data)
         unknown = [s for s in args.slug if s not in known]
         if unknown:
             parser.error(f"unknown slug: {', '.join(unknown)}")
-        data = {**data, "repo": {s: known[s] for s in args.slug}}
+        known = {s: known[s] for s in args.slug}
+    remote = {slug: repo for slug, repo in known.items() if host.is_remote(data, slug)}
+    for slug, repo in remote.items():
+        print(f"{slug}: on host {repo['host']} (remote hosts not supported yet, #96)",
+              file=sys.stderr if args.json else sys.stdout)
+    data = {**data, "repo": {slug: repo for slug, repo in known.items() if slug not in remote}}
+    gh = doctor.gh_auth()
+    failed = gh["status"] == "FAIL"
     entries = fleet(data)
     if args.unhealthy:
         entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}
@@ -526,7 +535,10 @@ def main(argv: list[str]) -> int:
         if entries:
             print(table([row(slug, e) for slug, e in entries.items()]))
         else:
-            print("no unhealthy repositories" if args.unhealthy else "no repositories registered (district add)")
+            if args.unhealthy:
+                print("no unhealthy repositories")
+            elif not remote:
+                print("no repositories registered (district add)")
     if failed or any(e["assessment"] == "attention" for e in entries.values()):
         return 1
     return 2 if any(e["assessment"] == "unknown" for e in entries.values()) else 0

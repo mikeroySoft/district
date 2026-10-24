@@ -78,6 +78,39 @@ def repos(data: dict) -> dict[str, dict]:
     return {slug: t for slug, t in data.get("repo", {}).items() if isinstance(t, dict) and "path" in t}
 
 
+def hosts(data: dict) -> dict[str, dict]:
+    configured = data.get("hosts", {})
+    if not isinstance(configured, dict):
+        raise DistrictError("[hosts] must be a table")
+    for name, table in configured.items():
+        if name == "local":
+            raise DistrictError("[hosts.local] is reserved for this machine")
+        if not isinstance(table, dict):
+            raise DistrictError(f"[hosts.{name}] must be a table")
+        if not isinstance(table.get("ssh"), str) or not table["ssh"].strip():
+            raise DistrictError(f"[hosts.{name}].ssh must be a non-empty SSH target")
+        if table.get("platform") not in ("linux", "macos"):
+            raise DistrictError(f"[hosts.{name}].platform must be `linux` or `macos`")
+    return configured
+
+
+def factory_host(data: dict, slug: str) -> str | dict:
+    table = repos(data).get(slug)
+    if table is None:
+        raise DistrictError(f"{slug} is not registered (district add)")
+    name = table.get("host", "local")
+    if name == "local":
+        return "local"
+    configured = hosts(data)
+    if not isinstance(name, str) or name not in configured:
+        raise DistrictError(f"{slug}: host {name!r} is not defined in [hosts]")
+    return configured[name]
+
+
+def is_remote(data: dict, slug: str) -> bool:
+    return factory_host(data, slug) != "local"
+
+
 def repo_table(data: dict, slug: str) -> dict:
     return data.setdefault("repo", {}).setdefault(slug, {})
 

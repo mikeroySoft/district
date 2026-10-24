@@ -17,7 +17,10 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     data = host.load()
-    ((slug, _),) = host.select(data, args.slug).items()
+    ((slug, table),) = host.select(data, args.slug).items()
+    if host.is_remote(data, slug):
+        print(f"{slug}: on host {table['host']} (remote hosts not supported yet, #96)")
+        return 0
     unit = host.unit_name(slug)
     if not args.keep_units:
         systemctl("disable", "--now", f"{unit}.timer", check=False)

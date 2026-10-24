@@ -456,12 +456,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("target", help="path to a checkout, or a GitHub URL to clone")
     parser.add_argument("--check", action="append", default=[], metavar="NAME=CMD", help="gate check (repeatable); replaces detection")
     parser.add_argument("--exclusive", default=None, metavar="A,B", help="check names that need single-tenant hardware")
+    parser.add_argument("--host", metavar="NAME", help="host from [hosts] (default local)")
     parser.add_argument("--no-edit", action="store_true", help="do not ask or open $EDITOR")
     parser.add_argument("--dry-run", action="store_true", help="print the proposal (slug, port, fork parent, checks) and write nothing")
     args = parser.parse_args(argv)
     os.environ["PATH"] = host.service_path()
 
     data = host.load()
+    if args.host not in (None, "local") and args.host not in host.hosts(data):
+        raise DistrictError(f"host {args.host!r} is not defined in [hosts]")
     if args.dry_run:
         return dry_run(args.target, args, data)
     root = resolve_target(args.target, data)
@@ -479,6 +482,10 @@ def main(argv: list[str]) -> int:
     # 1. registry entry first: both paths depend on the port and path being persisted
     table = host.repo_table(data, slug)
     table["path"] = str(root)
+    if args.host == "local":
+        table.pop("host", None)
+    elif args.host:
+        table["host"] = args.host
     port = dashboard_port(slug, existing, data)
     table.setdefault("dashboard", {})["port"] = port
     host.save(data)
