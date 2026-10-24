@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -63,6 +64,16 @@ class FailedSystemctlRun:
 
 
 class LaunchdBackendTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        env = mock.patch.dict(os.environ, {
+            "XDG_CONFIG_HOME": str(Path(tmp.name) / "xdg"),
+            "XDG_CACHE_HOME": str(Path(tmp.name) / "cache"),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+
     def definition(self, *, dashboard: bool = False, root: Path = FACTORY_ROOT) -> ServiceDefinition:
         if dashboard:
             return ServiceDefinition(
@@ -135,9 +146,11 @@ class LaunchdBackendTest(unittest.TestCase):
                 mock.patch.object(rm.host, "select", return_value={"acme/widgets": data["repo"]["acme/widgets"]}),
                 mock.patch.object(rm.host, "unit_name", return_value="factory-widgets"),
                 mock.patch.object(rm.host, "service_backend", return_value=backend),
+                mock.patch.object(rm.host, "save") as save,
                 self.assertRaisesRegex(DistrictError, "is running a pass"),
             ):
                 rm.main(["acme/widgets"])
+        save.assert_not_called()
         self.assertNotIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)
 
     def test_disabling_timer_waits_for_running_job_before_bootout(self) -> None:
