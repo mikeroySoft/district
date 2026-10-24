@@ -138,7 +138,7 @@
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
-      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Progress through September 18, 2026</a></p>
+      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.3 (October 24, 2026)</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
@@ -220,10 +220,10 @@ rocm-app   capped             <span class="att">attention</span>
     <h2>Nine verbs. Each one shells out to the host tools it checks or manages.</h2>
     <p class="lede">District never imports from mikeroySoft/factory and never reimplements a <code>factory</code> command. If it needs a per-repo fact, the fix is a flag on <code>factory</code>.</p>
     <div class="cmds">
-      <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file.</div>
-      <div class="k">district apply</div><div class="v">Reconcile units, labels, doctor checks, failure caps, and host policy. Hourly reconciliation is available through <code>dashboard --install</code>. When <code>[defaults].factory_ref</code> is set, every apply installs the changed remote Factory commit only after all GitHub checks succeed, without touching the source checkout. <code>--upgrade</code> explicitly reinstalls the shared engine from the local checkout with the registry's selected <code>factory_extras</code>; <code>--reset SLUG</code> requires a successful pass before restoring a capped timer.</div>
+      <div class="k">district add</div><div class="v">Onboard a path or URL, or adopt a repo that already has <code>.factory.toml</code>. Detects fork parent, ecosystem, and the next free port; proposes gate checks from CI; lifts host-owned keys out of the repo file. <code>--host NAME</code> assigns the factory to a host from <code>[hosts]</code>.</div>
+      <div class="k">district apply</div><div class="v">Reconcile units, labels, doctor checks, failure caps, and host policy, then smoke-check that <code>gh</code> and <code>factory</code> run under each unit's PATH. Hourly reconciliation is available through <code>dashboard --install</code>. When <code>[defaults].factory_ref</code> is set, every apply installs the changed remote Factory commit only after all GitHub checks succeed, without touching the source checkout. <code>--upgrade</code> explicitly reinstalls the shared engine from the local checkout with the registry's selected <code>factory_extras</code>; <code>--reset SLUG</code> requires a successful pass before restoring a capped timer.</div>
       <div class="k">district doctor</div><div class="v">Check District's host prerequisites, registered repository remotes, dashboard ports, package policy, and units. Reports every check as <code>PASS</code>, <code>WARN</code>, or <code>FAIL</code>.</div>
-      <div class="k">district status</div><div class="v">Operating state, execution state, observation quality, and evidence-backed findings, with version and project metrics alongside. Text or <code>--json</code>; exit 0 for normal, 1 for operational attention, 2 for unknown without attention.</div>
+      <div class="k">district status</div><div class="v">Operating state, execution state, observation quality, and evidence-backed findings, with version and project metrics alongside. Text or <code>--json</code>, narrowed with <code>--slug</code> or <code>--unhealthy</code>; an invalid <code>gh</code> login is a fleet-level failure. Exit 0 for normal, 1 for operational attention, 2 for unknown without attention.</div>
       <div class="k">district report</div><div class="v">Print one on-demand, read-only Markdown fleet review from a bounded observation round and existing metric caches. Every repository, source age, coverage gap, and actual producer window stays visible; partial counts are labeled and rates are pooled only from compatible producer counts and windows.</div>
       <div class="k">district metrics</div><div class="v">Per-factory size, people, velocity, work, quality, resolution, and traffic — sourced from <code>git</code> and <code>gh</code>, never estimated. Cached hourly.</div>
       <div class="k">district dashboard</div><div class="v">Serve the shared cached fleet and scoped console. Atlas and management remain at the default route until cutover. Optional LAN viewing is read-only; management stays on direct localhost access. <a href="#console">See current routes and access boundaries.</a></div>
@@ -295,8 +295,23 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="changelog">
     <div class="kicker">Changelog</div>
     <h2>From fleet registry to operational evidence.</h2>
-    <p class="lede">Selected milestones through September 18, 2026. Dates below use UTC merge history for PRs; these are source milestones, not tagged releases or a claim about every installed host.</p>
+    <p class="lede">Selected milestones through October 24, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
     <ol class="timeline">
+      <li>
+        <div><time datetime="2026-10-24">October 24, 2026</time><span class="status shipped">Release · v0.1.3</span></div>
+        <div>
+          <h3>Factories can name the host they run on.</h3>
+          <ul>
+            <li><strong>Hosts registry:</strong> define remote machines under <code>[hosts.NAME]</code> (<code>ssh</code>, <code>platform</code>, optional <code>root</code>) and assign a factory with <code>host = "NAME"</code> or <code>district add --host NAME</code>. This is the first step of multi-machine support: remote factories are recorded but skipped until remote execution lands.</li>
+            <li><strong>Factory follows CI-green main:</strong> with <code>[defaults].factory_ref</code> set, each hourly <code>district apply</code> installs a new Factory commit only after all of its GitHub checks pass.</li>
+            <li><strong>Safer apply:</strong> after reconciling, <code>district apply</code> runs <code>gh --version</code> and <code>factory --version</code> under each unit's PATH and fails naming the unit and binary if either is broken.</li>
+            <li><strong>Narrower status:</strong> <code>district status --slug OWNER/REPO</code> and <code>--unhealthy</code> limit output, and an invalid <code>gh</code> login is reported once as a fleet-level failure.</li>
+            <li><strong>Package cooldown that holds:</strong> the uv minimum package age is written into units as a relative ISO 8601 duration (for example <code>PT24H</code>), so dashboards no longer restart hourly and systemd cannot split the value.</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> one controller should eventually manage factories on several machines; the registry has to know where each factory lives before District can run it there.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/releases/tag/v0.1.3">Release v0.1.3</a> · <a href="https://github.com/mikeroySoft/district/pull/104">Hosts #104</a> · <a href="https://github.com/mikeroySoft/district/pull/85">factory_ref #85</a> · <a href="https://github.com/mikeroySoft/district/issues/96">Multi-machine fleet #96</a></p>
+        </div>
+      </li>
       <li>
         <div><time datetime="2026-09-18">September 18, 2026</time><span class="status shipped">Merged</span></div>
         <div>
@@ -427,9 +442,11 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district dashboard --install          <span class="c"># dashboard + hourly metrics and apply timers</span>
 <span class="p">$</span> district status
 <span class="p">$</span> district report                       <span class="c"># on-demand read-only Markdown review on stdout</span>
-<span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span></pre>
+<span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span>
+<span class="p">$</span> district update --to v0.1.3 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
+    <p style="color:var(--text-muted)">Factories are local unless their repo table names a <code>host</code> defined under <code>[hosts.NAME]</code> (<code>ssh</code>, <code>platform</code>, optional <code>root</code>); <code>local</code> is reserved for this machine. Remote factories are recorded but skipped until remote execution support lands in <a href="https://github.com/mikeroySoft/district/issues/96">#96</a>.</p>
     <p style="color:var(--text-muted)">Optional Factory features survive every shared, host-wide engine reinstall when selected in the registry, for example:<br><code>[defaults]<br>factory_extras = ["atlas"]</code><br>Omit the setting or use an empty array to keep installing bare Factory; run <code>district apply --upgrade</code> to apply the selection to the one engine used by every managed repository.</p>
     <p style="color:var(--text-muted)">Set <code>factory_ref = "main"</code> under <code>[defaults]</code> to make every hourly <code>district apply</code> follow the Factory clone's GitHub origin. District resolves and installs the immutable remote SHA only when every check run has completed successfully, records it under <code>[defaults.engine]</code>, and leaves the installed engine unchanged while CI is pending or failed. Omit <code>factory_ref</code> to keep upgrades explicit.</p>
     <p style="color:var(--text-muted)">District self-update supports only a non-editable uv install from the official repository. It prepares the target before downtime, runs replacement and recovery from a retained stdlib helper outside the managed environment, and keeps the prior successful installation for <code>district update --rollback</code>. Metadata lives under <code>${XDG_STATE_HOME:-~/.local/state}/district/update</code>, never in Factory's registry. A source checkout can bootstrap the installed tool with <code>uv run python -m district update --to &lt;eligible-sha&gt; --yes</code>.</p>
