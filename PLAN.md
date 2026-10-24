@@ -206,8 +206,9 @@ Non-interactive: `--exclusive a,b --no-edit --check …`.
    Failure anywhere after disabling re-enables the timers before exiting.
 2. Supply-chain policy → **host `[install].env`**, not global package-manager
    config: `NPM_CONFIG_MIN_RELEASE_AGE=<days>` (duration → whole days, minimum
-   1), `UV_EXCLUDE_NEWER=<age as relative uv duration>` (whole hours →
-   `"<N> hours"`, else whole seconds rounded up; uv rejects fractional days).
+   1), `UV_EXCLUDE_NEWER=<age as relative uv duration>` (ISO 8601, whole hours →
+   `PT<N>H`, else whole seconds rounded up `PT<N>S`; no spaces, since systemd
+   splits unquoted `Environment=` values; uv rejects fractional days).
    `[defaults.min_package_age]` default `"24h"`; `"0"` removes both. `cargo`
    on PATH → one WARN line. The value is stable, so unchanged config leaves
    units untouched.
