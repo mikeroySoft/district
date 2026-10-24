@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from district import host
-from district.host import DistrictError, run, systemctl
+from district.host import DistrictError, run
 
 POLICY_ENV = ("NPM_CONFIG_MIN_RELEASE_AGE", "UV_EXCLUDE_NEWER")
 # doctor rows about committed files: drift the repo owner decides on
@@ -59,8 +59,9 @@ def installed_engine_commit(data: dict) -> str | None:
     return sha if isinstance(sha, str) and SHA.fullmatch(sha) else None
 
 
-def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[str]) -> bool:
+def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[str], backend=None) -> bool:
     """Install a changed, CI-green remote Factory ref without modifying its checkout."""
+    backend = backend or host.service_backend()
     ref = data.get("defaults", {}).get("factory_ref")
     if ref is None:
         return True
@@ -118,8 +119,8 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
 
     try:
         for timer in active_timers:
-            systemctl("disable", "--now", timer)
-        wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT)
+            backend.enable(timer, False)
+        wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT, backend)
         install_url = origin
         if origin.startswith("git@"):
             install_url = "ssh://" + origin.replace(":", "/", 1)
@@ -136,11 +137,11 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
             "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
         }
         host.save(data)
-        restart_dashboards(data)
+        restart_dashboards(data, backend)
         print(f"installed factory engine {sha[:12]} ({ref})")
         return True
     finally:
-        restore(active_timers, data)
+        restore(active_timers, data, backend)
 
 
 
@@ -199,10 +200,11 @@ def policy(data: dict) -> tuple[str, list[str]]:
 # ---------------------------------------------------------------- upgrade
 
 
-def wait_inactive(services: list[str], timeout: float) -> None:
+def wait_inactive(services: list[str], timeout: float, backend=None) -> None:
+    backend = backend or host.service_backend()
     deadline = time.monotonic() + timeout
     while True:
-        busy = [s for s in services if host.is_active(s) in ("active", "activating", "deactivating")]
+        busy = [s for s in services if backend.is_active(s) in ("active", "activating", "deactivating")]
         if not busy:
             return
         if time.monotonic() > deadline:
@@ -210,18 +212,20 @@ def wait_inactive(services: list[str], timeout: float) -> None:
         time.sleep(5)
 
 
-def restart_dashboards(data: dict) -> None:
+def restart_dashboards(data: dict, backend=None) -> None:
+    backend = backend or host.service_backend()
     for slug in _local_repos(data):
         dash = f"{host.unit_name(slug)}-dashboard.service"
-        if (host.unit_dir() / dash).exists():
-            systemctl("restart", dash, check=False)
+        if backend.status(dash).loaded:
+            backend.start(dash, restart=True, check=False)
 
 
-def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
+def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD", backend=None) -> None:
     """Stop → wait → reinstall an export of `ref` → restart dashboards. Timers are re-enabled by the caller.
 
     Records `[defaults.engine]` (ref, sha, previous, installed_at) and prints the rollback command.
     """
+    backend = backend or host.service_backend()
     extras = factory_extras(data)
     src = Path(os.path.expanduser(host.default(data, "factory_source")))
     proc = run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=src)
@@ -231,10 +235,10 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
     if ref == "HEAD" and run(["git", "status", "--porcelain"], cwd=src, check=True).stdout.strip():
         raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
     for timer in active_timers:
-        systemctl("disable", "--now", timer)
+        backend.enable(timer, False)
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
     # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
-    wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT)
+    wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT, backend)
     with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
         tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
         tree.mkdir()
@@ -254,40 +258,43 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
     host.save(data)
     if previous:
         print(f"rollback: district apply --upgrade {previous}")
-    restart_dashboards(data)
+    restart_dashboards(data, backend)
 
 
-def restore(timers: list[str], data: dict) -> None:
+def restore(timers: list[str], data: dict, backend=None) -> None:
+    backend = backend or host.service_backend()
     disabled = {f"{host.unit_name(s)}.timer" for s, t in _local_repos(data).items() if t.get("disabled_at")}
     for timer in timers:
-        if timer not in disabled and host.is_active(timer) != "active":
-            systemctl("enable", "--now", timer, check=False)
+        if timer not in disabled and backend.is_active(timer) != "active":
+            backend.enable(timer, check=False)
 
 
 # ---------------------------------------------------------------- per repo
 
 
-def reset(slug: str, table: dict, data: dict) -> bool:
+def reset(slug: str, table: dict, data: dict, backend=None) -> bool:
     """Run one pass by hand; clear the cap only if it succeeded."""
+    backend = backend or host.service_backend()
     if not table.get("disabled_at"):
         print(f"{slug}: not disabled by District; nothing to reset")
         return True
     service = f"{host.unit_name(slug)}.service"
     print(f"{slug}: running one pass ({service}) before re-enabling the timer")
-    proc = systemctl("start", service, check=False)
+    proc = backend.start(service, check=False)
     if proc.returncode != 0:
         print(f"{slug}: pass failed ({proc.stderr.strip() or proc.returncode}); timer stays disabled")
         return False
     table.pop("disabled_at", None)
     table.pop("disabled_reason", None)
     host.save(data)
-    systemctl("enable", "--now", f"{host.unit_name(slug)}.timer")
+    backend.enable(f"{host.unit_name(slug)}.timer")
     print(f"{slug}: pass succeeded; cap cleared, timer re-enabled")
     return True
 
 
-def repo_pass(slug: str, table: dict, data: dict) -> dict:
+def repo_pass(slug: str, table: dict, data: dict, backend=None) -> dict:
     root = Path(table["path"])
+    backend = backend or host.service_backend()
     row = {"slug": slug, "version": None, "doctor": "?", "drift": [], "failures": None, "fail": [], "disabled": table.get("disabled_at")}
     unit = host.unit_name(slug)
 
@@ -324,14 +331,14 @@ def repo_pass(slug: str, table: dict, data: dict) -> dict:
             row["fail"].append("dashboard: malformed JSON")
 
     cap = int(host.default(data, "max_failed_passes"))
-    if row["failures"] is not None and row["failures"] >= cap and host.is_active(f"{unit}.timer") == "active":
-        systemctl("disable", "--now", f"{unit}.timer", check=False)
+    if row["failures"] is not None and row["failures"] >= cap and backend.is_active(f"{unit}.timer") == "active":
+        backend.enable(f"{unit}.timer", False, check=False)
         table["disabled_at"] = iso(now())
         table["disabled_reason"] = f"{row['failures']} consecutive failed passes (cap {cap})"
         host.save(data)
         row["disabled"] = table["disabled_at"]
         print(f"{slug}: {table['disabled_reason']}; timer disabled. Fix the cause, then `district apply --reset {slug}`")
-    row["timer"] = host.is_active(f"{unit}.timer")
+    row["timer"] = backend.is_active(f"{unit}.timer")
     return row
 
 
@@ -349,17 +356,17 @@ def line(row: dict, status: str) -> str:
     return "  ".join(parts)
 
 
-def smoke(slugs) -> tuple[int, list[str]]:
+def smoke(slugs, backend=None) -> tuple[int, list[str]]:
     """`<binary> --version` under each installed dispatch/dashboard unit's baked PATH; returns (units, failures)."""
+    backend = backend or host.service_backend()
     units, fails = 0, []
     for slug in slugs:
         for name in (f"{host.unit_name(slug)}.service", f"{host.unit_name(slug)}-dashboard.service"):
-            unit_file = host.unit_dir() / name
-            if not unit_file.exists():
+            status = backend.status(name)
+            if not status.loaded:
                 continue
             units += 1
-            path = next((ln.removeprefix("Environment=PATH=") for ln in unit_file.read_text().splitlines()
-                         if ln.startswith("Environment=PATH=")), None)
+            path = status.environment.get("PATH")
             if path is None:
                 fails.append(f"{name}: no Environment=PATH")
                 continue
@@ -417,21 +424,22 @@ def main(argv: list[str]) -> int:
         status, warnings = policy(data)
         host.save(data)
 
+        backend = host.service_backend()
         all_timers = [f"{host.unit_name(s)}.timer" for s in _local_repos(data)]
-        active = [t for t in all_timers if host.is_active(t) == "active"]
+        active = [t for t in all_timers if backend.is_active(t) == "active"]
         rows = []
         code = 0
         if args.upgrade:
             try:
-                upgrade(data, active, args.upgrade)
+                upgrade(data, active, args.upgrade, backend)
             finally:
-                restore(active, data)
-        elif not reconcile_engine(data, targets, active):
+                restore(active, data, backend)
+        elif not reconcile_engine(data, targets, active, backend):
             code = 1
         for slug, table in targets.items():
-            if args.reset and not reset(slug, table, data):
+            if args.reset and not reset(slug, table, data, backend):
                 code = 1
-            rows.append(repo_pass(slug, table, data))
+            rows.append(repo_pass(slug, table, data, backend))
 
         engine = data.get("defaults", {}).get("engine")
         if engine and not args.upgrade and "factory_ref" not in data.get("defaults", {}):
@@ -446,7 +454,7 @@ def main(argv: list[str]) -> int:
         if len(versions) > 1:
             print(f"versions differ across the fleet: {', '.join(str(v) for v in sorted(versions, key=str))}")
             code = 1
-        units, smoke_fails = smoke(targets)
+        units, smoke_fails = smoke(targets, backend)
         for fail in smoke_fails:
             print(f"smoke FAIL {fail}")
         if smoke_fails:

@@ -60,14 +60,13 @@ class LaunchdBackendTest(unittest.TestCase):
 
     def test_generated_plists_match_goldens(self) -> None:
         run = FakeRun()
-        with tempfile.TemporaryDirectory() as directory:
-            backend = self.backend(run, Path(directory))
-            for definition, golden in (
-                (self.definition(), "factory-widgets.plist"),
-                (self.definition(dashboard=True), "factory-widgets-dashboard.plist"),
-            ):
-                with self.subTest(golden=golden):
-                    self.assertEqual(backend.render(definition), (GOLDEN / golden).read_bytes())
+        backend = self.backend(run, Path("/Users/mike"))
+        for definition, golden in (
+            (self.definition(), "factory-widgets.plist"),
+            (self.definition(dashboard=True), "factory-widgets-dashboard.plist"),
+        ):
+            with self.subTest(golden=golden):
+                self.assertEqual(backend.render(definition), (GOLDEN / golden).read_bytes())
 
     def test_install_loads_and_remove_unloads_agent(self) -> None:
         run = FakeRun()
@@ -80,6 +79,8 @@ class LaunchdBackendTest(unittest.TestCase):
             self.assertTrue(path.is_file())
             self.assertTrue((root / ".factory" / "logs").is_dir())
             self.assertIn(["launchctl", "bootstrap", "gui/501", str(path)], run.calls)
+            backend.install(definition)
+            self.assertEqual(run.calls.count(["launchctl", "bootstrap", "gui/501", str(path)]), 1)
             backend.remove("factory-widgets")
             self.assertIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)
             self.assertFalse(path.exists())
