@@ -62,6 +62,8 @@ def factory_rows(data: dict) -> list[dict[str, str]]:
 def repo_rows(data: dict) -> list[dict[str, str]]:
     rows = []
     for slug, table in host.repos(data).items():
+        if host.is_remote(data, slug):
+            continue
         path = Path(os.path.expanduser(table["path"]))
         if not path.exists():
             rows.append(row("FAIL", f"repo {slug}", f"{path} does not exist"))
@@ -80,6 +82,8 @@ def port_rows(data: dict) -> list[dict[str, str]]:
     rows = []
     by_port: dict[int, list[str]] = {}
     for slug, table in host.repos(data).items():
+        if host.is_remote(data, slug):
+            continue
         port = table.get("dashboard", {}).get("port")
         if port is not None:
             by_port.setdefault(port, []).append(slug)
@@ -148,6 +152,9 @@ def check() -> list[dict[str, str]]:
     except host.DistrictError as exc:
         data = {}
         rows.append(row("FAIL", "host file", str(exc).removeprefix("district: ")))
+    host.hosts(data)
+    for slug in host.repos(data):
+        host.factory_host(data, slug)
 
     rows += factory_rows(data)
     rows.append(gh_auth())

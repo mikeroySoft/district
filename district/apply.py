@@ -42,6 +42,10 @@ def factory_extras(data: dict) -> list[str]:
     return extras
 
 
+def _local_repos(data: dict) -> dict[str, dict]:
+    return {slug: table for slug, table in host.repos(data).items() if not host.is_remote(data, slug)}
+
+
 def github_slug(url: str) -> str | None:
     for prefix in ("https://github.com/", "git@github.com:", "ssh://git@github.com/"):
         if url.startswith(prefix):
@@ -115,7 +119,7 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
     try:
         for timer in active_timers:
             systemctl("disable", "--now", timer)
-        wait_inactive([f"{host.unit_name(s)}.service" for s in host.repos(data)], SERVICE_WAIT)
+        wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT)
         install_url = origin
         if origin.startswith("git@"):
             install_url = "ssh://" + origin.replace(":", "/", 1)
@@ -206,7 +210,7 @@ def wait_inactive(services: list[str], timeout: float) -> None:
 
 
 def restart_dashboards(data: dict) -> None:
-    for slug in host.repos(data):
+    for slug in _local_repos(data):
         dash = f"{host.unit_name(slug)}-dashboard.service"
         if (host.unit_dir() / dash).exists():
             systemctl("restart", dash, check=False)
@@ -229,7 +233,7 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
         systemctl("disable", "--now", timer)
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
     # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
-    wait_inactive([f"{host.unit_name(s)}.service" for s in host.repos(data)], SERVICE_WAIT)
+    wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT)
     with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
         tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
         tree.mkdir()
@@ -253,7 +257,7 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD") -> None:
 
 
 def restore(timers: list[str], data: dict) -> None:
-    disabled = {f"{host.unit_name(s)}.timer" for s, t in host.repos(data).items() if t.get("disabled_at")}
+    disabled = {f"{host.unit_name(s)}.timer" for s, t in _local_repos(data).items() if t.get("disabled_at")}
     for timer in timers:
         if timer not in disabled and host.is_active(timer) != "active":
             systemctl("enable", "--now", timer, check=False)
@@ -396,14 +400,23 @@ def main(argv: list[str]) -> int:
             return 1
 
         data = host.load()
-        targets = host.select(data, args.reset or args.slug)
+        host.hosts(data)
+        registered = host.repos(data)
+        for slug in registered:
+            host.factory_host(data, slug)
+        selected = host.select(data, args.reset or args.slug)
+        for slug, table in selected.items():
+            if host.is_remote(data, slug):
+                print(f"{slug}: on host {table['host']} (remote hosts not supported yet, #96)")
+        targets = {slug: table for slug, table in selected.items() if not host.is_remote(data, slug)}
         if not targets:
-            print("no repositories registered (district add)")
+            if not selected:
+                print("no repositories registered (district add)")
             return 0
         status, warnings = policy(data)
         host.save(data)
 
-        all_timers = [f"{host.unit_name(s)}.timer" for s in host.repos(data)]
+        all_timers = [f"{host.unit_name(s)}.timer" for s in _local_repos(data)]
         active = [t for t in all_timers if host.is_active(t) == "active"]
         rows = []
         code = 0

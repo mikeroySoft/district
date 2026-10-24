@@ -625,6 +625,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="emit one machine-readable result on stdout")
     try:
         args = parser.parse_args(argv)
+        data = host.load()
+        for slug, table in host.repos(data).items():
+            if table.get("host", "local") != "local":
+                print(f"{slug}: on host {table['host']} (remote hosts not supported yet, #96)",
+                      file=sys.stderr if args.json else sys.stdout)
         recovered = recover_pending(args)
         if recovered is not None:
             return recovered
