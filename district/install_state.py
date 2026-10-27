@@ -296,13 +296,14 @@ class ApplyRun:
         after = timer_states(data)
         disabled = set(self.disabled)
         reenabled = set(self.reenabled)
-        for name in set(self.timers_before) | set(after):
-            before_active = self.timers_before.get(name, {}).get("active")
-            after_active = after.get(name, {}).get("active")
-            if before_active == "active" and after_active != "active":
-                disabled.add(name)
-            if before_active != "active" and after_active == "active":
-                reenabled.add(name)
+        if self.observed:
+            for name in set(self.timers_before) | set(after):
+                before_active = self.timers_before.get(name, {}).get("active")
+                after_active = after.get(name, {}).get("active")
+                if before_active == "active" and after_active != "active":
+                    disabled.add(name)
+                if before_active != "active" and after_active == "active":
+                    reenabled.add(name)
         last_apply = {
             "started_at": self.started_at,
             "finished_at": stamp(now()),

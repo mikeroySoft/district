@@ -1693,7 +1693,11 @@ class ServicePathTest(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 xdg = root / "xdg"
-                with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg), "XDG_CACHE_HOME": str(root / "cache")}):
+                with mock.patch.dict(os.environ, {
+                    "XDG_CONFIG_HOME": str(xdg),
+                    "XDG_STATE_HOME": str(root / "state"),
+                    "XDG_CACHE_HOME": str(root / "cache"),
+                }):
                     code = apply.main([])
                     self.assertEqual(code, 0)
                     self.assertEqual(os.environ["PATH"], host.service_path(bad))
