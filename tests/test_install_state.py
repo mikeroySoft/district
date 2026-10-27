@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -146,6 +147,76 @@ class InstallStateTest(DistrictCase):
         document = json.loads(install_state.state_path().read_text())
         self.assertEqual(document["last_apply"]["reenabled"], [])
 
+    def _apply_with_show_observations(self, before: object, after: object) -> tuple[dict, str]:
+        run = host.run
+        observations = mock.Mock(side_effect=[before, after, SHOW])
+
+        def systemctl_show(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+            if argv[:3] == ["systemctl", "--user", "show"]:
+                output = observations()
+                if isinstance(output, str):
+                    return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+                return output
+            return run(argv, **kwargs)
+
+        with mock.patch.object(host, "run", side_effect=systemctl_show), \
+             mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
+            code, apply_output = self.district("apply", "widgets")
+            text_code, text_output = self.district("install-state")
+        self.assertEqual(code, 0, apply_output)
+        self.assertEqual(text_code, 0, text_output)
+        self.assertEqual(observations.call_count, 3)
+        return json.loads(install_state.state_path().read_text()), text_output
+
+    def test_failed_initial_systemctl_observation_does_not_infer_timer_transitions(self) -> None:
+        active = SHOW.replace("ActiveState=inactive", "ActiveState=active", 1)
+        for failed in (
+            OSError("systemctl unavailable"),
+            subprocess.TimeoutExpired("systemctl", install_state.LOCAL_TIMEOUT),
+            subprocess.CompletedProcess(["systemctl"], 1, stdout="", stderr="user bus unavailable"),
+            "",
+            active.replace("ActiveState=active", "ActiveState="),
+            active.replace("ActiveState=active", "ActiveState=unknown"),
+        ):
+            with self.subTest(failed=failed):
+                document, output = self._apply_with_show_observations(failed, active)
+                self.assertEqual(document["last_apply"]["reenabled"], [])
+                self.assertEqual(document["last_apply"]["disabled"], [])
+                self.assertNotIn("WARNING:", output)
+
+    def test_failed_final_systemctl_observation_does_not_infer_timer_transitions(self) -> None:
+        active = SHOW.replace("ActiveState=inactive", "ActiveState=active", 1)
+        for failed in (
+            OSError("systemctl unavailable"),
+            subprocess.TimeoutExpired("systemctl", install_state.LOCAL_TIMEOUT),
+            subprocess.CompletedProcess(["systemctl"], 1, stdout="", stderr="user bus unavailable"),
+            "",
+            active.replace("ActiveState=active", "ActiveState="),
+            active.replace("ActiveState=active", "ActiveState=unknown"),
+        ):
+            with self.subTest(failed=failed):
+                document, output = self._apply_with_show_observations(active, failed)
+                self.assertEqual(document["last_apply"]["disabled"], [])
+                self.assertEqual(document["last_apply"]["reenabled"], [])
+                self.assertNotIn("WARNING:", output)
+
+    def test_systemctl_stopped_enabled_timer_transition_still_warns(self) -> None:
+        active = SHOW.replace("ActiveState=inactive", "ActiveState=active", 1)
+        document, output = self._apply_with_show_observations(SHOW, active)
+        self.assertEqual(document["last_apply"]["reenabled"], ["factory-widgets.timer"])
+        self.assertIn("WARNING: last apply re-enabled factory-widgets.timer", output)
+
+    def test_failed_observations_preserve_explicit_timer_operations(self) -> None:
+        record = install_state.ApplyRun.start()
+        with mock.patch.object(host, "run", side_effect=OSError("systemctl unavailable")), \
+             mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
+            record.observe(host.load())
+            record.disabled.add("factory-widgets.timer")
+            record.reenabled.add("factory-widgets.timer")
+            record.finish(1)
+        document = json.loads(install_state.state_path().read_text())
+        self.assertEqual(document["last_apply"]["disabled"], ["factory-widgets.timer"])
+        self.assertEqual(document["last_apply"]["reenabled"], ["factory-widgets.timer"])
 
     def test_failed_apply_still_atomically_rewrites_last_apply(self) -> None:
         states = {"factory-widgets.timer": timer("active"), "district-apply.timer": timer("active")}
