@@ -6,7 +6,7 @@ import json
 import math
 from datetime import datetime, timedelta, timezone
 
-from district import host, status
+from district import host, install_state, status
 
 
 GITHUB_LIMIT_NOTE = "GitHub query limits: merged PRs 500; open PRs 1000; caches have no completeness flag."
@@ -170,14 +170,40 @@ def _aggregate_rate(items: list[dict], name: str, label: str, registered: int) -
     return f"{label} aggregate: {_percent(numerator / denominator)} ({numerator}/{denominator})"
 
 
-def render(entries: dict[str, dict], generated_at: datetime | None = None) -> str:
+def _install_lines(record: dict | None) -> list[str]:
+    if not isinstance(record, dict) or not record:
+        return ["## Install state", "", "- Source: `install-state.json` unavailable", ""]
+    district = _mapping(record.get("district"))
+    engine = _mapping(record.get("engine"))
+    timers = _mapping(record.get("timers"))
+    last_apply = _mapping(record.get("last_apply"))
+    active = sum(_mapping(value).get("active") == "active" for value in timers.values())
+    inactive = sum(_mapping(value).get("active") == "inactive" for value in timers.values())
+    current = district.get("up_to_date", "unknown")
+    current = "yes" if current is True else "no" if current is False else "unknown"
+    return [
+        "## Install state",
+        "",
+        f"- Source: `install-state.json` observed at {record.get('observed_at', 'unknown')} on {record.get('host', 'unknown')}",
+        f"- District: {district.get('installed_version', 'unknown')}; latest {district.get('latest_release', 'unknown')}; up to date: {current}",
+        f"- Factory engine: {engine.get('installed_version', 'unknown')} ({engine.get('installed_sha', 'unknown')}); "
+        f"ref {engine.get('configured_ref', 'unknown')}; policy {engine.get('policy', 'unknown')}",
+        f"- Timers: {active} active, {inactive} inactive; holds: {len(record.get('holds') or [])}",
+        f"- Last apply: {last_apply.get('finished_at', 'unknown')}; exit {last_apply.get('exit_status', 'unknown')}",
+        "",
+    ]
+
+
+def render(entries: dict[str, dict], generated_at: datetime | None = None,
+           install: dict | None = None) -> str:
     """Render supplied observations without collecting or mutating anything."""
     at = generated_at or _now()
     registered = len(entries)
     lines = ["# District fleet review", "", f"Generated: {_stamp(at)}",
              f"Registered repositories: {registered}",
              "Observation: one bounded, non-atomic fleet round; per-source times are retained.",
-             f"Coverage: every registered repository is listed; unavailable fields are not zero. {GITHUB_LIMIT_NOTE}", ""]
+             f"Coverage: every registered repository is listed; unavailable fields are not zero. {GITHUB_LIMIT_NOTE}", "",
+             *_install_lines(install)]
     summaries = []
     for slug in sorted(entries):
         section, summary = _repository(slug, entries[slug], at)
@@ -211,7 +237,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district report", description=__doc__.split("\n", 1)[0])
     parser.parse_args(argv)
     entries = status.fleet(host.load())
-    print(render(entries, _now()))
+    print(render(entries, _now(), install_state.read_record()))
     if any(entry.get("assessment") == "attention" for entry in entries.values()):
         return 1
     return 2 if any(entry.get("assessment") == "unknown" for entry in entries.values()) else 0
