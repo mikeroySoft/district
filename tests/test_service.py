@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from district import host, rm
+from district import doctor, host, rm, service, update_transaction as tx
 from district.host import DistrictError
 from district.service import LaunchdBackend, ServiceDefinition, SystemdUserBackend
 
@@ -166,6 +166,119 @@ class LaunchdBackendTest(unittest.TestCase):
         bootout = run.calls.index(["launchctl", "bootout", "gui/501/factory-widgets"])
         self.assertEqual(len(print_calls), 2)
         self.assertLess(print_calls[-1], bootout)
+
+    def test_disabling_a_hung_timer_reaches_the_update_deadline(self) -> None:
+        run = RunningRun()
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            states = {
+                name: {
+                    "loaded": False,
+                    "active_state": "inactive",
+                    "unit_file_state": "not-found",
+                    "argv": None,
+                }
+                for name in tx.UNITS
+            }
+            states[tx.TIMERS[0]].update(
+                loaded=True,
+                active_state="active",
+                unit_file_state="enabled",
+            )
+            with (
+                mock.patch.object(tx, "SERVICE_WAIT", 0),
+                mock.patch.object(service.time, "sleep", side_effect=AssertionError("deadline was ignored")),
+                self.assertRaisesRegex(tx.TransactionError, "still running after 0s"),
+            ):
+                tx.stop_services({}, states, backend)
+
+    def test_update_boots_out_the_keepalive_dashboard(self) -> None:
+        run = FakeRun()
+        run.print_output = "state = running\npid = 4242\n"
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            states = {
+                name: {
+                    "loaded": False,
+                    "active_state": "inactive",
+                    "unit_file_state": "not-found",
+                    "argv": None,
+                }
+                for name in tx.UNITS
+            }
+            states["district-dashboard.service"].update(
+                loaded=True,
+                active_state="active",
+                unit_file_state="enabled",
+            )
+            tx.stop_services({}, states, backend)
+        self.assertIn(["launchctl", "bootout", "gui/501/district-dashboard"], run.calls)
+        self.assertFalse(any(call[1:2] == ["kill"] for call in run.calls))
+
+    def test_disabling_a_keepalive_dashboard_does_not_wait_for_it_to_exit(self) -> None:
+        run = FakeRun()
+        run.print_output = "state = running\npid = 4242\n"
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(
+            service.time,
+            "sleep",
+            side_effect=AssertionError("KeepAlive service cannot become idle before bootout"),
+        ):
+            backend = self.backend(run, Path(directory))
+            backend.enable("factory-widgets-dashboard.service", False)
+        self.assertIn(["launchctl", "bootout", "gui/501/factory-widgets-dashboard"], run.calls)
+
+    def test_recovery_does_not_bootstrap_an_already_loaded_timer(self) -> None:
+        run = FakeRun()
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            states = {
+                name: {
+                    "loaded": False,
+                    "active_state": "inactive",
+                    "unit_file_state": "not-found",
+                    "argv": None,
+                }
+                for name in tx.UNITS
+            }
+            states[tx.TIMERS[0]].update(
+                loaded=True,
+                active_state="active",
+                unit_file_state="enabled",
+            )
+            tx.restore_services({}, states, backend)
+        self.assertFalse(any(call[1:2] == ["bootstrap"] for call in run.calls))
+
+    def test_starting_a_hung_scheduled_job_has_a_deadline(self) -> None:
+        run = RunningRun()
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            path = backend.agent_dir / "factory-widgets.plist"
+            path.parent.mkdir(parents=True)
+            path.write_bytes(backend.render(self.definition(root=Path(directory) / "factory")))
+            with self.assertRaises(subprocess.TimeoutExpired):
+                backend.start("factory-widgets.service", check=False, timeout=0)
+
+    def test_doctor_reports_service_manager_failures_instead_of_raising(self) -> None:
+        def failed(argv: list[str], *, check: bool = False, **_: object) -> subprocess.CompletedProcess:
+            proc = subprocess.CompletedProcess(argv, 1, "", "cannot connect to bus")
+            if check:
+                raise DistrictError("cannot connect to bus")
+            return proc
+
+        for runner in (
+            mock.Mock(side_effect=FileNotFoundError("systemctl not found")),
+            failed,
+        ):
+            with self.subTest(runner=runner):
+                with (
+                    mock.patch.object(doctor.host, "load", return_value={}),
+                    mock.patch.object(doctor.host, "run", runner),
+                    mock.patch.object(doctor.shutil, "which", return_value=None),
+                ):
+                    rows = doctor.check()
+                manager = next(row for row in rows if row["label"] == "systemd user manager")
+                self.assertEqual(manager["status"], "FAIL")
+
 
 
     def test_start_loads_scheduled_job_and_returns_its_last_exit_code(self) -> None:
