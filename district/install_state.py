@@ -300,6 +300,8 @@ class ApplyRun:
             for name in set(self.timers_before) | set(after):
                 before_active = self.timers_before.get(name, {}).get("active")
                 after_active = after.get(name, {}).get("active")
+                if not before_active or not after_active or UNKNOWN in (before_active, after_active):
+                    continue
                 if before_active == "active" and after_active != "active":
                     disabled.add(name)
                 if before_active != "active" and after_active == "active":
