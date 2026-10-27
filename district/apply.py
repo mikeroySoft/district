@@ -118,8 +118,7 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
         return True
 
     try:
-        for timer in active_timers:
-            backend.enable(timer, False)
+        disable_timers(active_timers, SERVICE_WAIT, backend)
         wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT, backend)
         install_url = origin
         if origin.startswith("git@"):
@@ -211,6 +210,21 @@ def wait_inactive(services: list[str], timeout: float, backend=None) -> None:
             raise DistrictError(f"still running after {int(timeout)}s: {', '.join(busy)}")
         time.sleep(5)
 
+def disable_timers(timers: list[str], timeout: float, backend, *, check: bool = True) -> None:
+    deadline = time.monotonic() + timeout
+    for timer in timers:
+        try:
+            backend.enable(
+                timer,
+                False,
+                check=check,
+                timeout=max(0, deadline - time.monotonic()),
+            )
+        except subprocess.TimeoutExpired as exc:
+            service = f"{timer.removesuffix('.timer')}.service"
+            raise DistrictError(f"still running after {int(timeout)}s: {service}") from exc
+
+
 
 def restart_dashboards(data: dict, backend=None) -> None:
     backend = backend or host.service_backend()
@@ -234,8 +248,7 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD", backend=Non
     sha = proc.stdout.strip()
     if ref == "HEAD" and run(["git", "status", "--porcelain"], cwd=src, check=True).stdout.strip():
         raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
-    for timer in active_timers:
-        backend.enable(timer, False)
+    disable_timers(active_timers, SERVICE_WAIT, backend)
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
     # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
     wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT, backend)
@@ -280,7 +293,11 @@ def reset(slug: str, table: dict, data: dict, backend=None) -> bool:
         return True
     service = f"{host.unit_name(slug)}.service"
     print(f"{slug}: running one pass ({service}) before re-enabling the timer")
-    proc = backend.start(service, check=False)
+    try:
+        proc = backend.start(service, check=False, timeout=SERVICE_WAIT)
+    except subprocess.TimeoutExpired:
+        print(f"{slug}: pass timed out after {SERVICE_WAIT}s; timer stays disabled")
+        return False
     if proc.returncode != 0:
         print(f"{slug}: pass failed ({proc.stderr.strip() or proc.returncode}); timer stays disabled")
         return False
@@ -332,7 +349,7 @@ def repo_pass(slug: str, table: dict, data: dict, backend=None) -> dict:
 
     cap = int(host.default(data, "max_failed_passes"))
     if row["failures"] is not None and row["failures"] >= cap and backend.is_active(f"{unit}.timer") == "active":
-        backend.enable(f"{unit}.timer", False, check=False)
+        disable_timers([f"{unit}.timer"], SERVICE_WAIT, backend, check=False)
         table["disabled_at"] = iso(now())
         table["disabled_reason"] = f"{row['failures']} consecutive failed passes (cap {cap})"
         host.save(data)

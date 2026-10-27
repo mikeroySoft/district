@@ -67,16 +67,17 @@ class ServiceBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def start(self, name: str, *, restart: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+    def start(self, name: str, *, restart: bool = False, check: bool = True,
+              timeout: float = 0) -> subprocess.CompletedProcess:
         raise NotImplementedError
 
     @abstractmethod
-    def stop(self, name: str, *, check: bool = True) -> subprocess.CompletedProcess:
+    def stop(self, name: str, *, check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
         raise NotImplementedError
 
     @abstractmethod
     def enable(self, name: str, enabled: bool = True, *, now: bool = True,
-               check: bool = True) -> subprocess.CompletedProcess:
+               check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
         raise NotImplementedError
 
     @abstractmethod
@@ -247,14 +248,15 @@ class SystemdUserBackend(ServiceBackend):
                 print(f"removed {path}")
         self._run("daemon-reload")
 
-    def start(self, name: str, *, restart: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+    def start(self, name: str, *, restart: bool = False, check: bool = True,
+              timeout: float = 0) -> subprocess.CompletedProcess:
         return self._run("restart" if restart else "start", name, check=check)
 
-    def stop(self, name: str, *, check: bool = True) -> subprocess.CompletedProcess:
+    def stop(self, name: str, *, check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
         return self._run("stop", name, check=check)
 
     def enable(self, name: str, enabled: bool = True, *, now: bool = True,
-               check: bool = True) -> subprocess.CompletedProcess:
+               check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
         args = ["enable" if enabled else "disable"]
         if now:
             args.append("--now")
@@ -394,60 +396,79 @@ class LaunchdBackend(ServiceBackend):
             path.unlink()
             print(f"removed {path}")
 
-    def start(self, name: str, *, restart: bool = False, check: bool = True) -> subprocess.CompletedProcess:
+    def start(self, name: str, *, restart: bool = False, check: bool = True,
+              timeout: float = 0) -> subprocess.CompletedProcess:
         label = self._label(name)
         path = self._path(label)
+        target = f"{self.domain}/{label}"
         try:
             scheduled = "StartInterval" in plistlib.loads(path.read_bytes())
         except (OSError, plistlib.InvalidFileException):
             scheduled = False
         was_loaded = self.status(name).loaded
+        if was_loaded and name.endswith(".timer"):
+            return self._run("print", target, check=check)
         if not was_loaded:
             proc = self._run("bootstrap", self.domain, str(path), check=check)
-        elif name.endswith(".timer"):
-            return self._run("bootstrap", self.domain, str(path), check=check)
         else:
             args = ["kickstart"]
             if restart:
                 args.append("-k")
-            args.append(f"{self.domain}/{label}")
+            args.append(target)
             proc = self._run(*args, check=check)
-        if proc.returncode or not scheduled or name.endswith(".timer"):
+        if proc.returncode or not scheduled:
             return proc
+        deadline = time.monotonic() + timeout
         while True:
-            status = self._run("print", f"{self.domain}/{label}", check=False)
+            status = self._run("print", target, check=False)
             if status.returncode:
                 result = subprocess.CompletedProcess(proc.args, status.returncode, proc.stdout, status.stderr)
-            elif re.search(r"^\s*state\s*=\s*running\s*$", status.stdout, re.MULTILINE):
-                time.sleep(0.1)
-                continue
             else:
+                running = re.search(r"^\s*state\s*=\s*running\s*$", status.stdout, re.MULTILINE)
                 exit_code = re.search(r"^\s*last exit code\s*=\s*(-?\d+)\s*$", status.stdout, re.MULTILINE)
-                if not exit_code:
-                    time.sleep(0.1)
+                if not running and exit_code:
+                    result = subprocess.CompletedProcess(proc.args, int(exit_code.group(1)), proc.stdout, proc.stderr)
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        if not was_loaded:
+                            self._run("bootout", target, check=False)
+                        raise subprocess.TimeoutExpired(
+                            proc.args, timeout, output=proc.stdout, stderr=status.stderr,
+                        )
+                    time.sleep(min(0.1, remaining))
                     continue
-                result = subprocess.CompletedProcess(proc.args, int(exit_code.group(1)), proc.stdout, proc.stderr)
             if not was_loaded:
-                self._run("bootout", f"{self.domain}/{label}", check=False)
+                self._run("bootout", target, check=False)
             return result
 
-    def _unload_when_idle(self, label: str, *, check: bool) -> subprocess.CompletedProcess:
+    def _unload_when_idle(self, label: str, *, check: bool,
+                          timeout: float) -> subprocess.CompletedProcess:
+        target = f"{self.domain}/{label}"
+        deadline = time.monotonic() + timeout
         while self.is_active(f"{label}.service") in ("active", "activating", "deactivating"):
-            time.sleep(0.1)
-        return self._run("bootout", f"{self.domain}/{label}", check=check)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(
+                    [self.executable, "bootout", target], timeout,
+                )
+            time.sleep(min(0.1, remaining))
+        return self._run("bootout", target, check=check)
 
-    def stop(self, name: str, *, check: bool = True) -> subprocess.CompletedProcess:
+    def stop(self, name: str, *, check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
         label = self._label(name)
         if name.endswith(".timer"):
-            return self._unload_when_idle(label, check=check)
-        return self._run("kill", "SIGTERM", f"{self.domain}/{label}", check=check)
+            return self._unload_when_idle(label, check=check, timeout=timeout)
+        return self._run("bootout", f"{self.domain}/{label}", check=check)
 
     def enable(self, name: str, enabled: bool = True, *, now: bool = True,
-               check: bool = True) -> subprocess.CompletedProcess:
+               check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
         label = self._label(name)
         if enabled:
             return self._run("bootstrap", self.domain, str(self._path(label)), check=check)
-        return self._unload_when_idle(label, check=check)
+        if name.endswith(".timer"):
+            return self._unload_when_idle(label, check=check, timeout=timeout)
+        return self._run("bootout", f"{self.domain}/{label}", check=check)
 
     def status(self, name: str) -> ServiceStatus:
         label = self._label(name)

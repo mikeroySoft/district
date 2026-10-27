@@ -346,10 +346,16 @@ def capture_services(req: dict, backend=None) -> dict:
 
 def stop_services(req: dict, states: dict, backend=None) -> None:
     backend = backend or service_backend(req)
+    deadline = time.monotonic() + SERVICE_WAIT
     active_timers = [unit for unit in TIMERS if states[unit]["loaded"] and states[unit]["active_state"] == "active"]
     for unit in active_timers:
-        backend.stop(unit)
-    deadline = time.monotonic() + SERVICE_WAIT
+        try:
+            backend.stop(unit, timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            service = f"{unit.removesuffix('.timer')}.service"
+            raise TransactionError(
+                f"District oneshot still running after {SERVICE_WAIT}s: {service}",
+            ) from exc
     while True:
         busy = [
             unit for unit in ONESHOTS

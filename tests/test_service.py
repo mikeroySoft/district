@@ -161,7 +161,7 @@ class LaunchdBackendTest(unittest.TestCase):
         ]
         with tempfile.TemporaryDirectory() as directory:
             backend = self.backend(run, Path(directory))
-            backend.enable("factory-widgets.timer", False)
+            backend.enable("factory-widgets.timer", False, timeout=1)
         print_calls = [index for index, call in enumerate(run.calls) if call[1:2] == ["print"]]
         bootout = run.calls.index(["launchctl", "bootout", "gui/501/factory-widgets"])
         self.assertEqual(len(print_calls), 2)
@@ -280,7 +280,6 @@ class LaunchdBackendTest(unittest.TestCase):
                 self.assertEqual(manager["status"], "FAIL")
 
 
-
     def test_start_loads_scheduled_job_and_returns_its_last_exit_code(self) -> None:
         run = FakeRun()
         with tempfile.TemporaryDirectory() as directory:
@@ -293,7 +292,7 @@ class LaunchdBackendTest(unittest.TestCase):
                 (0, "state = running\npid = 4242\n", ""),
                 (0, "state = exited\nlast exit code = 3\n", ""),
             ]
-            proc = backend.start("factory-widgets.service", check=False)
+            proc = backend.start("factory-widgets.service", check=False, timeout=1)
             self.assertEqual(proc.returncode, 3)
             self.assertIn(["launchctl", "bootstrap", "gui/501", str(path)], run.calls)
             self.assertIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)

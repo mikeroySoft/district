@@ -27,7 +27,7 @@ POLICY_TOOLS = {"uv": POLICY_ENV[1], "npm": POLICY_ENV[0]}
 def row(status: str, label: str, detail: str) -> dict[str, str]:
     return {"status": status, "label": label, "detail": detail}
 
-def run(argv: list[str]) -> subprocess.CompletedProcess:
+def run(argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
     try:
         return host.run(argv)
     except OSError as exc:
@@ -153,7 +153,7 @@ def check() -> list[dict[str, str]]:
     host.hosts(data)
     for slug in host.repos(data):
         host.factory_host(data, slug)
-    backend = host.service_backend()
+    backend = host.service_backend(run=run)
 
     rows += factory_rows(data)
     rows.append(gh_auth())
