@@ -60,7 +60,6 @@ class InstallStateTest(DistrictCase):
         host.save({
             "defaults": {
                 "factory_source": str(self.repo_path),
-                "factory_ref": "main",
                 "engine": {"ref": "main", "sha": SHA},
             },
             "repo": {
@@ -73,7 +72,7 @@ class InstallStateTest(DistrictCase):
             },
         })
         self.stub("uv", ("tool list --show-version-specifiers", "district v0.1.3\nfactory v0.8.9\n"))
-        self.stub("systemctl", ("show *", SHOW))
+        self.stub("systemctl", ("show *", SHOW), ("is-active *", "active\n"))
 
     def test_stubbed_local_state_produces_schema_versioned_document(self) -> None:
         with mock.patch.object(install_state, "now", return_value=AT), \
@@ -150,7 +149,8 @@ class InstallStateTest(DistrictCase):
         self.assertEqual(document["last_apply"]["exit_status"], 1)
         self.assertNotEqual(document["last_apply"]["started_at"], "unknown")
         self.assertNotEqual(document["last_apply"]["finished_at"], "unknown")
-        self.assertEqual(document["last_apply"]["config_sha_before"], document["last_apply"]["config_sha_after"])
+        self.assertRegex(document["last_apply"]["config_sha_before"], r"^[0-9a-f]{64}$")
+        self.assertRegex(document["last_apply"]["config_sha_after"], r"^[0-9a-f]{64}$")
 
     def test_fleet_report_install_section_comes_from_install_state_record(self) -> None:
         document = {

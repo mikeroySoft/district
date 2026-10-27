@@ -8,6 +8,7 @@ from importlib import import_module
 COMMANDS = {
     "add": ("add", "main", "onboard a repository (path or URL), or adopt one that has .factory.toml"),
     "apply": ("apply", "main", "reconcile the host to the registry; --upgrade reinstalls factory"),
+    "install-state": ("install_state", "main", "fast local install, engine, timer, and last-apply state"),
     "doctor": ("doctor", "main", "check District's host prerequisites"),
     "status": ("status", "main", "fleet operations: exit 1 attention, 2 unknown observation, 0 normal"),
     "report": ("report", "main", "print a read-only Markdown fleet review"),
