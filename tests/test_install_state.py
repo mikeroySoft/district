@@ -136,6 +136,17 @@ class InstallStateTest(DistrictCase):
         self.assertIn("WARNING: last apply re-enabled factory-widgets.timer", text_output)
         self.assertFalse(install_state.state_path().with_suffix(".json.tmp").exists())
 
+    def test_lock_contended_apply_does_not_claim_timer_reenables(self) -> None:
+        states = {"factory-widgets.timer": timer("active"), "district-apply.timer": timer("active")}
+        with mock.patch.object(apply.fcntl, "flock", side_effect=BlockingIOError), \
+             mock.patch.object(install_state, "timer_states", return_value=states), \
+             mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
+            code, output = self.district("apply")
+        self.assertEqual(code, 1, output)
+        document = json.loads(install_state.state_path().read_text())
+        self.assertEqual(document["last_apply"]["reenabled"], [])
+
+
     def test_failed_apply_still_atomically_rewrites_last_apply(self) -> None:
         states = {"factory-widgets.timer": timer("active"), "district-apply.timer": timer("active")}
         self.stub("factory", ("install", "failed\n", 1),
