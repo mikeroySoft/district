@@ -587,7 +587,8 @@ class ApplyTest(DistrictCase):
                     self.assertEqual(apply.main([]), 1)
         self.assertEqual(stderr.getvalue(), f"district apply: another apply is running ({lock_path})\n")
         self.assertEqual(self.calls("factory"), [])
-        self.assertEqual(self.calls("systemctl"), [])
+        self.assertFalse(any(call.startswith(("disable ", "enable ", "start ", "stop ", "restart "))
+                             for call in self.calls("systemctl")))
 
 
     def test_registry_uses_current_factory_configuration(self) -> None:
@@ -605,7 +606,8 @@ class ApplyTest(DistrictCase):
         self.assertIn("acme/widgets", out)
         self.assertIn("missing", out)
         self.assertEqual(self.calls("factory"), [])
-        self.assertEqual(self.calls("systemctl"), [])
+        self.assertFalse(any(call.startswith(("disable ", "enable ", "start ", "stop ", "restart "))
+                             for call in self.calls("systemctl")))
 
     def test_remote_factory_is_skipped_without_commands(self) -> None:
         host.save({
@@ -616,7 +618,8 @@ class ApplyTest(DistrictCase):
         self.assertEqual(code, 0, out)
         self.assertEqual(out.strip(), "acme/widgets: on host ultron (remote hosts not supported yet, #96)")
         self.assertEqual(self.calls("factory"), [])
-        self.assertEqual(self.calls("systemctl"), [])
+        self.assertFalse(any(call.startswith(("disable ", "enable ", "start ", "stop ", "restart "))
+                             for call in self.calls("systemctl")))
 
     def test_npm_day_conversion_and_policy_env(self) -> None:
         self.assertEqual((apply.npm_days("24h"), apply.npm_days("36h"), apply.npm_days("1h"), apply.npm_days("3d")), (1, 2, 1, 3))
@@ -784,7 +787,7 @@ class ApplyTest(DistrictCase):
             code, out = self.district("apply", "--upgrade")
         self.assertEqual(code, 1)
         self.assertIn("still running after 0s: factory-widgets.service", out)
-        self.assertEqual(self.calls("uv"), [])
+        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
 
     def test_upgrade_refuses_dirty_source(self) -> None:
         src = self.engine_source()
@@ -811,7 +814,7 @@ class ApplyTest(DistrictCase):
                 self.assertEqual(code, 1)
         calls = self.calls("systemctl")
         self.assertFalse(any(call.startswith(("disable ", "enable ", "restart ")) for call in calls))
-        self.assertEqual(self.calls("uv"), [])
+        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
 
     def test_upgrade_unknown_ref_touches_no_timer(self) -> None:
         src = self.engine_source()
@@ -819,7 +822,7 @@ class ApplyTest(DistrictCase):
         self.assertEqual(code, 1)
         self.assertIn(f"v9: not a commit in {src}", out)
         self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
-        self.assertEqual(self.calls("uv"), [])
+        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
         self.assertNotIn("engine", host.load()["defaults"])
 
     def test_upgrade_ref_installs_an_export_of_that_commit_and_records_it(self) -> None:

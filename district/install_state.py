@@ -192,17 +192,6 @@ def _engine_sha(data: dict) -> str:
     return value if isinstance(value, str) and SHA.fullmatch(value) else UNKNOWN
 
 
-def unknown_timer_states(data: dict) -> dict[str, dict]:
-    return {
-        name: {
-            "enabled": UNKNOWN,
-            "active": UNKNOWN,
-            "last_trigger": UNKNOWN,
-            "next_trigger": UNKNOWN,
-            "service_activating": UNKNOWN,
-        }
-        for name in _timer_names(data)
-    }
 
 
 def unknown_last_apply() -> dict:
@@ -289,7 +278,6 @@ class ApplyRun:
     engine_before: str
     timers_before: dict[str, dict] = field(default_factory=dict)
     observed: bool = False
-    changed: bool = False
     disabled: set[str] = field(default_factory=set)
     reenabled: set[str] = field(default_factory=set)
 
@@ -305,8 +293,7 @@ class ApplyRun:
 
     def finish(self, exit_status: int) -> None:
         data = _safe_config()
-        after = timer_states(data) if self.changed else (
-            self.timers_before if self.observed else unknown_timer_states(data))
+        after = timer_states(data)
         disabled = set(self.disabled)
         reenabled = set(self.reenabled)
         for name in set(self.timers_before) | set(after):
@@ -326,9 +313,7 @@ class ApplyRun:
             "config_sha_before": self.config_sha_before,
             "config_sha_after": config_sha(),
         }
-        releases = None if self.changed else unknown_releases()
-        versions = None if self.changed else {"district": __version__, "factory": UNKNOWN}
-        write_record(collect(data=data, releases=releases, timers=after, last_apply=last_apply, versions=versions))
+        write_record(collect(data=data, timers=after, last_apply=last_apply))
 
 
 def _summary(document: dict) -> str:

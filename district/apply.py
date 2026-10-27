@@ -118,8 +118,6 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
         return True
     if record:
         record.observe(data)
-    if record and active_timers:
-        record.changed = True
 
     try:
         for timer in active_timers:
@@ -127,8 +125,6 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
                 record.disabled.add(timer)
             systemctl("disable", "--now", timer)
         wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT)
-        if record:
-            record.changed = True
         install_url = origin
         if origin.startswith("git@"):
             install_url = "ssh://" + origin.replace(":", "/", 1)
@@ -242,8 +238,6 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD",
         raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
     if record:
         record.observe(data)
-    if record and active_timers:
-        record.changed = True
     for timer in active_timers:
         if record:
             record.disabled.add(timer)
@@ -251,8 +245,6 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD",
     print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
     # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
     wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT)
-    if record:
-        record.changed = True
     with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
         tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
         tree.mkdir()
@@ -448,7 +440,6 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         elif not reconcile_engine(data, targets, active, record):
             code = 1
         record.observe(data)
-        record.changed = True
         for slug, table in targets.items():
             if args.reset and not reset(slug, table, data, record):
                 code = 1
