@@ -152,7 +152,8 @@ class InstallStateTest(DistrictCase):
         observations = mock.Mock(side_effect=[before, after, SHOW])
 
         def systemctl_show(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess:
-            if argv[:3] == ["systemctl", "--user", "show"]:
+            # Only install-state's multi-unit observation; service-backend property reads fall through.
+            if argv[:3] == ["systemctl", "--user", "show"] and any(a.startswith("--property=Id,") for a in argv):
                 output = observations()
                 if isinstance(output, str):
                     return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")

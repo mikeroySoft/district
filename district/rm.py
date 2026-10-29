@@ -6,7 +6,7 @@ import argparse
 import time
 
 from district import host
-from district.host import DistrictError, systemctl
+from district.host import DistrictError
 
 
 def main(argv: list[str]) -> int:
@@ -22,22 +22,22 @@ def main(argv: list[str]) -> int:
         print(f"{slug}: on host {table['host']} (remote hosts not supported yet, #96)")
         return 0
     unit = host.unit_name(slug)
+    backend = host.service_backend()
     if not args.keep_units:
-        systemctl("disable", "--now", f"{unit}.timer", check=False)
-        while host.is_active(f"{unit}.service") in ("active", "activating"):
+        service = f"{unit}.service"
+        if backend.is_active(service) in ("active", "activating") and not args.wait:
+            raise DistrictError(f"{service} is running a pass; wait for it or pass --wait")
+        backend.enable(f"{unit}.timer", False, check=False)
+        while backend.is_active(service) in ("active", "activating"):
             if not args.wait:
-                raise DistrictError(f"{unit}.service is running a pass; wait for it or pass --wait")
+                raise DistrictError(f"{service} is running a pass; wait for it or pass --wait")
             time.sleep(5)
-        systemctl("disable", "--now", f"{unit}-dashboard.service", check=False)
-        for name in (f"{unit}.timer", f"{unit}.service", f"{unit}-dashboard.service"):
-            path = host.unit_dir() / name
-            if path.exists():
-                path.unlink()
-                print(f"removed {path}")
-        systemctl("daemon-reload")
+        backend.enable(f"{unit}-dashboard.service", False, check=False)
+        backend.remove(unit)
+        backend.remove(f"{unit}-dashboard")
         left = [
-            n for n in (f"{unit}.timer", f"{unit}-dashboard.service")
-            if systemctl("show", n, "--property=LoadState", "--value", check=False).stdout.strip() == "loaded"
+            name for name in (f"{unit}.timer", f"{unit}-dashboard.service")
+            if backend.status(name).loaded
         ]
         if left:
             raise DistrictError(f"still loaded after removal: {', '.join(left)}")

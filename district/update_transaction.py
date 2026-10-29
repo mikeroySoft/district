@@ -1,8 +1,8 @@
 """Stdlib-only transaction driver for ``district update``.
 
-This file is copied outside the managed environment before it is executed.  It
-must not import District or third-party packages: the environment it replaces
-may be absent or broken while recovery is running.
+This file and ``service.py`` are copied outside the managed environment before
+execution. They use only the standard library because the environment being
+replaced may be absent or broken during recovery.
 """
 
 from __future__ import annotations
@@ -26,6 +26,10 @@ import uuid
 from email.parser import Parser
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
+if __package__:
+    from district import service
+else:
+    import service
 
 SCHEMA = 1
 UNITS = (
@@ -274,10 +278,19 @@ def validate_request(data: dict, root: Path) -> dict:
         raise TransactionError("unsafe uv tool path")
     if not entrypoint.is_absolute() or entrypoint.name != "district":
         raise TransactionError("unsafe District entrypoint path")
-    for key in ("systemctl", "uv"):
-        value = Path(data.get(key, ""))
-        if not value.is_absolute() or not value.is_file() or not os.access(value, os.X_OK):
-            raise TransactionError(f"invalid {key} executable")
+    uv = Path(data.get("uv", ""))
+    if not uv.is_absolute() or not uv.is_file() or not os.access(uv, os.X_OK):
+        raise TransactionError("invalid uv executable")
+    config = data.get("service")
+    if not isinstance(config, dict):
+        raise TransactionError("invalid service backend configuration")
+    manager = Path(config.get("executable", ""))
+    if not manager.is_absolute() or not manager.is_file() or not os.access(manager, os.X_OK):
+        raise TransactionError("invalid service backend executable")
+    try:
+        service.backend_from_config(config, lambda *_args, **_kwargs: None)
+    except ValueError as exc:
+        raise TransactionError(str(exc)) from exc
     current = data.get("current")
     target = data.get("target")
     if not isinstance(current, dict) or not SHA.fullmatch(str(current.get("sha", ""))):
@@ -299,47 +312,55 @@ def validate_request(data: dict, root: Path) -> dict:
     return data
 
 
-def systemctl(req: dict, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-    return run([req["systemctl"], "--user", *args], timeout=15, check=check, log=Path(req["log"]))
+def service_backend(req: dict):
+    def command(argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
+        return run(argv, timeout=15, check=check, log=Path(req["log"]))
+
+    try:
+        return service.backend_from_config(req["service"], command)
+    except ValueError as exc:
+        raise TransactionError(str(exc)) from exc
 
 
-def property_value(req: dict, unit: str, prop: str) -> str:
-    proc = systemctl(req, "show", unit, f"--property={prop}", "--value", "--no-pager", check=False)
-    if proc.returncode:
-        raise TransactionError(f"cannot query {unit} {prop}")
-    return proc.stdout.strip()
-
-
-def capture_services(req: dict) -> dict:
+def capture_services(req: dict, backend=None) -> dict:
+    backend = backend or service_backend(req)
     result = {}
     for unit in UNITS:
-        load = property_value(req, unit, "LoadState")
+        status = backend.status(unit)
+        load = status.load_state
         if load not in ("loaded", "not-found"):
             raise TransactionError(f"unsupported {unit} load state: {load or 'empty'}")
         result[unit] = {
             "loaded": load == "loaded",
-            "active_state": property_value(req, unit, "ActiveState") if load == "loaded" else "inactive",
-            "unit_file_state": property_value(req, unit, "UnitFileState") if load == "loaded" else "not-found",
-            "main_pid": property_value(req, unit, "MainPID") if load == "loaded" else "0",
+            "active_state": status.active_state if load == "loaded" else "inactive",
+            "unit_file_state": status.unit_file_state if load == "loaded" else "not-found",
+            "main_pid": str(status.main_pid),
+            "argv": list(status.argv) if status.argv else None,
         }
         if result[unit]["active_state"] not in ("active", "inactive", "failed", "activating", "deactivating"):
             raise TransactionError(f"unsupported {unit} active state: {result[unit]['active_state'] or 'empty'}")
         if unit in (*TIMERS, "district-dashboard.service") and result[unit]["active_state"] in ("activating", "deactivating"):
             raise TransactionError(f"{unit} is changing state; retry after it settles")
-    dashboard = result["district-dashboard.service"]
-    if dashboard["loaded"]:
-        dashboard["exec_start"] = property_value(req, "district-dashboard.service", "ExecStart")
     return result
 
 
-def stop_services(req: dict, states: dict) -> None:
-    active_timers = [unit for unit in TIMERS if states[unit]["loaded"] and states[unit]["active_state"] == "active"]
-    if active_timers:
-        systemctl(req, "stop", *active_timers)
+def stop_services(req: dict, states: dict, backend=None) -> None:
+    backend = backend or service_backend(req)
     deadline = time.monotonic() + SERVICE_WAIT
+    active_timers = [unit for unit in TIMERS if states[unit]["loaded"] and states[unit]["active_state"] == "active"]
+    for unit in active_timers:
+        try:
+            backend.stop(unit, timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            service = f"{unit.removesuffix('.timer')}.service"
+            raise TransactionError(
+                f"District oneshot still running after {SERVICE_WAIT}s: {service}",
+            ) from exc
     while True:
-        busy = [unit for unit in ONESHOTS if states[unit]["loaded"] and property_value(req, unit, "ActiveState") in
-                ("active", "activating", "deactivating")]
+        busy = [
+            unit for unit in ONESHOTS
+            if states[unit]["loaded"] and backend.status(unit).active_state in ("active", "activating", "deactivating")
+        ]
         if not busy:
             break
         if time.monotonic() >= deadline:
@@ -347,57 +368,41 @@ def stop_services(req: dict, states: dict) -> None:
         time.sleep(1)
     dashboard = "district-dashboard.service"
     if states[dashboard]["loaded"] and states[dashboard]["active_state"] == "active":
-        systemctl(req, "stop", dashboard)
+        backend.stop(dashboard)
 
 
-def exec_start_configuration(raw: str) -> tuple[str, str, str]:
-    # systemctl appends execution timestamps, PID, and status after the configured command.
-    match = re.fullmatch(
-        r"\{\s*path=(.*?)\s+;\s+argv\[]=(.*?)\s+;\s+ignore_errors=(yes|no)\s+;[^{}]*\}", raw
-    )
-    if not match:
-        raise TransactionError("cannot parse district-dashboard.service ExecStart")
-    return match[1], match[2], match[3]
 
 
-def restore_services(req: dict, states: dict) -> None:
+def restore_services(req: dict, states: dict, backend=None) -> None:
+    backend = backend or service_backend(req)
     dashboard_name = "district-dashboard.service"
     if states[dashboard_name]["loaded"] and states[dashboard_name]["active_state"] == "active":
-        systemctl(req, "start", dashboard_name)
+        backend.start(dashboard_name)
     active_timers = [unit for unit in TIMERS if states[unit]["loaded"] and states[unit]["active_state"] == "active"]
-    if active_timers:
-        systemctl(req, "start", *active_timers)
+    for unit in active_timers:
+        backend.start(unit)
     for unit in (*TIMERS, dashboard_name):
         if not states[unit]["loaded"]:
             continue
+        status = backend.status(unit)
         want = states[unit]["active_state"] == "active"
-        have = property_value(req, unit, "ActiveState") == "active"
-        if want != have:
+        if want != (status.active_state == "active"):
             raise TransactionError(f"failed to restore {unit} active state")
-        if property_value(req, unit, "UnitFileState") != states[unit]["unit_file_state"]:
+        if status.unit_file_state != states[unit]["unit_file_state"]:
             raise TransactionError(f"{unit} enablement changed during update")
     for unit in ONESHOTS:
-        if (
-            states[unit]["loaded"]
-            and property_value(req, unit, "UnitFileState") != states[unit]["unit_file_state"]
-        ):
+        if states[unit]["loaded"] and backend.status(unit).unit_file_state != states[unit]["unit_file_state"]:
             raise TransactionError(f"{unit} enablement changed during update")
     dashboard = states[dashboard_name]
-    if dashboard["loaded"]:
-        current = exec_start_configuration(property_value(req, dashboard_name, "ExecStart"))
-        if current != exec_start_configuration(dashboard["exec_start"]):
-            raise TransactionError("district-dashboard.service ExecStart changed during update")
+    if dashboard["loaded"] and list(backend.status(dashboard_name).argv or ()) != dashboard["argv"]:
+        raise TransactionError("district-dashboard.service ExecStart changed during update")
 
 
-def dashboard_argv(req: dict) -> tuple[list[str], str, int]:
-    raw = property_value(req, "district-dashboard.service", "ExecStart")
-    executable, command, _ = exec_start_configuration(raw)
-    try:
-        argv = shlex.split(command)
-    except ValueError as exc:
-        raise TransactionError("cannot parse district-dashboard.service argv") from exc
+def dashboard_argv(req: dict, backend=None) -> tuple[list[str], str, int]:
+    backend = backend or service_backend(req)
+    argv = list(backend.status("district-dashboard.service").argv or ())
     prefix = [str(Path(req["tool"]) / "bin" / "python3"), "-m", "district", "dashboard"]
-    if executable != prefix[0] or argv[:4] != prefix:
+    if argv[:4] != prefix:
         raise TransactionError("district-dashboard.service does not use the managed District environment")
     host, port = "127.0.0.1", 8760
     for option, cast in (("--host", str), ("--port", int)):
@@ -437,24 +442,31 @@ def _fleet(port: int, ipv6: bool = False) -> tuple[int, int]:
     return revision, len(fleet)
 
 
-def verify_dashboard(req: dict, states: dict, expected: dict, *, require_replaced: bool = True) -> dict | None:
+def verify_dashboard(req: dict, states: dict, expected: dict, *, require_replaced: bool = True,
+                     backend=None) -> dict | None:
+    backend = backend or service_backend(req)
     dashboard = "district-dashboard.service"
     if not (states[dashboard]["loaded"] and states[dashboard]["active_state"] == "active"):
         return None
-    argv, host, port = dashboard_argv(req)
+    argv, host, port = dashboard_argv(req, backend)
     old_pid = int(states[dashboard]["main_pid"] or 0)
     deadline = time.monotonic() + HEALTH_WAIT
     first = None
     last_error = "dashboard did not start"
     while time.monotonic() < deadline:
         try:
-            if property_value(req, dashboard, "ActiveState") != "active":
+            status = backend.status(dashboard)
+            if status.active_state != "active":
                 raise TransactionError("dashboard service is not active")
-            pid = int(property_value(req, dashboard, "MainPID"))
+            pid = status.main_pid
             if pid <= 0 or (require_replaced and pid == old_pid):
                 raise TransactionError("dashboard process was not replaced")
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-            process_argv = [part.decode(errors="replace") for part in cmdline if part]
+            proc_path = Path(f"/proc/{pid}/cmdline")
+            if proc_path.exists():
+                process_argv = [part.decode(errors="replace") for part in proc_path.read_bytes().split(b"\0") if part]
+            else:
+                process = run(["ps", "-p", str(pid), "-o", "command="], timeout=15, log=Path(req["log"]))
+                process_argv = shlex.split(process.stdout)
             if process_argv[:4] != argv[:4]:
                 raise TransactionError("running dashboard command does not use the installed District")
             observed = _fleet(port, host in ("::", "::1"))
@@ -638,19 +650,20 @@ def recover(req: dict, *, interrupted: bool = False) -> dict:
         or state_before.get("current") != expected
     ):
         raise TransactionError("interrupted transaction has invalid prior update metadata")
+    backend = service_backend(req)
     try:
         if phase == "backed-up":
             if not artifact_matches_live(req, backup, expected):
                 raise TransactionError("installed District changed before recovery")
             cli_check(Path(req["tool"]), expected, Path(req["log"]))
-            restore_services(req, states)
-            dashboard = verify_dashboard(req, states, expected, require_replaced=False)
+            restore_services(req, states, backend)
+            dashboard = verify_dashboard(req, states, expected, require_replaced=False, backend=backend)
         else:
-            stop_services(req, states)
+            stop_services(req, states, backend)
             restore_artifact(req, backup, expected)
             cli_check(Path(req["tool"]), expected, Path(req["log"]))
-            restore_services(req, states)
-            dashboard = verify_dashboard(req, states, expected)
+            restore_services(req, states, backend)
+            dashboard = verify_dashboard(req, states, expected, backend=backend)
         entrypoint_check(Path(req["tool"]), Path(req["entrypoint"]))
         atomic_json(root / "state.json", state_before)
         result = {
@@ -689,12 +702,13 @@ def transact(request_path: Path) -> dict:
     req = validate_request(request, root)
     log = root / "transaction.log"
     req["log"] = str(log)
+    backend = service_backend(req)
     current = current_identity(Path(req["tool"]), Path(req["entrypoint"]), root)
     if current != req["current"]:
         raise TransactionError("installed District changed after preflight")
     cli_check(Path(req["tool"]), current, log)
     entrypoint_check(Path(req["tool"]), Path(req["entrypoint"]))
-    states = capture_services(req)
+    states = capture_services(req, backend)
     backup = copy_artifact(req, current)
     state_path = root / "state.json"
     if state_path.exists():
@@ -715,7 +729,7 @@ def transact(request_path: Path) -> dict:
     }
     atomic_json(root / "transaction.json", journal)
     try:
-        stop_services(req, states)
+        stop_services(req, states, backend)
         journal["phase"] = "services-stopped"
         atomic_json(root / "transaction.json", journal)
         if req["action"] == "update":
@@ -735,8 +749,8 @@ def transact(request_path: Path) -> dict:
             raise TransactionError("installed target identity does not match the update plan")
         entrypoint_check(Path(req["tool"]), Path(req["entrypoint"]))
         cli_check(Path(req["tool"]), target, log)
-        restore_services(req, states)
-        dashboard = verify_dashboard(req, states, target)
+        restore_services(req, states, backend)
+        dashboard = verify_dashboard(req, states, target, backend=backend)
         previous = {**current, "artifact": str(backup)}
         atomic_json(state_path, state_record(target, previous, artifact_digest(Path(req["tool"]), Path(req["entrypoint"]))))
         result = {
