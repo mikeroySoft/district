@@ -57,6 +57,11 @@ class ServiceBackend(ABC):
     @abstractmethod
     def configuration(self) -> Mapping[str, object]:
         raise NotImplementedError
+    @abstractmethod
+    def definitions_changed(self, label: str, wanted: Mapping[str, str]) -> bool:
+        raise NotImplementedError
+
+
 
     @abstractmethod
     def install(self, definition: ServiceDefinition) -> Path:
@@ -190,6 +195,17 @@ class SystemdUserBackend(ServiceBackend):
         self.executable = executable
     def configuration(self) -> dict[str, str]:
         return {"platform": "linux", "executable": self.executable, "unit_dir": str(self.unit_dir)}
+    def definitions_changed(self, label: str, wanted: Mapping[str, str]) -> bool:
+        optional = (
+            "-dashboard.service", "-triage-probe.service", "-triage-probe.timer",
+            "-eval.service", "-eval.timer",
+        )
+        known = {f"{label}.service", f"{label}.timer", *(f"{label}{suffix}" for suffix in optional)}
+        existing = {name for name in known if (self.unit_dir / name).exists()}
+        return existing != set(wanted) or any(
+            (self.unit_dir / name).read_text() != body for name, body in wanted.items()
+        )
+
 
     def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
         return self.run([self.executable, "--user", *args], check=check)
@@ -331,6 +347,14 @@ class LaunchdBackend(ServiceBackend):
             "uid": self.uid,
             "path": self.path,
         }
+    def definitions_changed(self, label: str, wanted: Mapping[str, str]) -> bool:
+        optional = ("-dashboard", "-triage-probe", "-eval")
+        known = {f"{label}.plist", *(f"{label}{suffix}.plist" for suffix in optional)}
+        existing = {name for name in known if (self.agent_dir / name).exists()}
+        return existing != set(wanted) or any(
+            (self.agent_dir / name).read_text() != body for name, body in wanted.items()
+        )
+
 
     @property
     def domain(self) -> str:

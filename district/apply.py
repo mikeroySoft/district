@@ -237,30 +237,22 @@ def _rendered_units(output: str) -> dict[str, str]:
     return units
 
 
-def _units_changed(slug: str, output: str) -> bool:
+def _units_changed(slug: str, output: str, backend) -> bool:
     wanted = _rendered_units(output)
     unit = host.unit_name(slug)
     if not wanted or any(not name.startswith(unit) for name in wanted):
         return True
-    optional = (
-        "-dashboard.service", "-triage-probe.service", "-triage-probe.timer",
-        "-eval.service", "-eval.timer",
-    )
-    known = {f"{unit}.service", f"{unit}.timer", *(f"{unit}{suffix}" for suffix in optional)}
-    existing = {name for name in known if (host.unit_dir() / name).exists()}
-    return existing != set(wanted) or any(
-        (host.unit_dir() / name).read_text() != body for name, body in wanted.items()
-    )
+    return backend.definitions_changed(unit, wanted)
 
 
-def plan_apply(targets: dict[str, dict]) -> dict[str, bool]:
+def plan_apply(targets: dict[str, dict], backend) -> dict[str, bool]:
     changes = {}
     for slug, table in targets.items():
         if table.get("disabled_at"):
             changes[slug] = False
             continue
         proc = run(["factory", "install", "--print"], cwd=Path(table["path"]))
-        changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout)
+        changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout, backend)
     return changes
 
 
@@ -557,7 +549,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         for slug, table in targets.items():
             if args.reset and not reset(slug, table, data, record, backend=backend):
                 code = 1
-        changes = plan_apply(targets)
+        changes = plan_apply(targets, backend)
         for slug, table in targets.items():
             if table.get("disabled_at"):
                 row = repo_pass(slug, table, data, record, backend=backend)
