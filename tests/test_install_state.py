@@ -224,6 +224,7 @@ class InstallStateTest(DistrictCase):
         self.stub("factory", ("install", "failed\n", 1),
                   ("doctor --json", json.dumps(DOCTOR)),
                   ("dashboard --json", json.dumps(dashboard())))
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         with mock.patch.object(install_state, "timer_states", return_value=states), \
              mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
             code, output = self.district("apply", "widgets")

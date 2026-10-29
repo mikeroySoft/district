@@ -8,6 +8,7 @@ XDG_CONFIG_HOME and PATH point into a temp dir for every test.
 
 from __future__ import annotations
 
+import fcntl
 import contextlib
 import io
 import json
@@ -26,7 +27,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from district import add, apply, atlas, cli, health, host, metrics, status  # noqa: E402
+from district import add, apply, atlas, cli, health, host, install_state, metrics, status  # noqa: E402
 from district import dashboard as dash  # noqa: E402  (dashboard() below is the snapshot fixture)
 
 STUB = '''#!/usr/bin/env python3
@@ -164,6 +165,7 @@ class DistrictCase(unittest.TestCase):
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         self.env = mock.patch.dict(os.environ, {
+            "HOME": str(self.tmp / "home"),
             "XDG_CONFIG_HOME": str(self.tmp / "xdg"),
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "XDG_CACHE_HOME": str(self.tmp / "cache"),
@@ -171,9 +173,10 @@ class DistrictCase(unittest.TestCase):
         })
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.assertTrue(host.path().is_relative_to(self.tmp), host.path())
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))
         self.stub("gh", ("repo view *", json.dumps({"isFork": False, "parent": None})))
-        self.stub("systemctl", ("is-active *", "active\n"))
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         self.stub("uv")
 
     def stub(self, name: str, *cases: tuple[str, str] | tuple[str, str, int]) -> None:
@@ -205,6 +208,20 @@ class DistrictCase(unittest.TestCase):
                 out.write(str(exc) + "\n")
                 code = 1
         return code, out.getvalue()
+
+    def render_installed_units(self) -> None:
+        """Make `factory install --print` render exactly the installed units, so no repo's units change."""
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            "for pat, out, rc in",
+            'if args == "install --print":\n'
+            '    import os\n'
+            '    units = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "systemd" / "user"\n'
+            '    for unit in sorted(units.glob(f"factory-{pathlib.Path.cwd().name}.*")):\n'
+            '        sys.stdout.write(f"# {unit.name}\\n{unit.read_text()}\\n")\n'
+            '    sys.exit(0)\n'
+            "for pat, out, rc in",
+        ))
 
     def units(self, slug: str, host_: str = "0.0.0.0") -> None:
         unit = host.unit_name(slug)
@@ -644,7 +661,9 @@ class ApplyTest(DistrictCase):
         self.assertEqual(env["UV_EXCLUDE_NEWER"], "PT24H")
         self.assertIn("policy 24h", out)
         self.assertIn("drift: .github/ISSUE_TEMPLATE/agent_task.md", out)
-        self.assertEqual(self.calls("factory"), ["install", "init --labels-only", "doctor --json", "dashboard --json"])
+        self.assertEqual(self.calls("factory"), [
+            "install --print", "install", "init --labels-only", "doctor --json", "dashboard --json",
+        ])
         data = host.load()
         data["defaults"]["min_package_age"] = "0"
         host.save(data)
@@ -695,7 +714,7 @@ class ApplyTest(DistrictCase):
         self.register(failures=9)
         code, out = self.district("apply")
         self.assertEqual(code, 0, out)
-        self.assertNotIn("disable", " ".join(self.calls("systemctl")))
+        self.assertNotIn("disabled_at", host.load()["repo"]["acme/widgets"])
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard(10))))
         code, out = self.district("apply")
         self.assertEqual(code, 1)
@@ -718,13 +737,153 @@ class ApplyTest(DistrictCase):
         self.assertIn("disabled_at", host.load()["repo"]["acme/widgets"])
         # --reset: successful hand run clears it and install re-enables the timer
         (self.bin / "factory.log").unlink()
-        self.stub("systemctl", ("start *", "", 0), ("is-active *", "active\n"))
+        self.stub("systemctl", ("start *", "", 0), ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard(0))))
         code, out = self.district("apply", "--reset", "widgets")
         self.assertEqual(code, 0, out)
         self.assertNotIn("disabled_at", host.load()["repo"]["acme/widgets"])
         self.assertIn("start factory-widgets.service", self.calls("systemctl"))
         self.assertIn("install", self.calls("factory"))
+
+    def test_per_repo_change_drains_only_the_changed_repo(self) -> None:
+        roots = {name: self.repo(name) for name in ("alpha", "beta")}
+        host.save({"repo": {f"acme/{name}": {"path": str(root)} for name, root in roots.items()}})
+        host.unit_dir().mkdir(parents=True)
+        service = f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=new\n"
+        timer = "[Timer]\nOnUnitActiveSec=10min\n"
+        for name in roots:
+            unit = host.unit_name(name)
+            installed = service.replace("ExecStart=new", "ExecStart=old") if name == "alpha" else service
+            (host.unit_dir() / f"{unit}.service").write_text(installed)
+            (host.unit_dir() / f"{unit}.timer").write_text(timer)
+
+        real_run = apply.run
+
+        def render(argv, **kwargs):
+            if argv == ["factory", "install", "--print"]:
+                unit = host.unit_name(Path(kwargs["cwd"]).name)
+                output = f"# {unit}.service\n{service}\n# {unit}.timer\n{timer}\n"
+                return subprocess.CompletedProcess(argv, 0, output, "")
+            return real_run(argv, **kwargs)
+
+        self.stub("systemctl",
+                  ("is-active factory-beta.service", "activating\n"),
+                  ("is-active *.service", "inactive\n"),
+                  ("is-active *", "active\n"))
+        with mock.patch.object(apply, "run", side_effect=render):
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        calls = self.calls("systemctl")
+        self.assertIn("disable --now factory-alpha.timer", calls)
+        self.assertIn("enable --now factory-alpha.timer", calls)
+        self.assertNotIn("disable --now factory-beta.timer", calls)
+        self.assertNotIn("enable --now factory-beta.timer", calls)
+
+    def test_unchanged_units_still_converge_an_inactive_timer(self) -> None:
+        root = self.register()
+        host.unit_dir().mkdir(parents=True)
+        service = f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=factory\n"
+        timer = "[Timer]\nOnUnitActiveSec=10min\n"
+        (host.unit_dir() / "factory-widgets.service").write_text(service)
+        (host.unit_dir() / "factory-widgets.timer").write_text(timer)
+        rendered = f"# factory-widgets.service\n{service}\n# factory-widgets.timer\n{timer}\n"
+        self.stub(
+            "factory",
+            ("install --print", rendered),
+            ("install", ""),
+            ("doctor --json", json.dumps(DOCTOR)),
+            ("dashboard --json", json.dumps(dashboard())),
+        )
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            "for pat, out, rc in",
+            'if args == "install": (here / "installed").touch()\nfor pat, out, rc in',
+        ))
+        systemctl = self.bin / "systemctl"
+        systemctl.write_text(systemctl.read_text().replace(
+            "for pat, out, rc in",
+            'if argv[:2] == ["--user", "is-active"] and argv[2] == "factory-widgets.timer":\n'
+            '    active = (here / "installed").exists()\n'
+            '    sys.stdout.write("active\\n" if active else "inactive\\n")\n'
+            '    sys.exit(0 if active else 3)\n'
+            "for pat, out, rc in",
+        ))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertFalse(any(call.startswith("disable ") for call in self.calls("systemctl")))
+
+    def test_busy_engine_defers_without_draining_fleet(self) -> None:
+        sha = "a" * 40
+        repos = {}
+        for name in ("factory", "rocm-cli", "gpuflo", "district", "rocm-app"):
+            root = self.repo(name, origin=f"https://github.com/acme/{name}.git")
+            repos[f"acme/{name}"] = {"path": str(root)}
+        source = repos["acme/factory"]["path"]
+        host.save({
+            "defaults": {
+                "factory_ref": "main",
+                "factory_source": source,
+                "engine": {"ref": "main", "sha": "b" * 40},
+            },
+            "repo": repos,
+        })
+        self.stub("git",
+                  ("remote get-url origin", "https://github.com/mikeroySoft/factory.git\n"),
+                  ("ls-remote --exit-code *", f"{sha}\trefs/heads/main\n"))
+        checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
+        self.stub("gh", ("api --paginate --slurp *", checks))
+        self.stub("systemctl",
+                  ("is-active factory-factory.service", "activating\n"),
+                  ("is-active *.service", "inactive\n"),
+                  ("is-active *", "active\n"))
+
+        host.unit_dir().mkdir(parents=True)
+        for slug in repos:
+            unit = host.unit_name(slug)
+            (host.unit_dir() / f"{unit}.timer").write_text("[Timer]\nOnUnitActiveSec=10min\n")
+            (host.unit_dir() / f"{unit}.service").write_text(
+                f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=factory\n")
+        self.render_installed_units()
+
+        with mock.patch("time.sleep", side_effect=AssertionError("apply slept waiting on a busy pass")) as sleep:
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        sleep.assert_not_called()
+        self.assertFalse(any(call.startswith(("disable ", "enable ")) for call in self.calls("systemctl")))
+        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
+        record = json.loads((self.tmp / "state/district/install-state.json").read_text())
+        self.assertEqual(record["last_apply"]["deferred"], [{
+            "target": "engine",
+            "reason": "busy: factory-factory.service",
+            "since": record["last_apply"]["deferred"][0]["since"],
+        }])
+        self.assertIn("engine deferred (busy: factory-factory.service)", out)
+        self.assertEqual(self.calls("factory").count("init --labels-only"), len(repos))
+        self.assertEqual(self.calls("factory").count("doctor --json"), len(repos))
+        self.assertEqual(self.calls("factory").count("dashboard --json"), len(repos))
+        with host.operation_lock_path().open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+        for name in ("systemctl", "uv"):
+            (self.bin / f"{name}.log").unlink(missing_ok=True)
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        later_code, later_out = self.district("apply")
+
+        self.assertEqual(later_code, 0, later_out)
+        self.assertTrue(any(call.startswith("tool install --reinstall ") for call in self.calls("uv")))
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], sha)
+        later = json.loads((self.tmp / "state/district/install-state.json").read_text())
+        self.assertEqual(later["last_apply"]["deferred"], [])
+        calls = self.calls("systemctl")
+        for name in ("factory", "rocm-cli", "gpuflo", "district", "rocm-app"):
+            self.assertIn(f"disable --now factory-{name}.timer", calls)
+            self.assertIn(f"enable --now factory-{name}.timer", calls)
 
     def engine_source(self) -> Path:
         """A committed `factory_source` checkout registered in the host file."""
@@ -768,6 +927,57 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
         self.assertNotIn("enable --now factory-widgets.timer", self.calls("systemctl"))
 
+    def test_upgrade_restores_timer_after_generic_exception(self) -> None:
+        self.engine_source()
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        real_run = apply.run
+
+        def fail_install(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                raise RuntimeError("boom")
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(apply, "run", side_effect=fail_install), \
+             self.assertRaises(RuntimeError):
+            apply.upgrade(host.load())
+        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
+        calls = self.calls("systemctl")
+        self.assertLess(calls.index("disable --now factory-widgets.timer"),
+                        calls.index("enable --now factory-widgets.timer"))
+
+    def test_upgrade_bounds_install_time_and_restores_timer(self) -> None:
+        self.engine_source()
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        real_run = apply.run
+
+        def slow_install(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                return real_run([sys.executable, "-c", "import time; time.sleep(0.2)"], **kwargs)
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(apply, "DRAIN_TIMEOUT", 0.01, create=True), \
+             mock.patch.object(apply, "run", side_effect=slow_install), \
+             self.assertRaisesRegex(host.DistrictError, "timed out after 0.01s"):
+            apply.upgrade(host.load())
+        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
+        calls = self.calls("systemctl")
+        self.assertLess(calls.index("disable --now factory-widgets.timer"),
+                        calls.index("enable --now factory-widgets.timer"))
+
+    def test_upgrade_race_after_drain_restores_and_defers(self) -> None:
+        self.engine_source()
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        record = install_state.ApplyRun.start()
+        with mock.patch.object(apply, "busy_units",
+                               side_effect=[[], ["factory-widgets.service"]]):
+            result = apply.upgrade(host.load(), record=record)
+        self.assertEqual(result, "deferred")
+        self.assertEqual(record.deferred["engine"]["reason"], "busy: factory-widgets.service")
+        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
+        calls = self.calls("systemctl")
+        self.assertLess(calls.index("disable --now factory-widgets.timer"),
+                        calls.index("enable --now factory-widgets.timer"))
+
     def test_upgrade_installs_the_renamed_engine_package(self) -> None:
         src = self.engine_source()
         self.stub("uv", ("tool install *", "Installed 1 executable: factory\n"))
@@ -780,13 +990,13 @@ class ApplyTest(DistrictCase):
         self.assertEqual(self.calls("factory")[0], "--version")
         self.assertIn(f"installed factory 0.2.0 from {src}", out)
 
-    def test_upgrade_waits_for_a_running_pass_whose_timer_is_already_disabled(self) -> None:
+    def test_upgrade_defers_when_a_pass_is_running_with_its_timer_disabled(self) -> None:
         self.engine_source()
         self.stub("systemctl", ("is-active *.service", "activating\n"), ("is-active *", "inactive\n"))
-        with mock.patch.object(apply, "SERVICE_WAIT", 0), mock.patch.object(apply.time, "sleep"):
-            code, out = self.district("apply", "--upgrade")
-        self.assertEqual(code, 1)
-        self.assertIn("still running after 0s: factory-widgets.service", out)
+        code, out = self.district("apply", "--upgrade")
+        self.assertEqual(code, 0, out)
+        self.assertIn("engine deferred (busy: factory-widgets.service)", out)
+        self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
         self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
 
     def test_upgrade_refuses_dirty_source(self) -> None:
