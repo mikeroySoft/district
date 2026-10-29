@@ -119,7 +119,13 @@ def _repository(slug: str, entry: dict, at: datetime) -> tuple[list[str], dict]:
     current_escalated = (sum(item.get("stage") == "escalated" for item in tickets if isinstance(item, dict))
                          if isinstance(tickets, list) and not entry.get("error") else None)
     timestamps = _source_times(entry)
-    lines = [f"## {slug}", "", f"- Operational assessment: {entry.get('assessment', 'unknown')}",
+    host_name = entry.get("host", "local")
+    host_state = entry.get("host_state", "reachable")
+    host_text = str(host_name)
+    if host_state != "reachable":
+        host_text += f" ({host_state}; last seen {status.rel(entry.get('host_last_seen'), at)})"
+    lines = [f"## {slug}", "", f"- Host: {host_text}",
+             f"- Operational assessment: {entry.get('assessment', 'unknown')}",
              f"- Observation quality: {entry.get('observation', 'unavailable')}",
              f"- Source timestamps: {', '.join(timestamps) if timestamps else 'unavailable'}"]
     source_errors = [f"{source.get('id', 'source')}: {source['error']}" for source in entry.get("sources") or []

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from district import health, status
+from district import health, host, status
 
 
 STAMP = "2026-09-05T12:00:00Z"
@@ -129,6 +129,31 @@ class FleetCollectorTest(unittest.TestCase):
             entry = collector.fleet()["acme/fast"]
             self.assertEqual(entry["executions"][0]["id"], "acme/fast/worker")
             self.assertIn("timeout", entry["sources"][0]["error"])
+
+
+    def test_remote_failure_retains_last_seen_observation(self):
+        table = {"path": "/remote/fast", "host": "ultron", "dashboard": {"port": 8765}}
+        runner = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, json.dumps(runtime("acme/fast")), ""))
+        data = {
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "linux"}},
+            "repo": {"acme/fast": table},
+        }
+        with mock.patch.object(host, "remote_runner", return_value=runner), \
+             mock.patch.object(status.metrics, "read", return_value=None):
+            collector = status.FleetCollector(data)
+            collector.collect_runtime("acme/fast")
+            first = collector.fleet()["acme/fast"]
+            runner.side_effect = host.RemoteHostError("ultron", "connection refused")
+            collector.collect_runtime("acme/fast")
+            stale = collector.fleet()["acme/fast"]
+
+        self.assertEqual(first["host_state"], "reachable")
+        self.assertIsNotNone(first["host_last_seen"])
+        self.assertEqual(stale["host_state"], "unreachable")
+        self.assertEqual(stale["host_last_seen"], first["host_last_seen"])
+        self.assertIn("connection refused", stale["host_error"])
+        self.assertEqual(stale["executions"][0]["id"], "acme/fast/worker")
 
     def test_schema_history_errors_and_duplicate_events_remain_explicit(self):
         event = {"event_id": "event-1", "execution_id": "execution-1", "sequence": 1,

@@ -19,13 +19,17 @@ from pathlib import Path
 from district import doctor, health, host, metrics
 from district.host import run
 
-COLUMNS = ("repo", "operating", "execution", "observation", "assessment", "version", "next", "last", "pass", "esc", "gate1", "bounce", "fails", "upstream", "evidence")
+COLUMNS = ("repo", "host", "operating", "execution", "observation", "assessment", "version", "next", "last", "pass", "esc", "gate1", "bounce", "fails", "upstream", "evidence")
 
 
-def snapshot(slug: str, table: dict, timeout: float | None = None) -> dict:
+def snapshot(slug: str, table: dict, timeout: float | None = None, *, run_cmd=None) -> dict:
     """Read the existing full snapshot; observation errors never imply stopped machinery."""
+    run_cmd = run if run_cmd is None else run_cmd
     try:
-        proc = run(["factory", "dashboard", "--json"], cwd=Path(table["path"]), timeout=timeout)
+        proc = run_cmd(["factory", "dashboard", "--json"], cwd=Path(table["path"]),
+                       timeout=timeout, quiet=True)
+    except host.RemoteHostError as exc:
+        return {"slug": slug, "error": str(exc), "host_error": str(exc)}
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"slug": slug, "error": (
             f"factory dashboard timed out after {timeout:g}s"
@@ -72,6 +76,10 @@ def entry(result: dict, table: dict) -> dict:
     if sources is None:
         sources = health.snapshot_sources(snap, result.get("error"))
     return {
+        "host": table.get("host", "local"),
+        "host_state": result.get("host_state", "reachable"),
+        "host_last_seen": result.get("host_last_seen"),
+        "host_error": result.get("host_error"),
         "table": table, "snap": snap, "error": result.get("error"),
         "metrics": metrics.read(result["slug"]),
         **health.classify(result["slug"], sources, table),
@@ -257,7 +265,10 @@ class FleetCollector:
     def __init__(self, data: dict, *, runtime_interval: float = RUNTIME_INTERVAL,
                  full_interval: float = FULL_INTERVAL, timeout: float = COLLECTION_TIMEOUT,
                  full_timeout: float = FULL_TIMEOUT, concurrency: int = COLLECTION_CONCURRENCY):
+        self.data = data
         self.repos = host.repos(data)
+        for slug in self.repos:
+            host.factory_host(data, slug)
         self.runtime_interval = runtime_interval
         self.full_interval = full_interval
         self.timeout = timeout
@@ -265,6 +276,9 @@ class FleetCollector:
         self.concurrency = max(1, min(concurrency, COLLECTION_CONCURRENCY))
         self.revision = 0
         self._records = {slug: self._new_record() for slug in self.repos}
+        names = {table.get("host", "local") for table in self.repos.values()}
+        self._hosts = {name: self._new_host() for name in names}
+        self._runners: dict[str, object] = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -280,17 +294,65 @@ class FleetCollector:
                 "runtime_at": float("-inf"), "full_at": float("-inf"),
                 "runtime_collected_at": None, "full_collected_at": None}
 
+    @staticmethod
+    def _new_host() -> dict:
+        return {"host_state": "pending", "host_last_seen": None, "host_error": None}
+
+    def _runner(self, name: str):
+        if name == "local":
+            return run
+        with self._lock:
+            runner = self._runners.get(name)
+            if runner is None:
+                runner = host.remote_runner(name, host.hosts(self.data)[name])
+                self._runners[name] = runner
+            return runner
+
+    def _host_success(self, name: str) -> None:
+        with self._lock:
+            state = self._hosts.setdefault(name, self._new_host())
+            state.update(host_state="reachable", host_last_seen=_utcnow(), host_error=None)
+
+    def mark_unreachable(self, name: str, error: str) -> None:
+        attempted_at = _utcnow()
+        now = time.monotonic()
+        with self._lock:
+            state = self._hosts.setdefault(name, self._new_host())
+            state.update(host_state="unreachable", host_error=error)
+            for slug, table in self.repos.items():
+                if table.get("host", "local") != name:
+                    continue
+                record = self._records[slug]
+                source = record["runtime"] or {
+                    "id": "factory.runtime", "observed_at": None,
+                    "cadence_seconds": self.runtime_interval, "data": None,
+                }
+                record.update(
+                    runtime={**source, "error": error}, runtime_error=error, full_error=error,
+                    runtime_at=now, full_at=now,
+                    runtime_collected_at=attempted_at, full_collected_at=attempted_at,
+                )
+            self.revision += 1
+
     def refresh_registry(self) -> None:
-        repos = host.repos(host.load())
+        data = host.load()
+        repos = host.repos(data)
+        for slug in repos:
+            host.factory_host(data, slug)
         with self._lock:
             if repos == self.repos:
                 return
             self._records = {
                 slug: self._records[slug]
-                if slug in self.repos and table["path"] == self.repos[slug]["path"]
+                if (slug in self.repos and table["path"] == self.repos[slug]["path"]
+                    and table.get("host", "local") == self.repos[slug].get("host", "local"))
                 else self._new_record()
                 for slug, table in repos.items()
             }
+            names = {table.get("host", "local") for table in repos.values()}
+            self._hosts = {name: self._hosts.get(name, self._new_host()) for name in names}
+            self._runners = {}
+            self.data = data
             self.repos = repos
             self.revision += 1
     def start(self) -> None:
@@ -350,10 +412,12 @@ class FleetCollector:
             record = self._records.get(slug)
             if record is None:
                 return
-            path = self.repos[slug]["path"]
+            table = self.repos[slug]
+            name = table.get("host", "local")
         try:
-            proc = run(["factory", "dashboard", "--runtime-json"], cwd=Path(path),
-                       timeout=self.timeout)
+            proc = self._runner(name)(["factory", "dashboard", "--runtime-json"],
+                                      cwd=Path(table["path"]), timeout=self.timeout, quiet=True)
+            self._host_success(name)
             if proc.returncode:
                 if proc.returncode == 2 and "unrecognized arguments: --runtime-json" in proc.stderr:
                     raise UnsupportedRuntime("unsupported runtime command")
@@ -362,6 +426,8 @@ class FleetCollector:
             if not isinstance(data, dict):
                 raise ValueError("malformed runtime observation")
             self.accept_runtime(slug, data, record=record)
+        except host.RemoteHostError as exc:
+            self.mark_unreachable(name, str(exc))
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             error = (f"runtime timeout after {self.timeout:g}s"
                      if isinstance(exc, subprocess.TimeoutExpired) else str(exc))
@@ -391,7 +457,16 @@ class FleetCollector:
             if record is None:
                 return
             table = self.repos[slug]
-        result = snapshot(slug, table, timeout=self.full_timeout)
+            name = table.get("host", "local")
+        result = (
+            snapshot(slug, table, timeout=self.full_timeout)
+            if name == "local"
+            else snapshot(slug, table, timeout=self.full_timeout, run_cmd=self._runner(name))
+        )
+        if result.get("host_error"):
+            self.mark_unreachable(name, result["host_error"])
+            return
+        self._host_success(name)
         with self._lock:
             if self._records.get(slug) is not record:
                 return
@@ -408,6 +483,7 @@ class FleetCollector:
         with self._lock:
             revision = self.revision
             repos = dict(self.repos)
+            host_states = {name: dict(state) for name, state in self._hosts.items()}
             records = {
                 slug: {**record, "runtime": dict(record["runtime"]) if record["runtime"] else None,
                        "activity": {"events": list(record["activity"]["events"]),
@@ -428,8 +504,10 @@ class FleetCollector:
                 for source in full_sources:
                     source["cadence_seconds"] = self.full_interval
                 sources.extend(full_sources)
+            name = repos[slug].get("host", "local")
             item = entry({"slug": slug, "snap": record["snap"], "error": record["full_error"],
-                          "sources": sources}, repos[slug])
+                          "sources": sources, **host_states.get(name, self._new_host())},
+                         repos[slug])
             item["activity"] = record["activity"]
             item["collection"] = {
                 "runtime_collected_at": record["runtime_collected_at"],
@@ -455,7 +533,7 @@ class FleetCollector:
 
 
 def fleet(data: dict) -> dict[str, dict]:
-    """Collect one bounded runtime/full round through the server's observation path."""
+    """Collect one bounded runtime/full round, gathering target hosts in parallel."""
     collector = FleetCollector(data)
     if not collector.repos:
         return {}
@@ -464,8 +542,24 @@ def fleet(data: dict) -> dict[str, dict]:
         collector.collect_runtime(slug)
         collector.collect_full(slug)
 
-    with ThreadPoolExecutor(max_workers=collector.concurrency) as pool:
-        for _ in pool.map(collect, collector.repos):
+    def collect_host(group: tuple[str, list[str]]) -> None:
+        name, slugs = group
+        if name != "local":
+            try:
+                collector._runner(name)(["true"], timeout=collector.timeout, quiet=True)
+                collector._host_success(name)
+            except host.RemoteHostError as exc:
+                collector.mark_unreachable(name, str(exc))
+                return
+        with ThreadPoolExecutor(max_workers=min(len(slugs), collector.concurrency)) as pool:
+            for _ in pool.map(collect, slugs):
+                pass
+
+    groups: dict[str, list[str]] = {}
+    for slug, table in collector.repos.items():
+        groups.setdefault(table.get("host", "local"), []).append(slug)
+    with ThreadPoolExecutor(max_workers=min(len(groups), collector.concurrency)) as pool:
+        for _ in pool.map(collect_host, groups.items()):
             pass
     return collector.fleet()
 
@@ -482,8 +576,14 @@ def row(slug: str, e: dict) -> dict:
         upstream = f"behind {up.get('behind', '?')}" + (f", parked #{blocker['number']}" if "number" in blocker else "")
     else:
         upstream = "-"
+    state = e.get("host_state", "reachable")
+    name = e.get("host", "local")
+    last_seen = rel(e.get("host_last_seen")) if e.get("host_last_seen") else "never"
+    host_label = name if state == "reachable" else (
+        f"{name} ({state}; last seen {last_seen})")
     return {
-        "repo": slug, "operating": e["operating_state"], "execution": e["execution_state"],
+        "repo": slug, "host": host_label,
+        "operating": e["operating_state"], "execution": e["execution_state"],
         "observation": e["observation"], "assessment": e["assessment"],
         "version": str(snap.get("version", "?")),
         "next": rel(timer.get("next")), "last": rel(timer.get("last")),
@@ -491,7 +591,8 @@ def row(slug: str, e: dict) -> dict:
         "esc": str(sum(t.get("stage") == "escalated" for t in tickets if isinstance(t, dict))) if tickets is not None and not e["error"] else "?",
         "gate1": pct(sm.get("first_pass")), "bounce": pct(sm.get("bounce_rate")),
         "fails": str(d.get("consecutive_failures", "?")), "upstream": upstream,
-        "evidence": "; ".join(f["condition_code"] for f in e["findings"]) or e["error"] or "-",
+        "evidence": "; ".join(f["condition_code"] for f in e["findings"])
+                    or e.get("host_error") or e["error"] or "-",
     }
 
 
@@ -517,11 +618,7 @@ def main(argv: list[str]) -> int:
         if unknown:
             parser.error(f"unknown slug: {', '.join(unknown)}")
         known = {s: known[s] for s in args.slug}
-    remote = {slug: repo for slug, repo in known.items() if host.is_remote(data, slug)}
-    for slug, repo in remote.items():
-        print(f"{slug}: on host {repo['host']} (remote hosts not supported yet, #96)",
-              file=sys.stderr if args.json else sys.stdout)
-    data = {**data, "repo": {slug: repo for slug, repo in known.items() if slug not in remote}}
+    data = {**data, "repo": known}
     gh = doctor.gh_auth()
     failed = gh["status"] == "FAIL"
     entries = fleet(data)
@@ -537,7 +634,7 @@ def main(argv: list[str]) -> int:
         else:
             if args.unhealthy:
                 print("no unhealthy repositories")
-            elif not remote:
+            else:
                 print("no repositories registered (district add)")
     if failed or any(e["assessment"] == "attention" for e in entries.values()):
         return 1

@@ -1666,6 +1666,13 @@ class StatusTest(DistrictCase):
         self.assertIsNone(entries["acme/offline"]["host_last_seen"])
         self.assertIn("Connection refused", entries["acme/offline"]["host_error"])
 
+        text_code, text = self.district("status")
+        self.assertEqual(text_code, 2, text)
+        self.assertIn("host", text.splitlines()[0])
+        self.assertRegex(text, r"acme/local\s+local")
+        self.assertRegex(text, r"acme/remote\s+ultron")
+        self.assertIn("dead (unreachable; last seen never)", text)
+
     def test_unknown_factory_host_fails_before_collection(self) -> None:
         host.save({"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}})
         code, out = self.district("status")
@@ -2237,6 +2244,18 @@ class AtlasTest(unittest.TestCase):
         roads = [l for l in data.splitlines() if l.startswith('  {"id": "p')]
         self.assertEqual(len(roads), 4)  # one dispatch road per factory + one upstream road for the fork
         self.assertEqual(atlas.data({}).count('"id": "f_'), 0)
+
+    def test_factory_cards_include_host_badges_and_reachability(self) -> None:
+        remote = fleet_entry(100)
+        remote.update(host="ultron", host_state="unreachable",
+                      host_last_seen="2026-09-05T12:30:00Z")
+
+        block = atlas.factory_block(0, "acme/big", remote, 100)
+
+        self.assertEqual((block["host"], block["host_state"]), ("ultron", "unreachable"))
+        self.assertEqual(block["name"], "big [ultron]")
+        self.assertEqual(dict(block["kpis"])["host"],
+                         "ultron · unreachable · last seen 2026-09-05T12:30:00Z")
 
     def test_partial_fleet_metrics_keep_known_totals(self) -> None:
         rows = {label: (value, detail) for label, value, detail in atlas.kpis(self.FLEET)}
