@@ -39,7 +39,7 @@ only once.
 | Command | What one invocation does |
 |---|---|
 | `district add <path\|url>` | Onboard a repo, or adopt one that already has `.factory.toml`. `--dry-run` prints the proposal (slug, clone path, fork parent, port, gate checks); `--host NAME`, `--check NAME=CMD`, `--exclusive a,b`, `--no-edit`. |
-| `district apply [slug]` | Reconcile the host to the registry: units, labels, `factory doctor`, failure cap, package-age policy. Unit changes drain only that repository's active timer; a busy service is deferred without touching its timer. If `[defaults].factory_ref` is set, every apply resolves that ref from the `factory_source` origin and installs its exact commit only after all GitHub check runs succeed; already-current, pending, and failed commits are left alone. A changed shared engine is deferred when any local Factory service is busy; that engine step touches no timer, while normal per-repository reconciliation continues. Install commands may keep selected timers drained for at most 120 seconds. Deferrals exit 0 unless another check fails. Then runs `gh --version` and `factory --version` under each reconciled dispatch/dashboard unit's PATH (10 s timeout); any failure exits 1 naming the unit and binary. `--upgrade` explicitly reinstalls Factory from the local `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
+| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: units, labels, `factory doctor`, failure cap, package-age policy. Remote commands and config writes use bounded BatchMode SSH. Unit changes drain only that repository's active timer; a busy service is deferred without touching its timer. If `[defaults].factory_ref` is set, each target host installs the exact CI-green commit through its own `uv`; engine metadata is per host. An unreachable host exits 1 for its factories while other hosts continue. Then runs `gh --version` and `factory --version` under each reconciled dispatch/dashboard unit's PATH. `--upgrade` explicitly reinstalls Factory from the target host's `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table. Exit 1 on operational attention or a failed `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row), 2 on unknown/stale observation, 0 when every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
 | `district doctor` | Check District's own host prerequisites and every toolchain profile declared by a managed repository. `--json`. |
@@ -105,8 +105,11 @@ name.
 `~/Library/LaunchAgents/<label>.plist` for macOS. Launchd jobs add
 `/opt/homebrew/bin` to the service PATH and write stdout/stderr under the
 factory's `.factory/logs/` directory. `local` is reserved for this machine.
-Remote factories are recorded but skipped until remote execution support lands
-in #96.
+Remote commands use noninteractive SSH with a ten-second connection timeout.
+District keeps the authoritative registry and operation lock on the controller,
+writes a host-filtered Factory config remotely, and continues with other hosts
+when one cannot be reached. `district update` updates this controller; registered
+remote factories do not require District installations of their own.
 
 Set `factory_ref = "latest-odd"` under `[defaults]` to let the hourly plain
 `district apply` follow Factory's highest odd-patch semver tag, including
@@ -116,14 +119,39 @@ falls back to `main`. A tag, such as `factory_ref = "v0.4.7"`, or a branch,
 such as `"main"`, pins that explicit remote ref instead; tags take precedence
 over branches with the same name.
 
-Every resolved commit must have successful GitHub check runs before District
-installs its immutable Git revision with `factory_extras` and records it in
-`[defaults.engine]`. An unchanged commit is left alone without checking CI or
-reinstalling. A busy local Factory service defers a changed shared-engine
-install without disabling any timer; the next apply retries it and clears the
-deferral after success. Remove `factory_ref` before rolling back, or the next
-apply will reinstall the configured ref's SHA. Omit `factory_ref` to retain
-explicit `district apply --upgrade` behavior.
+Every target host resolves the ref from its Factory checkout, requires successful
+GitHub check runs, and installs the immutable revision there through `uv` with
+`factory_extras`. Engine state is recorded under `[defaults.engine]` for the
+controller and `[hosts.NAME.engine]` for each remote host. An unchanged commit
+is left alone without checking CI or reinstalling. A busy Factory service
+defers only that host's changed engine install without disabling another host's
+timers. Remove `factory_ref` before rolling back, or the next apply will
+reinstall the configured ref's SHA. Omit `factory_ref` to retain explicit
+`district apply --upgrade` behavior.
+
+### Manual Ultron smoke test
+
+From the controller, after registering `mikeroySoft-org/benito-app` on `ultron`
+and ensuring its configured `factory_source` checkout exists and is clean on
+Ultron:
+
+```sh
+ssh -o BatchMode=yes -o ConnectTimeout=10 factory@Ultron.lan true
+district apply mikeroySoft-org/benito-app --upgrade
+ssh -o BatchMode=yes -o ConnectTimeout=10 factory@Ultron.lan \
+  'test -f ~/.config/factory/config.toml &&
+   test -f ~/Library/LaunchAgents/factory-benito-app.plist &&
+   launchctl print gui/$(id -u)/factory-benito-app &&
+   cd /Users/mike/factories/benito-app &&
+   factory doctor --json &&
+   factory dashboard --json'
+district apply mikeroySoft-org/benito-app
+```
+
+The first apply must report the remote engine install and a converged
+`mikeroySoft-org/benito-app` row. The second must remain converged. A failed SSH
+probe or apply must name `ultron` without running commands for factories assigned
+to other hosts.
 
 ## Agent use
 
