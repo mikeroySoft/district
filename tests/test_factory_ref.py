@@ -32,6 +32,7 @@ class FactoryRefTest(unittest.TestCase):
         return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
     def calls(self, checks: str, *, data: dict | None = None, resolve_code: int = 0,
+              remote_refs: str | None = None,
               active_timers: list[str] | None = None, backend: mock.Mock | None = None):
         calls: list[list[str]] = []
         if backend is None:
@@ -43,8 +44,11 @@ class FactoryRefTest(unittest.TestCase):
             calls.append(argv)
             if argv[:4] == ["git", "remote", "get-url", "origin"]:
                 return self.proc(argv, ORIGIN + "\n")
+            if argv[:3] == ["git", "ls-remote", "--tags"] and remote_refs is not None:
+                return self.proc(argv, remote_refs)
             if argv[:2] == ["git", "ls-remote"]:
-                return self.proc(argv, f"{SHA}\trefs/heads/main\n", resolve_code, "network down")
+                code = 2 if remote_refs is not None else resolve_code
+                return self.proc(argv, f"{SHA}\trefs/heads/main\n", code, "network down")
             if argv[:2] == ["gh", "api"]:
                 return self.proc(argv, checks)
             return self.proc(argv)
@@ -62,7 +66,8 @@ class FactoryRefTest(unittest.TestCase):
             }
             with mock.patch.dict("os.environ", env), \
                     mock.patch.object(Path, "is_dir", return_value=True), \
-                    mock.patch.object(apply, "run", side_effect=run):
+                    mock.patch.object(apply, "run", side_effect=run), \
+                    mock.patch.object(host, "save"):
                 self.assertTrue(host.path().is_relative_to(root), host.path())
                 result = apply.reconcile_engine(document, backend=backend)
         return result, calls, document
@@ -91,6 +96,30 @@ class FactoryRefTest(unittest.TestCase):
         self.assertEqual(len(installs), 1)
         self.assertIn(f"git+{ORIGIN}@{SHA}", installs[0])
         self.assertEqual(document["defaults"]["engine"]["sha"], SHA)
+
+
+    def test_latest_odd_installs_highest_odd_patch_tag(self) -> None:
+        peeled = "9" * 40
+        tags = "\n".join([
+            f"{'6' * 40}\trefs/tags/v0.4.6",
+            f"{'1' * 40}\trefs/tags/v0.4.6^{{}}",
+            f"{'7' * 40}\trefs/tags/v0.4.7",
+            f"{'2' * 40}\trefs/tags/v0.4.7^{{}}",
+            f"{'8' * 40}\trefs/tags/v0.4.8",
+            f"{'3' * 40}\trefs/tags/v0.4.8^{{}}",
+            f"{'4' * 40}\trefs/tags/v0.4.9-rc.1",
+            f"{peeled}\trefs/tags/v0.4.9-rc.1^{{}}",
+        ]) + "\n"
+        checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
+
+        result, calls, document = self.calls(
+            checks, data=self.data(ref="latest-odd"), remote_refs=tags)
+
+        installs = [call for call in calls if call[:3] == ["uv", "tool", "install"]]
+        self.assertEqual(result, "applied")
+        self.assertEqual(len(installs), 1)
+        self.assertIn(f"git+{ORIGIN}@{peeled}", installs[0])
+        self.assertEqual(document["defaults"]["engine"]["ref"], "v0.4.9-rc.1")
 
     def test_install_restarts_installed_dashboard(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
