@@ -143,10 +143,14 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None) -
         if busy := drain(active_timers, services, data, record):
             _defer(record, "engine", busy)
             return "deferred"
-        proc = run(
-            ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
-            timeout=DRAIN_TIMEOUT if active_timers else None,
-        )
+        try:
+            proc = run(
+                ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
+                timeout=DRAIN_TIMEOUT if active_timers else None,
+            )
+        except subprocess.TimeoutExpired:
+            print(f"engine {sha[:12]} install timed out after {DRAIN_TIMEOUT}s")
+            return "failed"
     finally:
         restore(active_timers, data, record)
     if proc.returncode:
@@ -306,10 +310,13 @@ def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None
             if busy := drain(active_timers, services, data, record):
                 _defer(record, "engine", busy)
                 return "deferred"
-            proc = run(
-                ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
-                timeout=DRAIN_TIMEOUT if active_timers else None,
-            )
+            try:
+                proc = run(
+                    ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
+                    timeout=DRAIN_TIMEOUT if active_timers else None,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise DistrictError(f"uv tool install timed out after {DRAIN_TIMEOUT}s") from exc
         finally:
             restore(active_timers, data, record)
     sys.stdout.write(proc.stdout)
@@ -538,14 +545,18 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                         record.defer(slug, reason)
                         rows.append(deferred_row(slug, table, reason))
                         continue
-                    proc = run(
-                        ["factory", "install"],
-                        cwd=Path(table["path"]),
-                        timeout=DRAIN_TIMEOUT if active_timers else None,
-                    )
-                    if proc.returncode:
-                        tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
-                        install_error = f"install: {tail[0]}"
+                    try:
+                        proc = run(
+                            ["factory", "install"],
+                            cwd=Path(table["path"]),
+                            timeout=DRAIN_TIMEOUT if active_timers else None,
+                        )
+                    except subprocess.TimeoutExpired:
+                        install_error = f"install: timed out after {DRAIN_TIMEOUT}s"
+                    else:
+                        if proc.returncode:
+                            tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
+                            install_error = f"install: {tail[0]}"
                 finally:
                     restore(active_timers, data, record)
                 row = repo_pass(slug, table, data, record)

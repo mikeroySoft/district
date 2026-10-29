@@ -905,26 +905,23 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
         self.assertNotIn("enable --now factory-widgets.timer", self.calls("systemctl"))
 
-    def test_upgrade_restores_timer_after_exception_and_timeout(self) -> None:
+    def test_upgrade_restores_timer_after_generic_exception(self) -> None:
         self.engine_source()
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         real_run = apply.run
-        failures = (RuntimeError("boom"), subprocess.TimeoutExpired(["uv"], 120))
-        for failure in failures:
-            with self.subTest(failure=type(failure).__name__):
-                def fail_install(argv, **kwargs):
-                    if argv[:3] == ["uv", "tool", "install"]:
-                        raise failure
-                    return real_run(argv, **kwargs)
 
-                with mock.patch.object(apply, "run", side_effect=fail_install), \
-                     self.assertRaises(type(failure)):
-                    apply.upgrade(host.load())
-                self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
-                calls = self.calls("systemctl")
-                self.assertLess(calls.index("disable --now factory-widgets.timer"),
-                                calls.index("enable --now factory-widgets.timer"))
-                (self.bin / "systemctl.log").unlink()
+        def fail_install(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                raise RuntimeError("boom")
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(apply, "run", side_effect=fail_install), \
+             self.assertRaises(RuntimeError):
+            apply.upgrade(host.load())
+        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
+        calls = self.calls("systemctl")
+        self.assertLess(calls.index("disable --now factory-widgets.timer"),
+                        calls.index("enable --now factory-widgets.timer"))
 
     def test_upgrade_bounds_install_time_and_restores_timer(self) -> None:
         self.engine_source()
@@ -938,7 +935,7 @@ class ApplyTest(DistrictCase):
 
         with mock.patch.object(apply, "DRAIN_TIMEOUT", 0.01, create=True), \
              mock.patch.object(apply, "run", side_effect=slow_install), \
-             self.assertRaises(subprocess.TimeoutExpired):
+             self.assertRaisesRegex(host.DistrictError, "timed out after 0.01s"):
             apply.upgrade(host.load())
         self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
         calls = self.calls("systemctl")
