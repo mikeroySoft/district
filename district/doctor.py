@@ -42,7 +42,9 @@ def run(argv: list[str], *, check: bool = False, env: dict[str, str] | None = No
     except OSError as exc:
         return subprocess.CompletedProcess(argv, 127, "", str(exc))
     except subprocess.TimeoutExpired as exc:
-        return subprocess.CompletedProcess(argv, 124, exc.stdout or "", exc.stderr or f"timed out after {exc.timeout}s")
+        stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+        stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
+        return subprocess.CompletedProcess(argv, 124, stdout, stderr or f"timed out after {exc.timeout}s")
 
 
 
@@ -115,10 +117,10 @@ def macos_xcode_rows(name: str, table: dict) -> list[dict[str, str]]:
     else:
         rows.append(row("PASS", xcode_label, xcode.stdout.strip()))
 
-    brew = runner(["brew", "--prefix", "xcodegen"], env=env)
+    brew = runner(["brew", "--prefix", "--installed", "xcodegen"], env=env)
     prefix = brew.stdout.strip()
     if brew.returncode:
-        rows.append(row("FAIL", f"host {name} macos-xcode xcodegen", _failure(brew, "brew --prefix xcodegen")))
+        rows.append(row("FAIL", f"host {name} macos-xcode xcodegen", _failure(brew, "brew --prefix --installed xcodegen")))
     elif not prefix.startswith("/opt/homebrew/"):
         rows.append(row("FAIL", f"host {name} macos-xcode xcodegen", f"brew prefix is {prefix or 'empty'}"))
     else:
