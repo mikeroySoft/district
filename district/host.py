@@ -320,7 +320,7 @@ class RemoteRunner:
         ]
         try:
             proc = self.transport(ssh, timeout=timeout, input=input)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except OSError as exc:
             raise RemoteHostError(self.name, str(exc)) from exc
         if proc.returncode == 255:
             detail = (proc.stderr or proc.stdout).strip().splitlines()

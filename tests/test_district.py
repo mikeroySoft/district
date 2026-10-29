@@ -213,6 +213,14 @@ class HostRunTest(unittest.TestCase):
         self.assertEqual(argv[7], "cd '/remote/path with spaces' && printf %s 'a b'")
         self.assertEqual(output.getvalue(), "ultron: $ printf %s 'a b'\n")
 
+    def test_remote_runner_preserves_command_timeout(self) -> None:
+        transport = mock.Mock(side_effect=subprocess.TimeoutExpired(["ssh"], 120))
+        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runner(["factory", "install"], timeout=120)
+
+
 
 class DistrictCase(unittest.TestCase):
     def setUp(self) -> None:
