@@ -313,17 +313,16 @@ def _units_changed(slug: str, output: str, backend) -> bool:
     return backend.definitions_changed(unit, wanted)
 
 
-def plan_apply(targets: dict[str, dict], backend, *, run_cmd=None) -> dict[str, bool]:
+def plan_apply(targets: dict[str, dict], backend, *, run_cmd=None, env=None) -> dict[str, bool]:
     run_cmd = run if run_cmd is None else run_cmd
+    backend = backend or host.service_backend()
     changes = {}
     for slug, table in targets.items():
         if table.get("disabled_at"):
             changes[slug] = False
             continue
-        if isinstance(run_cmd, host.RemoteRunner):
-            changes[slug] = True
-            continue
-        proc = run_cmd(["factory", "install", "--print"], cwd=Path(table["path"]))
+        kwargs = {"env": env} if env is not None else {}
+        proc = run_cmd(["factory", "install", "--print"], cwd=Path(table["path"]), **kwargs)
         changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout, backend)
     return changes
 
@@ -585,7 +584,7 @@ def smoke(slugs, backend=None, *, run_cmd=None) -> tuple[int, list[str]]:
                     fails.append(f"{name}: {binary} not on unit PATH")
                     continue
                 try:
-                    env = None if isinstance(run_cmd, host.RemoteRunner) else {**os.environ, "PATH": path}
+                    env = {"PATH": path} if isinstance(run_cmd, host.RemoteRunner) else {**os.environ, "PATH": path}
                     proc = run_cmd([exe, "--version"], timeout=SMOKE_TIMEOUT, env=env)
                 except subprocess.TimeoutExpired:
                     fails.append(f"{name}: {binary} --version timed out after {SMOKE_TIMEOUT}s")
@@ -605,11 +604,14 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     if host_name == "local":
         run_cmd = run
         backend = host.service_backend()
+        install_env = None
     else:
         target = data["hosts"][host_name]
         run_cmd = host.remote_runner(host_name, target)
         backend = host.service_backend(target, run=run_cmd)
         host.sync_remote_config(data, host_name, run_cmd)
+        facts = run_cmd.facts()
+        install_env = {"PATH": host.service_path(facts["path"], home=Path(facts["home"]))}
 
     rows = []
     completed = {}
@@ -632,7 +634,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     for slug, table in targets.items():
         if args.reset and not reset(slug, table, data, record, backend=backend):
             code = 1
-    changes = plan_apply(targets, backend, run_cmd=run_cmd)
+    changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env)
     for slug, table in targets.items():
         if table.get("disabled_at"):
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
@@ -658,6 +660,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                         ["factory", "install"],
                         cwd=Path(table["path"]),
                         timeout=DRAIN_TIMEOUT if active_timers else None,
+                        **({"env": install_env} if install_env is not None else {}),
                     )
                 except subprocess.TimeoutExpired:
                     install_error = f"install: timed out after {DRAIN_TIMEOUT}s"
@@ -729,6 +732,13 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             except host.RemoteHostError as exc:
                 for slug in targets:
                     print(f"{slug}: {exc}")
+                code = 1
+                continue
+            except DistrictError as exc:
+                if host_name == "local":
+                    raise
+                for slug in targets:
+                    print(f"{slug}: host {host_name} operation failed: {exc}")
                 code = 1
                 continue
             rows.extend(host_rows)

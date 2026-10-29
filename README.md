@@ -106,9 +106,13 @@ name.
 `/opt/homebrew/bin` to the service PATH and write stdout/stderr under the
 factory's `.factory/logs/` directory. `local` is reserved for this machine.
 Remote commands use noninteractive SSH with a ten-second connection timeout.
+Remote hosts need `python3` as well as Factory, `uv`, git, and authenticated `gh`
+on their noninteractive PATH. Commands with execution deadlines also run a
+remote Python watchdog that kills the command's process group on timeout.
 District keeps the authoritative registry and operation lock on the controller,
 writes a host-filtered Factory config remotely, and continues with other hosts
-when one cannot be reached. `district update` updates this controller; registered
+when one cannot be reached or a remote host operation fails.
+`district update` updates this controller; registered
 remote factories do not require District installations of their own.
 
 Set `factory_ref = "latest-odd"` under `[defaults]` to let the hourly plain

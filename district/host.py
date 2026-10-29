@@ -20,6 +20,7 @@ import signal
 import subprocess
 import sys
 import tomllib
+import uuid
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
@@ -36,6 +37,30 @@ DEFAULTS = {
     "max_failed_passes": 10,
 }
 SSH_CONNECT_TIMEOUT = 10
+# The supervisor lives on the remote host, outside the command's process group.
+# It kills descendants even if the controller loses its SSH client.
+REMOTE_DEADLINE = """\
+import os, signal, subprocess, sys
+limit, marker, command = sys.argv[1:]
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+child = subprocess.Popen(["/bin/sh", "-c", command], start_new_session=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+try:
+    stdout, stderr = child.communicate(timeout=float(limit))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    stdout, stderr = child.communicate()
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    sys.stderr.write("\\n" + marker + "\\n")
+    raise SystemExit(124)
+sys.stdout.write(stdout)
+sys.stderr.write(stderr)
+raise SystemExit(child.returncode)
+"""
 
 
 class DistrictError(SystemExit):
@@ -314,6 +339,13 @@ class RemoteRunner:
             command = f"env {assignments} {command}"
         if cwd is not None:
             command = f"cd {shlex.quote(str(cwd))} && {command}"
+        marker = None
+        if timeout is not None:
+            marker = f"district-timeout-{uuid.uuid4().hex}"
+            # Reserve time for connecting and returning the cleanup result within
+            # the controller's deadline. The remote watchdog must expire first.
+            limit = max(0, timeout - min(SSH_CONNECT_TIMEOUT, timeout / 2))
+            command = shlex.join(["python3", "-c", REMOTE_DEADLINE, str(limit), marker, command])
         ssh = [
             "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
             self.target, "--", command,
@@ -322,6 +354,8 @@ class RemoteRunner:
             proc = self.transport(ssh, timeout=timeout, input=input)
         except OSError as exc:
             raise RemoteHostError(self.name, str(exc)) from exc
+        if marker and proc.returncode == 124 and marker in proc.stderr.splitlines():
+            raise subprocess.TimeoutExpired(argv, timeout, output=proc.stdout, stderr=proc.stderr)
         if proc.returncode == 255:
             detail = (proc.stderr or proc.stdout).strip().splitlines()
             raise RemoteHostError(self.name, detail[-1] if detail else f"ssh exited {proc.returncode}")
