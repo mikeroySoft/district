@@ -164,6 +164,7 @@ class DistrictCase(unittest.TestCase):
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         self.env = mock.patch.dict(os.environ, {
+            "HOME": str(self.tmp / "home"),
             "XDG_CONFIG_HOME": str(self.tmp / "xdg"),
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "XDG_CACHE_HOME": str(self.tmp / "cache"),
@@ -171,6 +172,7 @@ class DistrictCase(unittest.TestCase):
         })
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.assertTrue(host.path().is_relative_to(self.tmp), host.path())
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))
         self.stub("gh", ("repo view *", json.dumps({"isFork": False, "parent": None})))
         self.stub("systemctl", ("is-active *", "active\n"))
@@ -725,6 +727,47 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("disabled_at", host.load()["repo"]["acme/widgets"])
         self.assertIn("start factory-widgets.service", self.calls("systemctl"))
         self.assertIn("install", self.calls("factory"))
+
+    def test_busy_engine_defers_without_draining_fleet(self) -> None:
+        sha = "a" * 40
+        repos = {}
+        for name in ("factory", "rocm-cli", "gpuflo", "district", "rocm-app"):
+            root = self.repo(name, origin=f"https://github.com/acme/{name}.git")
+            repos[f"acme/{name}"] = {"path": str(root)}
+        source = repos["acme/factory"]["path"]
+        host.save({
+            "defaults": {
+                "factory_ref": "main",
+                "factory_source": source,
+                "engine": {"ref": "main", "sha": "b" * 40},
+            },
+            "repo": repos,
+        })
+        self.stub("git",
+                  ("remote get-url origin", "https://github.com/mikeroySoft/factory.git\n"),
+                  ("ls-remote --exit-code *", f"{sha}\trefs/heads/main\n"))
+        checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
+        self.stub("gh", ("api --paginate --slurp *", checks))
+        self.stub("systemctl",
+                  ("is-active factory-factory.service", "activating\n"),
+                  ("is-active *.service", "inactive\n"),
+                  ("is-active *", "active\n"))
+
+        with mock.patch.object(apply, "wait_inactive") as wait:
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        wait.assert_not_called()
+        self.assertFalse(any(call.startswith(("disable ", "enable ")) for call in self.calls("systemctl")))
+        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
+        record = json.loads((self.tmp / "state/district/install-state.json").read_text())
+        self.assertEqual(record["last_apply"]["deferred"], [{
+            "target": "engine",
+            "reason": "busy: factory-factory.service",
+            "since": record["last_apply"]["deferred"][0]["since"],
+        }])
+        self.assertIn("engine deferred (busy: factory-factory.service)", out)
 
     def engine_source(self) -> Path:
         """A committed `factory_source` checkout registered in the host file."""
