@@ -46,17 +46,27 @@ class FactoryRefTest(unittest.TestCase):
             return self.proc(argv)
 
         document = data or self.data()
-        with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.dict("os.environ", {"XDG_CONFIG_HOME": directory}), \
-                mock.patch.object(Path, "is_dir", return_value=True), \
-                mock.patch.object(apply, "run", side_effect=run), \
-                mock.patch.object(apply, "wait_inactive"):
-            result = apply.reconcile_engine(document, document["repo"], active_timers or [])
+        active = set(active_timers or [])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = {
+                "HOME": str(root / "home"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_CACHE_HOME": str(root / "cache"),
+            }
+            with mock.patch.dict("os.environ", env), \
+                    mock.patch.object(Path, "is_dir", return_value=True), \
+                    mock.patch.object(apply, "run", side_effect=run), \
+                    mock.patch.object(host, "is_active",
+                                      side_effect=lambda unit: "active" if unit in active else "inactive"):
+                self.assertTrue(host.path().is_relative_to(root), host.path())
+                result = apply.reconcile_engine(document)
         return result, calls, document
 
     def test_same_sha_does_not_install(self) -> None:
         result, calls, _ = self.calls("", data=self.data(sha=SHA))
-        self.assertTrue(result)
+        self.assertEqual(result, "unchanged")
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
         self.assertIn(f"refs/heads/{self.data()['defaults']['factory_ref']}", calls[1])
 
@@ -65,7 +75,7 @@ class FactoryRefTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             result, calls, document = self.calls(checks)
-        self.assertTrue(result)
+        self.assertEqual(result, "unchanged")
         self.assertIn(f"engine {SHA[:12]} CI failed", out.getvalue())
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
         self.assertEqual(document["defaults"]["engine"]["sha"], OLD)
@@ -74,7 +84,7 @@ class FactoryRefTest(unittest.TestCase):
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
         result, calls, document = self.calls(checks)
         installs = [call for call in calls if call[:3] == ["uv", "tool", "install"]]
-        self.assertTrue(result)
+        self.assertEqual(result, "applied")
         self.assertEqual(len(installs), 1)
         self.assertIn(f"git+{ORIGIN}@{SHA}", installs[0])
         self.assertEqual(document["defaults"]["engine"]["sha"], SHA)
@@ -91,12 +101,14 @@ class FactoryRefTest(unittest.TestCase):
 
     def test_partial_timer_disable_failure_still_restores(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
-        timers = ["one.timer", "two.timer"]
+        timers = ["factory-one.timer", "factory-two.timer"]
+        data = self.data()
+        data["repo"] = {"acme/one": {"path": "/one"}, "acme/two": {"path": "/two"}}
         with mock.patch.object(apply, "systemctl",
                                side_effect=[self.proc([], returncode=0), host.DistrictError("disable failed")]), \
                 mock.patch.object(apply, "restore") as restore:
             with self.assertRaises(host.DistrictError):
-                self.calls(checks, active_timers=timers)
+                self.calls(checks, data=data, active_timers=timers)
         restore.assert_called_once()
         self.assertEqual(restore.call_args.args[0], timers)
 
@@ -104,7 +116,7 @@ class FactoryRefTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             result, calls, document = self.calls("", resolve_code=2)
-        self.assertTrue(result)
+        self.assertEqual(result, "unchanged")
         self.assertIn("engine main unresolved: network down; keeping installed engine", out.getvalue())
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
         self.assertEqual(document["defaults"]["engine"]["sha"], OLD)
@@ -117,13 +129,13 @@ class FactoryRefTest(unittest.TestCase):
                             for call in self.calls(passing)[1]))
         pending = '{"total_count":1,"check_runs":[{"status":"in_progress","conclusion":null}]}'
         result, calls, _ = self.calls(pending)
-        self.assertTrue(result)
+        self.assertEqual(result, "unchanged")
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
 
     def test_absent_factory_ref_does_not_reconcile(self) -> None:
         document = self.data(ref=None)
         with mock.patch.object(apply, "run") as run:
-            self.assertTrue(apply.reconcile_engine(document, document["repo"], []))
+            self.assertEqual(apply.reconcile_engine(document), "unchanged")
         run.assert_not_called()
 
 
