@@ -341,6 +341,20 @@ class UpdateCase(unittest.TestCase):
         self.assertTrue(self.data(proc)["ok"])
         self.assertFalse((self.state_home / "district" / "update").exists())
 
+    def test_controller_update_does_not_skip_or_contact_remote_factories(self) -> None:
+        registry = self.config_home / "factory" / "config.toml"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(
+            '[hosts.ultron]\nssh = "factory@ultron.example"\nplatform = "macos"\n'
+            '\n[repo."acme/widgets"]\npath = "/remote/widgets"\nhost = "ultron"\n'
+        )
+
+        proc = self.run_update("--dry-run", "--json")
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("remote hosts not supported", proc.stderr + proc.stdout)
+        self.assertEqual(self.data(proc)["status"], "plan")
+
     def test_clean_official_local_snapshot_is_bootstrap_compatible(self) -> None:
         _, sha = self.use_local_snapshot()
         proc = self.run_update("--dry-run", "--json")
