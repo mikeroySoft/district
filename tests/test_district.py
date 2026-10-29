@@ -1328,6 +1328,87 @@ class DoctorTest(DistrictCase):
         self.stub("loginctl", ("show-user * -p Linger --value", linger))
         self.stub("ss", ("-ltnp sport = :*", ss))
 
+    def test_doctor_checks_declared_macos_toolchain_on_its_host(self) -> None:
+        host.save({
+            "hosts": {"ultron": {
+                "ssh": "factory@ultron.example",
+                "platform": "macos",
+            }},
+            "repo": {"acme/benito-app": {
+                "path": "/remote/benito-app",
+                "host": "ultron",
+                "toolchain": "macos-xcode",
+            }},
+        })
+        self.doctor_tools()
+        self.stub(
+            "ssh",
+            ("*printenv PATH*", "/usr/bin:/bin\n"),
+            ("*xcodebuild -version*", "Xcode 27.1\nBuild version 18B77\n"),
+            ("*brew --prefix xcodegen*", "/opt/homebrew/opt/xcodegen\n"),
+            ("*xcodegen --version*", "Version: 2.44.1\n"),
+            ("*swift --version*", "Apple Swift version 6.2\n"),
+            ("*cargo --version*", "cargo 1.91.0\n"),
+            ("*rustc --version*", "rustc 1.91.0\n"),
+            ("*gh auth status*", "Logged in to github.com\n"),
+            ("*xcrun simctl list runtimes --json*", json.dumps({
+                "runtimes": [{
+                    "name": "iOS 27.1",
+                    "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-1",
+                    "isAvailable": True,
+                }],
+            })),
+        )
+
+        with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
+            code, out = self.district("doctor", "--json")
+
+        rows = json.loads(out)["rows"]
+        toolchain = [item for item in rows if item["label"].startswith("host ultron macos-xcode")]
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(len(toolchain), 8, toolchain)
+        self.assertTrue(all(item["status"] == "PASS" for item in toolchain), toolchain)
+        self.assertIn("Xcode 27.1", next(item["detail"] for item in toolchain if item["label"].endswith("xcodebuild")))
+        self.assertTrue(any("xcodebuild -version" in call for call in self.calls("ssh")))
+
+    def test_doctor_reports_each_host_toolchain_failure_without_stopping(self) -> None:
+        host.save({
+            "hosts": {
+                "ultron": {"ssh": "factory@ultron.example", "platform": "macos"},
+                "mini": {"ssh": "factory@mini.example", "platform": "linux"},
+            },
+            "repo": {
+                "acme/benito-app": {
+                    "path": "/remote/benito-app",
+                    "host": "ultron",
+                    "toolchain": "macos-xcode",
+                },
+                "acme/other-app": {
+                    "path": "/remote/other-app",
+                    "host": "mini",
+                    "toolchain": "macos-xcode",
+                },
+            },
+        })
+        self.doctor_tools()
+        self.stub(
+            "ssh",
+            ("*factory@ultron.example*printenv PATH*", "/usr/bin:/bin\n"),
+            ("*factory@ultron.example*xcodebuild -version*", "xcode-select: error\n", 1),
+        )
+
+        with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
+            code, out = self.district("doctor", "--json")
+
+        rendered = "\n".join(
+            f"{item['status']} {item['label']}: {item['detail']}"
+            for item in json.loads(out)["rows"]
+        )
+        self.assertEqual(code, 1, rendered)
+        self.assertIn("FAIL host mini macos-xcode: requires platform macos, found linux", rendered)
+        self.assertIn("FAIL host ultron macos-xcode xcodebuild: xcode-select: error", rendered)
+        self.assertIn("FAIL host ultron macos-xcode launchd PATH: /opt/homebrew/bin is missing", rendered)
+
     def test_doctor_rejects_invalid_host_before_checks(self) -> None:
         host.save({"hosts": {"ultron": {"platform": "macos"}}})
         code, out = self.district("doctor")
