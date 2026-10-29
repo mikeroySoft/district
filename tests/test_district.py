@@ -209,6 +209,20 @@ class DistrictCase(unittest.TestCase):
                 code = 1
         return code, out.getvalue()
 
+    def render_installed_units(self) -> None:
+        """Make `factory install --print` render exactly the installed units, so no repo's units change."""
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            "for pat, out, rc in",
+            'if args == "install --print":\n'
+            '    import os\n'
+            '    units = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "systemd" / "user"\n'
+            '    for unit in sorted(units.glob(f"factory-{pathlib.Path.cwd().name}.*")):\n'
+            '        sys.stdout.write(f"# {unit.name}\\n{unit.read_text()}\\n")\n'
+            '    sys.exit(0)\n'
+            "for pat, out, rc in",
+        ))
+
     def units(self, slug: str, host_: str = "0.0.0.0") -> None:
         unit = host.unit_name(slug)
         host.unit_dir().mkdir(parents=True, exist_ok=True)
@@ -826,10 +840,19 @@ class ApplyTest(DistrictCase):
                   ("is-active *.service", "inactive\n"),
                   ("is-active *", "active\n"))
 
-        with mock.patch.object(apply, "plan_apply", return_value=dict.fromkeys(repos, False)):
+        host.unit_dir().mkdir(parents=True)
+        for slug in repos:
+            unit = host.unit_name(slug)
+            (host.unit_dir() / f"{unit}.timer").write_text("[Timer]\nOnUnitActiveSec=10min\n")
+            (host.unit_dir() / f"{unit}.service").write_text(
+                f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=factory\n")
+        self.render_installed_units()
+
+        with mock.patch("time.sleep", side_effect=AssertionError("apply slept waiting on a busy pass")) as sleep:
             code, out = self.district("apply")
 
         self.assertEqual(code, 0, out)
+        sleep.assert_not_called()
         self.assertFalse(any(call.startswith(("disable ", "enable ")) for call in self.calls("systemctl")))
         self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
@@ -850,8 +873,7 @@ class ApplyTest(DistrictCase):
         for name in ("systemctl", "uv"):
             (self.bin / f"{name}.log").unlink(missing_ok=True)
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        with mock.patch.object(apply, "plan_apply", return_value=dict.fromkeys(repos, False)):
-            later_code, later_out = self.district("apply")
+        later_code, later_out = self.district("apply")
 
         self.assertEqual(later_code, 0, later_out)
         self.assertTrue(any(call.startswith("tool install --reinstall ") for call in self.calls("uv")))
