@@ -136,9 +136,9 @@ and ensuring its configured `factory_source` checkout exists and is clean on
 Ultron:
 
 ```sh
-ssh -o BatchMode=yes -o ConnectTimeout=10 factory@Ultron.lan true
+ssh -o BatchMode=yes -o ConnectTimeout=10 factory@ultron.example true
 district apply mikeroySoft-org/benito-app --upgrade
-ssh -o BatchMode=yes -o ConnectTimeout=10 factory@Ultron.lan \
+ssh -o BatchMode=yes -o ConnectTimeout=10 factory@ultron.example \
   'test -f ~/.config/factory/config.toml &&
    test -f ~/Library/LaunchAgents/factory-benito-app.plist &&
    launchctl print gui/$(id -u)/factory-benito-app &&
