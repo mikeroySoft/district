@@ -1637,16 +1637,34 @@ class StatusTest(DistrictCase):
         code, out = self.district("status", "--json")
         self.assertEqual((code, json.loads(out)), (0, {}))
 
-    def test_remote_factory_is_skipped_without_collection(self) -> None:
+    def test_mixed_local_remote_and_unreachable_host(self) -> None:
+        live, dead = "factory@ultron.example", "factory@dead.example"
+        self.fake_ssh(live, dead, unreachable=(dead,))
+        repos = {name: self.repo(name, toml="") for name in ("local", "remote", "offline")}
         host.save({
-            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
-            "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
+            "hosts": {
+                "ultron": {"ssh": live, "platform": "macos"},
+                "dead": {"ssh": dead, "platform": "linux"},
+            },
+            "repo": {
+                "acme/local": {"path": str(repos["local"])},
+                "acme/remote": {"path": str(repos["remote"]), "host": "ultron"},
+                "acme/offline": {"path": str(repos["offline"]), "host": "dead"},
+            },
         })
-        code, out = self.district("status")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(out.strip(), "acme/widgets: on host ultron (remote hosts not supported yet, #96)")
-        self.assertEqual(self.calls("factory"), [])
-        self.assertEqual(self.calls("systemctl"), [])
+
+        code, out = self.district("status", "--json")
+
+        entries = json.loads(out)
+        self.assertEqual(code, 2, out)
+        self.assertEqual(set(entries), {"acme/local", "acme/remote", "acme/offline"})
+        self.assertEqual(entries["acme/local"]["host"], "local")
+        self.assertEqual(entries["acme/remote"]["host"], "ultron")
+        self.assertEqual(entries["acme/remote"]["host_state"], "reachable")
+        self.assertEqual(entries["acme/offline"]["host"], "dead")
+        self.assertEqual(entries["acme/offline"]["host_state"], "unreachable")
+        self.assertIsNone(entries["acme/offline"]["host_last_seen"])
+        self.assertIn("Connection refused", entries["acme/offline"]["host_error"])
 
     def test_unknown_factory_host_fails_before_collection(self) -> None:
         host.save({"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}})
