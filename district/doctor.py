@@ -37,7 +37,8 @@ def row(status: str, label: str, detail: str) -> dict[str, str]:
 def run(argv: list[str], *, check: bool = False, env: dict[str, str] | None = None,
         timeout: float | None = None) -> subprocess.CompletedProcess:
     try:
-        return host.run(argv, check=check, env=env, timeout=timeout)
+        # Doctor turns command failures into rows; service probes must not raise.
+        return host.run(argv, env=env, timeout=timeout)
     except OSError as exc:
         return subprocess.CompletedProcess(argv, 127, "", str(exc))
     except subprocess.TimeoutExpired as exc:
