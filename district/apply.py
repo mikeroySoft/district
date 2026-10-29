@@ -33,6 +33,8 @@ SMOKE_BINARIES = ("gh", "factory")
 DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
 EXTRA_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
+SEMVER_TAG = re.compile(
+    r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
 UNIT_HEADER = re.compile(r"(?m)^# ([^\n]+)\n")
 
 
@@ -59,6 +61,37 @@ def github_slug(url: str) -> str | None:
 def installed_engine_commit(data: dict) -> str | None:
     sha = data.get("defaults", {}).get("engine", {}).get("sha")
     return sha if isinstance(sha, str) and SHA.fullmatch(sha) else None
+
+
+def latest_odd_tag(output: str) -> tuple[str, str] | None:
+    """Return the highest odd-patch semver tag and its commit."""
+    candidates = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not SHA.fullmatch(parts[0].lower()):
+            continue
+        remote_ref = parts[1]
+        if not remote_ref.startswith("refs/tags/"):
+            continue
+        peeled = remote_ref.endswith("^{}")
+        tag = remote_ref.removeprefix("refs/tags/").removesuffix("^{}")
+        match = SEMVER_TAG.fullmatch(tag)
+        if match is None or int(match[3]) % 2 == 0:
+            continue
+        prerelease = match[4]
+        identifiers = prerelease.split(".") if prerelease else []
+        if any(value.isdigit() and len(value) > 1 and value.startswith("0") for value in identifiers):
+            continue
+        prerelease_key = tuple(
+            (0, int(value)) if value.isdigit() else (1, value) for value in identifiers)
+        key = (int(match[1]), int(match[2]), int(match[3]), prerelease is None, prerelease_key)
+        previous = candidates.get(tag)
+        if previous is None or peeled:
+            candidates[tag] = (key, parts[0].lower(), peeled)
+    if not candidates:
+        return None
+    tag = max(candidates, key=lambda name: candidates[name][0])
+    return tag, candidates[tag][1]
 
 
 def _defer(record: install_state.ApplyRun | None, target: str, busy: list[str]) -> None:
@@ -90,20 +123,39 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
         slug = github_slug(origin)
         if slug is None:
             raise OSError(f"{src} origin is not a GitHub repository")
-        resolved = run(["git", "ls-remote", "--exit-code", origin, f"refs/heads/{ref}"], cwd=src)
-        shas = {line.split()[0].lower() for line in resolved.stdout.splitlines() if line.split()}
-        if resolved.returncode:
-            raise OSError(resolved.stderr.strip() or "ls-remote failed")
-        if len(shas) != 1 or not SHA.fullmatch(next(iter(shas), "")):
-            raise OSError("remote branch did not resolve to one commit")
-        sha = shas.pop()
+        if ref == "latest-odd":
+            resolved = run(["git", "ls-remote", "--tags", origin], cwd=src)
+            if resolved.returncode:
+                raise OSError(resolved.stderr.strip() or "ls-remote failed")
+            target = latest_odd_tag(resolved.stdout)
+            if target is None:
+                raise OSError(f"no odd-patch tag on {origin}")
+            resolved_ref, sha = target
+        else:
+            resolved = run([
+                "git", "ls-remote", "--exit-code", origin,
+                f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}",
+            ], cwd=src)
+            if resolved.returncode:
+                raise OSError(resolved.stderr.strip() or "ls-remote failed")
+            remote_refs = {
+                parts[1]: parts[0].lower()
+                for line in resolved.stdout.splitlines()
+                if len(parts := line.split()) == 2 and SHA.fullmatch(parts[0].lower())
+            }
+            for candidate in (f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"):
+                if candidate in remote_refs:
+                    resolved_ref, sha = ref, remote_refs[candidate]
+                    break
+            else:
+                raise OSError("remote ref did not resolve to one commit")
     except OSError as exc:
         print(f"engine {ref} unresolved: {exc}; keeping installed engine")
         return "unchanged"
     if installed_engine_commit(data) == sha:
         if record:
             record.clear_deferred("engine")
-        print(f"engine {sha[:7]} ({ref})")
+        print(f"engine {sha[:7]} ({resolved_ref})")
         return "unchanged"
     checks = run(["gh", "api", "--paginate", "--slurp",
                   f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
@@ -162,13 +214,13 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
         return "failed"
     previous = data.get("defaults", {}).get("engine", {}).get("sha")
     data.setdefault("defaults", {})["engine"] = {
-        "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
+        "ref": resolved_ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
     }
     host.save(data)
     restart_dashboards(data, backend)
     if record:
         record.clear_deferred("engine")
-    print(f"installed factory engine {sha[:12]} ({ref})")
+    print(f"installed factory engine {sha[:12]} ({resolved_ref})")
     return "applied"
 
 

@@ -32,7 +32,7 @@ class FactoryRefTest(unittest.TestCase):
         return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
     def calls(self, checks: str, *, data: dict | None = None, resolve_code: int = 0,
-              remote_refs: str | None = None,
+              remote_refs: str | None = None, pinned_refs: str | None = None,
               active_timers: list[str] | None = None, backend: mock.Mock | None = None):
         calls: list[list[str]] = []
         if backend is None:
@@ -46,6 +46,8 @@ class FactoryRefTest(unittest.TestCase):
                 return self.proc(argv, ORIGIN + "\n")
             if argv[:3] == ["git", "ls-remote", "--tags"] and remote_refs is not None:
                 return self.proc(argv, remote_refs)
+            if argv[:2] == ["git", "ls-remote"] and pinned_refs is not None:
+                return self.proc(argv, pinned_refs)
             if argv[:2] == ["git", "ls-remote"]:
                 code = 2 if remote_refs is not None else resolve_code
                 return self.proc(argv, f"{SHA}\trefs/heads/main\n", code, "network down")
@@ -120,6 +122,64 @@ class FactoryRefTest(unittest.TestCase):
         self.assertEqual(len(installs), 1)
         self.assertIn(f"git+{ORIGIN}@{peeled}", installs[0])
         self.assertEqual(document["defaults"]["engine"]["ref"], "v0.4.9-rc.1")
+
+    def test_latest_odd_same_sha_skips_checks_and_install(self) -> None:
+        peeled = "9" * 40
+        tags = (
+            f"{'4' * 40}\trefs/tags/v0.4.9-rc.1\n"
+            f"{peeled}\trefs/tags/v0.4.9-rc.1^{{}}\n"
+        )
+
+        result, calls, _ = self.calls(
+            "", data=self.data(ref="latest-odd", sha=peeled), remote_refs=tags)
+
+        self.assertEqual(result, "unchanged")
+        self.assertFalse(any(call[:2] == ["gh", "api"] for call in calls))
+        self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
+
+    def test_latest_odd_without_odd_tag_keeps_installed_engine(self) -> None:
+        tags = (
+            f"{'6' * 40}\trefs/tags/v0.4.6\n"
+            f"{'8' * 40}\trefs/tags/v0.4.8\n"
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result, calls, document = self.calls(
+                "", data=self.data(ref="latest-odd"), remote_refs=tags)
+
+        self.assertEqual(result, "unchanged")
+        self.assertIn(
+            f"engine latest-odd unresolved: no odd-patch tag on {ORIGIN}; keeping installed engine",
+            out.getvalue(),
+        )
+        self.assertFalse(any(call[:2] == ["gh", "api"] for call in calls))
+        self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
+        self.assertEqual(document["defaults"]["engine"]["sha"], OLD)
+
+    def test_pinned_tag_installs_peeled_commit(self) -> None:
+        peeled = "6" * 40
+        refs = (
+            f"{'5' * 40}\trefs/tags/v0.4.6\n"
+            f"{peeled}\trefs/tags/v0.4.6^{{}}\n"
+        )
+        checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
+
+        result, calls, document = self.calls(
+            checks, data=self.data(ref="v0.4.6"), pinned_refs=refs)
+
+        installs = [call for call in calls if call[:3] == ["uv", "tool", "install"]]
+        self.assertEqual(result, "applied")
+        self.assertIn(f"git+{ORIGIN}@{peeled}", installs[0])
+        self.assertEqual(document["defaults"]["engine"]["ref"], "v0.4.6")
+
+    def test_latest_odd_prefers_final_release_at_same_version(self) -> None:
+        final = "7" * 40
+        refs = (
+            f"{'6' * 40}\trefs/tags/v1.2.7-rc.2\n"
+            f"{final}\trefs/tags/v1.2.7\n"
+        )
+
+        self.assertEqual(apply.latest_odd_tag(refs), ("v1.2.7", final))
 
     def test_install_restarts_installed_dashboard(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
