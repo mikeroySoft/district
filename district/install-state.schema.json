@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mikeroysoft.github.io/district/install-state.schema.json",
+  "title": "District install state",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "observed_at",
+    "host",
+    "district",
+    "engine",
+    "timers",
+    "last_apply",
+    "holds"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "observed_at": {"type": "string", "minLength": 1},
+    "host": {"type": "string", "minLength": 1},
+    "district": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["installed_version", "latest_release", "up_to_date"],
+      "properties": {
+        "installed_version": {"type": "string", "minLength": 1},
+        "latest_release": {"type": "string", "minLength": 1},
+        "up_to_date": {
+          "oneOf": [
+            {"type": "boolean"},
+            {"const": "unknown"}
+          ]
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "installed_version",
+        "installed_sha",
+        "configured_ref",
+        "latest_release_tag",
+        "latest_release_sha",
+        "commits_ahead",
+        "commits_behind",
+        "policy"
+      ],
+      "properties": {
+        "installed_version": {"type": "string", "minLength": 1},
+        "installed_sha": {"type": "string", "minLength": 1},
+        "configured_ref": {"type": "string", "minLength": 1},
+        "latest_release_tag": {"type": "string", "minLength": 1},
+        "latest_release_sha": {"type": "string", "minLength": 1},
+        "commits_ahead": {"$ref": "#/$defs/countOrUnknown"},
+        "commits_behind": {"$ref": "#/$defs/countOrUnknown"},
+        "policy": {"type": "string", "minLength": 1}
+      }
+    },
+    "timers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["enabled", "active", "last_trigger", "next_trigger", "service_activating"],
+        "properties": {
+          "enabled": {"type": "string", "minLength": 1},
+          "active": {"type": "string", "minLength": 1},
+          "last_trigger": {"type": "string", "minLength": 1},
+          "next_trigger": {"type": "string", "minLength": 1},
+          "service_activating": {
+            "oneOf": [
+              {"type": "boolean"},
+              {"const": "unknown"}
+            ]
+          }
+        }
+      }
+    },
+    "last_apply": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "started_at",
+        "finished_at",
+        "exit_status",
+        "disabled",
+        "reenabled",
+        "engine_change",
+        "config_sha_before",
+        "config_sha_after"
+      ],
+      "properties": {
+        "started_at": {"type": "string", "minLength": 1},
+        "finished_at": {"type": "string", "minLength": 1},
+        "exit_status": {
+          "oneOf": [
+            {"type": "integer", "minimum": 0},
+            {"const": "unknown"}
+          ]
+        },
+        "disabled": {"$ref": "#/$defs/unitNames"},
+        "reenabled": {"$ref": "#/$defs/unitNames"},
+        "engine_change": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["from", "to"],
+          "properties": {
+            "from": {"type": "string", "minLength": 1},
+            "to": {"type": "string", "minLength": 1}
+          }
+        },
+        "config_sha_before": {"type": "string", "minLength": 1},
+        "config_sha_after": {"type": "string", "minLength": 1}
+      }
+    },
+    "holds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["factory", "timer", "disabled_at", "reason"],
+        "properties": {
+          "factory": {"type": "string", "minLength": 1},
+          "timer": {"type": "string", "minLength": 1},
+          "disabled_at": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "countOrUnknown": {
+      "oneOf": [
+        {"type": "integer", "minimum": 0},
+        {"const": "unknown"}
+      ]
+    },
+    "unitNames": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    }
+  }
+}

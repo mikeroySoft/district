@@ -17,6 +17,9 @@ python3 -m pip install --user git+https://github.com/mikeroySoft/district
 
 Confirm `district --version`, `factory --version`, and authenticated `gh auth status`, then choose the operation:
 
+Before stating any District/Factory install version or timer state, run `district install-state --json` and quote its `observed_at`. This local record is the source of truth; `district status --json` is a separate GitHub-bound fleet observation and does not substitute for it. Release fields may be `unknown` when the cached lookup is unavailable.
+
+
 - Fleet health or a stalled factory → **Inspect**.
 - Add or adopt a repository → **Onboard**.
 - Converge host state or deploy a Factory update → **Apply**.
@@ -47,7 +50,7 @@ Done when the repository is registered, its timer is active, and `factory doctor
 - Add `--upgrade [REF]` only when the user requests a Factory upgrade from the local checkout. It validates a local commit, requires a clean checkout for `HEAD` (the default), stops active timers, waits for every registered factory service, installs an export of that commit, records engine metadata and a rollback command when a previous SHA is known, restarts dashboards, and restores timers. Remove `factory_ref` before rolling back so the next apply does not reinstall its branch. Without `factory_ref`, engine upgrades remain explicit.
 - Report committed-file drift; leave those files for the repository owner. Apply owns host state only.
 
-Done when every selected row has a version, `doctor OK` or an explained warning, no command failure, and an active timer unless District has deliberately capped it.
+Done when every selected row has a version, `doctor OK` or an explained warning, no command failure, and an active timer unless District has deliberately capped it. Read `district install-state --json` afterwards; report its `observed_at`, `last_apply`, engine change, holds, and any re-enabled timers.
 
 ## Reset
 
@@ -70,6 +73,7 @@ Done when District reports the slug removed and a fresh status no longer contain
 ## Metrics and dashboard
 
 - `district metrics [slug]` reads the hourly cache; `--refresh` recollects now.
+- `district report` takes its install section from `${XDG_STATE_HOME:-~/.local/state}/district/install-state.json`; retain that section and its `observed_at` in weekly fleet reporting.
 - `district dashboard --install` writes and enables the District dashboard service plus the hourly metrics timer.
 - `district dashboard --no-open` starts one shared collector and serves it in the foreground at `127.0.0.1:8760` by default. Use explicit `/?view=overview`, `/?view=flows`, or `/?view=brief` console URLs; add the URL-encoded `factory` scope and optional `stage`, `execution`, or `panel` selection. `/` and `/legacy` retain the Atlas and management surface until cutover. Runtime observations use a five-second cadence; full GitHub/config snapshots use 60 seconds. Browser tabs and repeated `/api/fleet` requests only read the cache.
 - Overview is the watch surface: one equally weighted card per factory in stable slug order, with a compact stage diagram aggregating distinct live executions per reported stage (a factory can occupy several stages at once), dispatcher/admission state, active/configured capacity, latest observed transition, a confirmed next-dispatch countdown, freshness, findings, history window/gaps, and a count strip (normal, attention, unknown; unknown is not healthy). Motion is evidence only: a gentle pulse means a fresh confirmed active stage, a brief arrive/highlight means a newly observed transition/completion since this browser's baseline; stale/unavailable observations are muted and stationary. Polls, reconnects, duplicate records, route revisits and hidden tabs never replay old events; reconnect gaps are listed in the recent-activity rail. "Watch mode" hides secondary controls only (Esc exits) and "Pause animation" pauses this browser's animation, not the factories; both persist for the tab session and are not routes. Clicking a factory name or stage opens scoped Flows (`factory`, `stage`); a finding opens its `panel`.

@@ -40,14 +40,20 @@ only once.
 |---|---|
 | `district add <path\|url>` | Onboard a repo, or adopt one that already has `.factory.toml`. `--dry-run` prints the proposal (slug, clone path, fork parent, port, gate checks); `--host NAME`, `--check NAME=CMD`, `--exclusive a,b`, `--no-edit`. |
 | `district apply [slug]` | Reconcile the host to the registry: units, labels, `factory doctor`, failure cap, package-age policy. If `[defaults].factory_ref` is set (for example, `"main"`), every apply resolves that ref from the `factory_source` origin and installs its exact commit only after all GitHub check runs succeed; already-current, pending, and failed commits are left alone. Then runs `gh --version` and `factory --version` under each dispatch/dashboard unit's PATH (10 s timeout); any failure exits 1 naming the unit and binary. `--upgrade` explicitly reinstalls Factory from the local `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
+| `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table. Exit 1 on operational attention or a failed `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row), 2 on unknown/stale observation, 0 when every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
 | `district doctor` | Check District's own host prerequisites. `--json`. |
-| `district report` | Print a read-only Markdown fleet review. |
+| `district report` | Print a read-only Markdown fleet review whose install section comes from the persisted install-state record. |
 | `district metrics [slug]` | Per-factory `git`/`gh` metrics from the hourly cache. `--refresh`, `--max-age`. |
 | `district dashboard` | Serve the fleet console on `127.0.0.1:8760`. `--install` enables the dashboard, metrics, and apply units; `--host` adds read-only LAN viewing. |
 | `district update` | Update District itself from eligible official CI. `--dry-run`, `--to REF`, `--rollback` (offline), `--yes`, `--json`. |
 | `district rm <slug>` | Disable and delete the units, drop the registry entry. Repo files untouched. `--wait`, `--keep-units`. |
 | `district version` | Print the District version (same as `-V` / `--version`). |
+
+Before stating an install version or timer state, run `district install-state --json`
+and quote its `observed_at`. Every `district apply`, successful or failed, atomically
+rewrites `${XDG_STATE_HOME:-~/.local/state}/district/install-state.json`; a warning
+in text mode identifies timers the last apply re-enabled.
 
 ## Ownership
 

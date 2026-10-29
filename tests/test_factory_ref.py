@@ -32,8 +32,12 @@ class FactoryRefTest(unittest.TestCase):
         return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
     def calls(self, checks: str, *, data: dict | None = None, resolve_code: int = 0,
-              active_timers: list[str] | None = None):
+              active_timers: list[str] | None = None, backend: mock.Mock | None = None):
         calls: list[list[str]] = []
+        if backend is None:
+            # Never let the default backend reach the real systemctl/launchctl.
+            backend = mock.Mock()
+            backend.status.return_value.loaded = False
 
         def run(argv, **kwargs):
             calls.append(argv)
@@ -51,7 +55,7 @@ class FactoryRefTest(unittest.TestCase):
                 mock.patch.object(Path, "is_dir", return_value=True), \
                 mock.patch.object(apply, "run", side_effect=run), \
                 mock.patch.object(apply, "wait_inactive"):
-            result = apply.reconcile_engine(document, document["repo"], active_timers or [])
+            result = apply.reconcile_engine(document, document["repo"], active_timers or [], backend)
         return result, calls, document
 
     def test_same_sha_does_not_install(self) -> None:
@@ -83,8 +87,7 @@ class FactoryRefTest(unittest.TestCase):
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
         backend = mock.Mock()
         backend.status.return_value.loaded = True
-        with mock.patch.object(host, "service_backend", return_value=backend):
-            self.calls(checks)
+        self.calls(checks, backend=backend)
         backend.start.assert_called_once_with(
             f"{host.unit_name('acme/widgets')}-dashboard.service", restart=True, check=False)
 
@@ -93,11 +96,10 @@ class FactoryRefTest(unittest.TestCase):
         timers = ["one.timer", "two.timer"]
         backend = mock.Mock()
         backend.enable.side_effect = [self.proc([], returncode=0), host.DistrictError("disable failed")]
-        with mock.patch.object(host, "service_backend", return_value=backend), \
-                mock.patch.object(apply, "restore") as restore:
+        with mock.patch.object(apply, "restore") as restore:
             with self.assertRaises(host.DistrictError):
-                self.calls(checks, active_timers=timers)
-        restore.assert_called_once_with(timers, mock.ANY, backend)
+                self.calls(checks, active_timers=timers, backend=backend)
+        restore.assert_called_once_with(timers, mock.ANY, backend, None)
 
     def test_unresolvable_ref_keeps_installed_engine(self) -> None:
         out = io.StringIO()
