@@ -101,6 +101,9 @@ class ReportTest(unittest.TestCase):
         output = report.render({"acme/remote": remote}, AT)
 
         self.assertIn("- Host: ultron (unreachable; last seen 5m ago)", output)
+        remote["host_last_seen"] = None
+        self.assertIn("- Host: ultron (unreachable; last seen never)",
+                      report.render({"acme/remote": remote}, AT))
 
     def test_missing_and_zero_rate_denominators_are_not_derived(self) -> None:
         zero = entry()

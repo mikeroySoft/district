@@ -123,7 +123,8 @@ def _repository(slug: str, entry: dict, at: datetime) -> tuple[list[str], dict]:
     host_state = entry.get("host_state", "reachable")
     host_text = str(host_name)
     if host_state != "reachable":
-        host_text += f" ({host_state}; last seen {status.rel(entry.get('host_last_seen'), at)})"
+        last_seen = status.rel(entry.get("host_last_seen"), at) if entry.get("host_last_seen") else "never"
+        host_text += f" ({host_state}; last seen {last_seen})"
     lines = [f"## {slug}", "", f"- Host: {host_text}",
              f"- Operational assessment: {entry.get('assessment', 'unknown')}",
              f"- Observation quality: {entry.get('observation', 'unavailable')}",

@@ -305,7 +305,8 @@ def factory_kpis(slug: str, e: dict) -> list[list[str]]:
     host_state = text(e.get("host_state", "reachable"))
     host_value = host_name
     if host_state != "reachable":
-        host_value += f" · {host_state} · last seen {text(e.get('host_last_seen'))}"
+        last_seen = text(e["host_last_seen"]) if e.get("host_last_seen") else "never"
+        host_value += f" · {host_state} · last seen {last_seen}"
     rows = [
         ["assessment", e["assessment"]],
         ["host", host_value],

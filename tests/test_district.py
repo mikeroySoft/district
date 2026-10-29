@@ -2256,6 +2256,9 @@ class AtlasTest(unittest.TestCase):
         self.assertEqual(block["name"], "big [ultron]")
         self.assertEqual(dict(block["kpis"])["host"],
                          "ultron · unreachable · last seen 2026-09-05T12:30:00Z")
+        remote["host_last_seen"] = None
+        self.assertEqual(dict(atlas.factory_kpis("acme/big", remote))["host"],
+                         "ultron · unreachable · last seen never")
 
     def test_partial_fleet_metrics_keep_known_totals(self) -> None:
         rows = {label: (value, detail) for label, value, detail in atlas.kpis(self.FLEET)}
