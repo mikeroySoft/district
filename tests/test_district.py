@@ -27,7 +27,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from district import add, apply, atlas, cli, health, host, install_state, metrics, status  # noqa: E402
+from district import add, apply, atlas, cli, doctor, health, host, install_state, metrics, status  # noqa: E402
 from district import dashboard as dash  # noqa: E402  (dashboard() below is the snapshot fixture)
 
 STUB = '''#!/usr/bin/env python3
@@ -261,6 +261,8 @@ class HostTest(DistrictCase):
         for entry, detail in (
             ({"platform": "macos"}, "[hosts.ultron].ssh"),
             ({"ssh": "factory@ultron.example", "platform": "windows"}, "[hosts.ultron].platform"),
+            ({"ssh": "factory@ultron.example", "platform": "macos", "xcode_version": 27.1},
+             "[hosts.ultron].xcode_version"),
         ):
             with self.subTest(entry=entry):
                 with self.assertRaisesRegex(host.DistrictError, re.escape(detail)):
@@ -1328,6 +1330,130 @@ class DoctorTest(DistrictCase):
         self.stub("loginctl", ("show-user * -p Linger --value", linger))
         self.stub("ss", ("-ltnp sport = :*", ss))
 
+    def test_doctor_checks_declared_macos_toolchain_on_its_host(self) -> None:
+        host.save({
+            "hosts": {"ultron": {
+                "ssh": "factory@ultron.example",
+                "platform": "macos",
+                "xcode_version": "27.1",
+            }},
+            "repo": {"acme/benito-app": {
+                "path": "/remote/benito-app",
+                "host": "ultron",
+                "toolchain": "macos-xcode",
+            }},
+        })
+        self.doctor_tools()
+        self.stub(
+            "ssh",
+            ("*printenv PATH*", "/usr/bin:/bin\n"),
+            ("*xcodebuild -version*", "Xcode 27.1\nBuild version 18B77\n"),
+            ("*brew --prefix --installed xcodegen*", "/opt/homebrew/opt/xcodegen\n"),
+            ("*xcodegen --version*", "Version: 2.44.1\n"),
+            ("*swift --version*", "Apple Swift version 6.2\n"),
+            ("*cargo --version*", "cargo 1.91.0\n"),
+            ("*rustc --version*", "rustc 1.91.0\n"),
+            ("*gh auth status*", "Logged in to github.com\n"),
+            ("*xcrun simctl list runtimes --json*", json.dumps({
+                "runtimes": [{
+                    "name": "iOS 27.1",
+                    "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-1",
+                    "isAvailable": True,
+                }],
+            })),
+        )
+
+        with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
+            code, out = self.district("doctor", "--json")
+            data = host.load()
+            data["hosts"]["ultron"]["xcode_version"] = "27.2"
+            host.save(data)
+            drift_code, drift_out = self.district("doctor", "--json")
+
+        rows = json.loads(out)["rows"]
+        toolchain = [item for item in rows if item["label"].startswith("host ultron macos-xcode")]
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(len(toolchain), 8, toolchain)
+        self.assertTrue(all(item["status"] == "PASS" for item in toolchain), toolchain)
+        self.assertIn("Xcode 27.1", next(item["detail"] for item in toolchain if item["label"].endswith("xcodebuild")))
+        self.assertTrue(any("xcodebuild -version" in call for call in self.calls("ssh")))
+        drift = next(
+            item for item in json.loads(drift_out)["rows"]
+            if item["label"] == "host ultron macos-xcode xcodebuild"
+        )
+        self.assertEqual(drift_code, 0)
+        self.assertEqual(drift["status"], "WARN")
+        self.assertIn("installed 27.1, expected 27.2", drift["detail"])
+
+    def test_macos_toolchain_requires_installed_homebrew_xcodegen(self) -> None:
+        def fake(_name, _table, argv, **_kwargs):
+            if argv == ["brew", "--prefix", "--installed", "xcodegen"]:
+                return subprocess.CompletedProcess(argv, 1, "", "Error: No such keg: xcodegen\n")
+            stdout = "/opt/homebrew/opt/xcodegen\n" if argv == ["brew", "--prefix", "xcodegen"] else "ok\n"
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        with mock.patch("district.doctor._host_run", side_effect=fake):
+            rows = doctor.macos_xcode_rows("ultron", {"ssh": "factory@ultron.example"})
+
+        xcodegen = next(item for item in rows if item["label"].endswith("xcodegen"))
+        self.assertEqual(xcodegen, {
+            "status": "FAIL",
+            "label": "host ultron macos-xcode xcodegen",
+            "detail": "Error: No such keg: xcodegen",
+        })
+
+    def test_macos_toolchain_timeout_with_partial_output_remains_json(self) -> None:
+        timeout = subprocess.TimeoutExpired(
+            ["ssh"], doctor.HOST_COMMAND_TIMEOUT,
+            output=b"partial stdout\n", stderr=b"ssh warning\n",
+        )
+        with mock.patch("district.doctor.host.run", side_effect=timeout):
+            rows = doctor.macos_xcode_rows("ultron", {"ssh": "factory@ultron.example"})
+
+        payload = json.loads(json.dumps(rows))
+        self.assertEqual(payload, [{
+            "status": "FAIL",
+            "label": "host ultron macos-xcode",
+            "detail": "ssh warning",
+        }])
+
+    def test_doctor_reports_each_host_toolchain_failure_without_stopping(self) -> None:
+        host.save({
+            "hosts": {
+                "ultron": {"ssh": "factory@ultron.example", "platform": "macos"},
+                "mini": {"ssh": "factory@mini.example", "platform": "linux"},
+            },
+            "repo": {
+                "acme/benito-app": {
+                    "path": "/remote/benito-app",
+                    "host": "ultron",
+                    "toolchain": "macos-xcode",
+                },
+                "acme/other-app": {
+                    "path": "/remote/other-app",
+                    "host": "mini",
+                    "toolchain": "macos-xcode",
+                },
+            },
+        })
+        self.doctor_tools()
+        self.stub(
+            "ssh",
+            ("*factory@ultron.example*printenv PATH*", "/usr/bin:/bin:/opt/homebrew/bin\n"),
+            ("*factory@ultron.example*xcodebuild -version*", "xcode-select: error\n", 1),
+        )
+
+        with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
+            code, out = self.district("doctor", "--json")
+
+        rendered = "\n".join(
+            f"{item['status']} {item['label']}: {item['detail']}"
+            for item in json.loads(out)["rows"]
+        )
+        self.assertEqual(code, 1, rendered)
+        self.assertIn("FAIL host mini macos-xcode: requires platform macos, found linux", rendered)
+        self.assertIn("FAIL host ultron macos-xcode xcodebuild: xcode-select: error", rendered)
+
     def test_doctor_rejects_invalid_host_before_checks(self) -> None:
         host.save({"hosts": {"ultron": {"platform": "macos"}}})
         code, out = self.district("doctor")
@@ -1536,7 +1662,7 @@ class MetricsTest(DistrictCase):
         (repo / "logo.bin").write_bytes(b"\x89PNG\x00\x00binary\n\n\n")
         git = ["git", "-C", str(repo), "-c", "user.name=Ada", "-c", "user.email=ada@example.com"]
         subprocess.run([*git, "add", "."], check=True)
-        subprocess.run([*git, "commit", "-q", "-m", "init"], check=True)
+        subprocess.run([*git, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"], check=True)
         return repo
 
     def test_collect_parses_git_and_gh(self) -> None:

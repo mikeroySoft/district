@@ -251,7 +251,10 @@ class UpdateCase(unittest.TestCase):
         subprocess.run(["git", "-C", str(source), "config", "user.email", "district@example.invalid"], check=True)
         subprocess.run(["git", "-C", str(source), "remote", "add", "origin", "git@github.com:mikeroySoft/district.git"], check=True)
         subprocess.run(["git", "-C", str(source), "add", "district"], check=True)
-        subprocess.run(["git", "-C", str(source), "commit", "-qm", "snapshot"], check=True)
+        subprocess.run(
+            ["git", "-C", str(source), "-c", "commit.gpgsign=false", "commit", "-qm", "snapshot"],
+            check=True,
+        )
         sha = subprocess.run(
             ["git", "-C", str(source), "rev-parse", "HEAD"],
             check=True,

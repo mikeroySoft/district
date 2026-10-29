@@ -42,7 +42,7 @@ only once.
 | `district apply [slug]` | Reconcile the host to the registry: units, labels, `factory doctor`, failure cap, package-age policy. Unit changes drain only that repository's active timer; a busy service is deferred without touching its timer. If `[defaults].factory_ref` is set, every apply resolves that ref from the `factory_source` origin and installs its exact commit only after all GitHub check runs succeed; already-current, pending, and failed commits are left alone. A changed shared engine is deferred when any local Factory service is busy; that engine step touches no timer, while normal per-repository reconciliation continues. Install commands may keep selected timers drained for at most 120 seconds. Deferrals exit 0 unless another check fails. Then runs `gh --version` and `factory --version` under each reconciled dispatch/dashboard unit's PATH (10 s timeout); any failure exits 1 naming the unit and binary. `--upgrade` explicitly reinstalls Factory from the local `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table. Exit 1 on operational attention or a failed `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row), 2 on unknown/stale observation, 0 when every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
-| `district doctor` | Check District's own host prerequisites. `--json`. |
+| `district doctor` | Check District's own host prerequisites and every toolchain profile declared by a managed repository. `--json`. |
 | `district report` | Print a read-only Markdown fleet review whose install section comes from the persisted install-state record. |
 | `district metrics [slug]` | Per-factory `git`/`gh` metrics from the hourly cache. `--refresh`, `--max-age`. |
 | `district dashboard` | Serve the fleet console on `127.0.0.1:8760`. `--install` enables the dashboard, metrics, and apply units; `--host` adds read-only LAN viewing. |
@@ -62,7 +62,7 @@ in text mode identifies timers the last apply re-enabled.
 | engine install, upgrade, per-repo version pin | `[[gate.check]]`, `[leak_scan]`, `[repo].upstream` |
 | triage endpoint and model | `.github/ISSUE_TEMPLATE/agent_task.md` |
 | worker/reviewer argv, gate lock path | `.factory-lessons.md` |
-| dashboard port, timer cadence, bind host | `.gitignore` lines |
+| dashboard port, timer cadence, bind host, toolchain profile | `.gitignore` lines |
 | systemd user units / launchd agents, labels, registry, policy | |
 
 Three rules follow: District writes committed files exactly once, at onboarding,
@@ -82,12 +82,24 @@ then assign it with `district add --host ultron …` or a repo table:
 [hosts.ultron]
 ssh = "factory@ultron.example"
 platform = "macos"
+xcode_version = "27.1"
 root = "~/factories" # optional
 
 [repo."mikeroySoft-org/benito-app"]
 path = "/Users/mike/factories/benito-app"
 host = "ultron"
+toolchain = "macos-xcode"
 ```
+
+`toolchain = "macos-xcode"` makes `district doctor` check that repository's
+assigned host. Repositories on the same host share one profile check. The profile
+runs each command with the launchd PATH District configures, including
+`/opt/homebrew/bin`, and reports the Xcode version, working `xcodebuild`,
+Homebrew `xcodegen`, `swift`, `cargo`, `rustc`, authenticated `gh`, and an
+available iOS Simulator runtime. Optional host key `xcode_version` pins the
+expected version and reports drift as `WARN`. Missing tools, failed commands,
+unknown profiles, and platform mismatches are `FAIL` rows prefixed with the host
+name.
 
 `platform` selects systemd user units for Linux and
 `~/Library/LaunchAgents/<label>.plist` for macOS. Launchd jobs add
