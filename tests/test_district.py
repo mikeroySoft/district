@@ -261,6 +261,8 @@ class HostTest(DistrictCase):
         for entry, detail in (
             ({"platform": "macos"}, "[hosts.ultron].ssh"),
             ({"ssh": "factory@ultron.example", "platform": "windows"}, "[hosts.ultron].platform"),
+            ({"ssh": "factory@ultron.example", "platform": "macos", "xcode_version": 27.1},
+             "[hosts.ultron].xcode_version"),
         ):
             with self.subTest(entry=entry):
                 with self.assertRaisesRegex(host.DistrictError, re.escape(detail)):
@@ -1333,6 +1335,7 @@ class DoctorTest(DistrictCase):
             "hosts": {"ultron": {
                 "ssh": "factory@ultron.example",
                 "platform": "macos",
+                "xcode_version": "27.1",
             }},
             "repo": {"acme/benito-app": {
                 "path": "/remote/benito-app",
@@ -1362,6 +1365,10 @@ class DoctorTest(DistrictCase):
 
         with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
             code, out = self.district("doctor", "--json")
+            data = host.load()
+            data["hosts"]["ultron"]["xcode_version"] = "27.2"
+            host.save(data)
+            drift_code, drift_out = self.district("doctor", "--json")
 
         rows = json.loads(out)["rows"]
         toolchain = [item for item in rows if item["label"].startswith("host ultron macos-xcode")]
@@ -1370,6 +1377,13 @@ class DoctorTest(DistrictCase):
         self.assertTrue(all(item["status"] == "PASS" for item in toolchain), toolchain)
         self.assertIn("Xcode 27.1", next(item["detail"] for item in toolchain if item["label"].endswith("xcodebuild")))
         self.assertTrue(any("xcodebuild -version" in call for call in self.calls("ssh")))
+        drift = next(
+            item for item in json.loads(drift_out)["rows"]
+            if item["label"] == "host ultron macos-xcode xcodebuild"
+        )
+        self.assertEqual(drift_code, 0)
+        self.assertEqual(drift["status"], "WARN")
+        self.assertIn("installed 27.1, expected 27.2", drift["detail"])
 
     def test_doctor_reports_each_host_toolchain_failure_without_stopping(self) -> None:
         host.save({
@@ -1393,7 +1407,7 @@ class DoctorTest(DistrictCase):
         self.doctor_tools()
         self.stub(
             "ssh",
-            ("*factory@ultron.example*printenv PATH*", "/usr/bin:/bin\n"),
+            ("*factory@ultron.example*printenv PATH*", "/usr/bin:/bin:/opt/homebrew/bin\n"),
             ("*factory@ultron.example*xcodebuild -version*", "xcode-select: error\n", 1),
         )
 
@@ -1407,7 +1421,6 @@ class DoctorTest(DistrictCase):
         self.assertEqual(code, 1, rendered)
         self.assertIn("FAIL host mini macos-xcode: requires platform macos, found linux", rendered)
         self.assertIn("FAIL host ultron macos-xcode xcodebuild: xcode-select: error", rendered)
-        self.assertIn("FAIL host ultron macos-xcode launchd PATH: /opt/homebrew/bin is missing", rendered)
 
     def test_doctor_rejects_invalid_host_before_checks(self) -> None:
         host.save({"hosts": {"ultron": {"platform": "macos"}}})

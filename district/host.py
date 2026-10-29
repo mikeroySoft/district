@@ -5,8 +5,8 @@ tables only); District keeps its own keys beside them: `[defaults]`
 clone_dir / factory_source / factory_ref / factory_extras / min_package_age /
 max_failed_passes, `[defaults.engine]` ref / sha / previous / installed_at
 (what engine reconciliation or `apply --upgrade` last installed), `[hosts.*]`
-SSH / platform / root, and per repo `path`, `host`, `disabled_at`,
-`disabled_reason`. A repo is managed iff its table has a `path`.
+SSH / platform / root / optional Xcode version, and per repo `path`, `host`,
+`toolchain`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
 """
 
 from __future__ import annotations
@@ -93,6 +93,11 @@ def hosts(data: dict) -> dict[str, dict]:
             raise DistrictError(f"[hosts.{name}].ssh must be a non-empty SSH target")
         if table.get("platform") not in ("linux", "macos"):
             raise DistrictError(f"[hosts.{name}].platform must be `linux` or `macos`")
+        xcode_version = table.get("xcode_version")
+        if xcode_version is not None and (
+            not isinstance(xcode_version, str) or not xcode_version.strip()
+        ):
+            raise DistrictError(f"[hosts.{name}].xcode_version must be a non-empty string")
     return configured
 
 
