@@ -47,13 +47,21 @@ class FactoryRefTest(unittest.TestCase):
 
         document = data or self.data()
         active = set(active_timers or [])
-        with tempfile.TemporaryDirectory() as directory, \
-                mock.patch.dict("os.environ", {"XDG_CONFIG_HOME": directory}), \
-                mock.patch.object(Path, "is_dir", return_value=True), \
-                mock.patch.object(apply, "run", side_effect=run), \
-                mock.patch.object(host, "is_active",
-                                  side_effect=lambda unit: "active" if unit in active else "inactive"):
-            result = apply.reconcile_engine(document)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = {
+                "HOME": str(root / "home"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_STATE_HOME": str(root / "state"),
+                "XDG_CACHE_HOME": str(root / "cache"),
+            }
+            with mock.patch.dict("os.environ", env), \
+                    mock.patch.object(Path, "is_dir", return_value=True), \
+                    mock.patch.object(apply, "run", side_effect=run), \
+                    mock.patch.object(host, "is_active",
+                                      side_effect=lambda unit: "active" if unit in active else "inactive"):
+                self.assertTrue(host.path().is_relative_to(root), host.path())
+                result = apply.reconcile_engine(document)
         return result, calls, document
 
     def test_same_sha_does_not_install(self) -> None:

@@ -766,6 +766,41 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("disable --now factory-beta.timer", calls)
         self.assertNotIn("enable --now factory-beta.timer", calls)
 
+    def test_unchanged_units_still_converge_an_inactive_timer(self) -> None:
+        root = self.register()
+        host.unit_dir().mkdir(parents=True)
+        service = f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=factory\n"
+        timer = "[Timer]\nOnUnitActiveSec=10min\n"
+        (host.unit_dir() / "factory-widgets.service").write_text(service)
+        (host.unit_dir() / "factory-widgets.timer").write_text(timer)
+        rendered = f"# factory-widgets.service\n{service}\n# factory-widgets.timer\n{timer}\n"
+        self.stub(
+            "factory",
+            ("install --print", rendered),
+            ("install", ""),
+            ("doctor --json", json.dumps(DOCTOR)),
+            ("dashboard --json", json.dumps(dashboard())),
+        )
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            "for pat, out, rc in",
+            'if args == "install": (here / "installed").touch()\nfor pat, out, rc in',
+        ))
+        systemctl = self.bin / "systemctl"
+        systemctl.write_text(systemctl.read_text().replace(
+            "for pat, out, rc in",
+            'if argv[:2] == ["--user", "is-active"] and argv[2] == "factory-widgets.timer":\n'
+            '    active = (here / "installed").exists()\n'
+            '    sys.stdout.write("active\\n" if active else "inactive\\n")\n'
+            '    sys.exit(0 if active else 3)\n'
+            "for pat, out, rc in",
+        ))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertFalse(any(call.startswith("disable ") for call in self.calls("systemctl")))
+
     def test_busy_engine_defers_without_draining_fleet(self) -> None:
         sha = "a" * 40
         repos = {}

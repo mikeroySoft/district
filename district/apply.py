@@ -145,7 +145,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None) -
             return "deferred"
         proc = run(
             ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
-            timeout=DRAIN_TIMEOUT,
+            timeout=DRAIN_TIMEOUT if active_timers else None,
         )
     finally:
         restore(active_timers, data, record)
@@ -308,7 +308,7 @@ def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None
                 return "deferred"
             proc = run(
                 ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
-                timeout=DRAIN_TIMEOUT,
+                timeout=DRAIN_TIMEOUT if active_timers else None,
             )
         finally:
             restore(active_timers, data, record)
@@ -519,23 +519,30 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                 code = 1
         changes = plan_apply(targets)
         for slug, table in targets.items():
-            service = f"{host.unit_name(slug)}.service"
-            if changes[slug]:
-                if busy := busy_units([service]):
+            if table.get("disabled_at"):
+                row = repo_pass(slug, table, data, record)
+            else:
+                service = f"{host.unit_name(slug)}.service"
+                changed = changes[slug]
+                if changed and (busy := busy_units([service])):
                     reason = f"busy: {', '.join(busy)}"
                     record.defer(slug, reason)
                     rows.append(deferred_row(slug, table, reason))
                     continue
                 timer = f"{host.unit_name(slug)}.timer"
-                active_timers = [timer] if host.is_active(timer) == "active" else []
+                active_timers = [timer] if changed and host.is_active(timer) == "active" else []
                 install_error = None
                 try:
-                    if busy := drain(active_timers, [service], data, record):
+                    if changed and (busy := drain(active_timers, [service], data, record)):
                         reason = f"busy: {', '.join(busy)}"
                         record.defer(slug, reason)
                         rows.append(deferred_row(slug, table, reason))
                         continue
-                    proc = run(["factory", "install"], cwd=Path(table["path"]), timeout=DRAIN_TIMEOUT)
+                    proc = run(
+                        ["factory", "install"],
+                        cwd=Path(table["path"]),
+                        timeout=DRAIN_TIMEOUT if active_timers else None,
+                    )
                     if proc.returncode:
                         tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
                         install_error = f"install: {tail[0]}"
@@ -545,10 +552,6 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                 if install_error:
                     row["fail"].insert(0, install_error)
                 else:
-                    record.clear_deferred(slug)
-            else:
-                row = repo_pass(slug, table, data, record)
-                if not table.get("disabled_at"):
                     record.clear_deferred(slug)
             rows.append(row)
             completed[slug] = table
