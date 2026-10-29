@@ -16,7 +16,7 @@ from pathlib import Path
 
 from district import __version__, host
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA_PATH = Path(__file__).with_name("install-state.schema.json")
 UNKNOWN = "unknown"
 CACHE_SECONDS = 3600
@@ -192,12 +192,10 @@ def _engine_sha(data: dict) -> str:
     return value if isinstance(value, str) and SHA.fullmatch(value) else UNKNOWN
 
 
-
-
 def unknown_last_apply() -> dict:
     return {
         "started_at": UNKNOWN, "finished_at": UNKNOWN, "exit_status": UNKNOWN,
-        "disabled": [], "reenabled": [],
+        "disabled": [], "reenabled": [], "deferred": [],
         "engine_change": {"from": UNKNOWN, "to": UNKNOWN},
         "config_sha_before": UNKNOWN, "config_sha_after": UNKNOWN,
     }
@@ -280,16 +278,32 @@ class ApplyRun:
     observed: bool = False
     disabled: set[str] = field(default_factory=set)
     reenabled: set[str] = field(default_factory=set)
+    deferred: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @classmethod
     def start(cls) -> "ApplyRun":
         data = _safe_config()
-        return cls(stamp(now()), config_sha(), _engine_sha(data))
+        previous = read_record().get("last_apply", {}).get("deferred", [])
+        deferred = {
+            item["target"]: item
+            for item in previous
+            if isinstance(item, dict)
+            and all(isinstance(item.get(key), str) for key in ("target", "reason", "since"))
+        }
+        return cls(stamp(now()), config_sha(), _engine_sha(data), deferred=deferred)
 
     def observe(self, data: dict) -> None:
         if not self.observed:
             self.timers_before = timer_states(data)
             self.observed = True
+
+    def defer(self, target: str, reason: str) -> None:
+        since = self.deferred.get(target, {}).get("since", stamp(now()))
+        self.deferred[target] = {"target": target, "reason": reason, "since": since}
+
+    def clear_deferred(self, target: str) -> None:
+        self.deferred.pop(target, None)
+
 
     def finish(self, exit_status: int) -> None:
         data = _safe_config()
@@ -312,6 +326,7 @@ class ApplyRun:
             "exit_status": exit_status,
             "disabled": sorted(disabled),
             "reenabled": sorted(reenabled),
+            "deferred": sorted(self.deferred.values(), key=lambda item: item["target"]),
             "engine_change": {"from": self.engine_before, "to": _engine_sha(data)},
             "config_sha_before": self.config_sha_before,
             "config_sha_after": config_sha(),

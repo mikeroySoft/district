@@ -16,7 +16,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,12 +25,12 @@ from district.host import DistrictError, run, systemctl
 POLICY_ENV = ("NPM_CONFIG_MIN_RELEASE_AGE", "UV_EXCLUDE_NEWER")
 # doctor rows about committed files: drift the repo owner decides on
 DRIFT_LABELS = (".factory.toml keys", "host settings committed", ".github/ISSUE_TEMPLATE/agent_task.md", ".factory.toml committed")
-SERVICE_WAIT = 3600  # seconds for running passes to finish before an upgrade
 SMOKE_TIMEOUT = 10  # seconds per `--version` probe under a unit's PATH
 SMOKE_BINARIES = ("gh", "factory")
 DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
 EXTRA_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
+UNIT_HEADER = re.compile(r"(?m)^# ([^\n]+)\n")
 
 
 def factory_extras(data: dict) -> list[str]:
@@ -59,12 +58,20 @@ def installed_engine_commit(data: dict) -> str | None:
     return sha if isinstance(sha, str) and SHA.fullmatch(sha) else None
 
 
-def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[str],
-                     record: install_state.ApplyRun | None = None) -> bool:
+def _defer(record: install_state.ApplyRun | None, target: str, busy: list[str]) -> None:
+    reason = f"busy: {', '.join(busy)}"
+    if record:
+        record.defer(target, reason)
+    print(f"{target} deferred ({reason})")
+
+
+def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None) -> str:
     """Install a changed, CI-green remote Factory ref without modifying its checkout."""
     ref = data.get("defaults", {}).get("factory_ref")
     if ref is None:
-        return True
+        if record:
+            record.clear_deferred("engine")
+        return "unchanged"
     if not isinstance(ref, str) or not ref.strip():
         raise DistrictError("[defaults].factory_ref must be a non-empty string")
     extras = factory_extras(data)
@@ -88,15 +95,17 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
         sha = shas.pop()
     except OSError as exc:
         print(f"engine {ref} unresolved: {exc}; keeping installed engine")
-        return True
+        return "unchanged"
     if installed_engine_commit(data) == sha:
+        if record:
+            record.clear_deferred("engine")
         print(f"engine {sha[:7]} ({ref})")
-        return True
+        return "unchanged"
     checks = run(["gh", "api", "--paginate", "--slurp",
                   f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
     if checks.returncode:
         print(f"engine {sha[:12]} CI unavailable; keeping installed engine")
-        return True
+        return "unchanged"
     try:
         payload = json.loads(checks.stdout)
         pages = payload if isinstance(payload, list) else [payload]
@@ -115,16 +124,18 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
         state = "success"
     if state != "success":
         print(f"engine {sha[:12]} CI {state}; keeping installed engine")
-        return True
-    if record:
-        record.observe(data)
+        return "unchanged"
 
+    services = [f"{host.unit_name(slug)}.service" for slug in _local_repos(data)]
+    if busy := busy_units(services):
+        _defer(record, "engine", busy)
+        return "deferred"
+    timers = [f"{host.unit_name(slug)}.timer" for slug in _local_repos(data)]
+    active_timers = [timer for timer in timers if host.is_active(timer) == "active"]
     try:
-        for timer in active_timers:
-            if record:
-                record.disabled.add(timer)
-            systemctl("disable", "--now", timer)
-        wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT)
+        if busy := drain(active_timers, services, data, record):
+            _defer(record, "engine", busy)
+            return "deferred"
         install_url = origin
         if origin.startswith("git@"):
             install_url = "ssh://" + origin.replace(":", "/", 1)
@@ -135,15 +146,17 @@ def reconcile_engine(data: dict, targets: dict[str, dict], active_timers: list[s
         if proc.returncode:
             detail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
             print(f"engine {sha[:12]} install failed" + (f": {detail[-1]}" if detail else ""))
-            return False
+            return "failed"
         previous = data.get("defaults", {}).get("engine", {}).get("sha")
         data.setdefault("defaults", {})["engine"] = {
             "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
         }
         host.save(data)
         restart_dashboards(data)
+        if record:
+            record.clear_deferred("engine")
         print(f"installed factory engine {sha[:12]} ({ref})")
-        return True
+        return "applied"
     finally:
         restore(active_timers, data, record)
 
@@ -204,15 +217,56 @@ def policy(data: dict) -> tuple[str, list[str]]:
 # ---------------------------------------------------------------- upgrade
 
 
-def wait_inactive(services: list[str], timeout: float) -> None:
-    deadline = time.monotonic() + timeout
-    while True:
-        busy = [s for s in services if host.is_active(s) in ("active", "activating", "deactivating")]
-        if not busy:
-            return
-        if time.monotonic() > deadline:
-            raise DistrictError(f"still running after {int(timeout)}s: {', '.join(busy)}")
-        time.sleep(5)
+def _rendered_units(output: str) -> dict[str, str]:
+    matches = list(UNIT_HEADER.finditer(output))
+    units = {}
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else None
+        units[match.group(1)] = output[match.end():end].removesuffix("\n")
+    return units
+
+
+def _units_changed(slug: str, output: str) -> bool:
+    wanted = _rendered_units(output)
+    unit = host.unit_name(slug)
+    if not wanted or any(not name.startswith(unit) for name in wanted):
+        return True
+    optional = (
+        "-dashboard.service", "-triage-probe.service", "-triage-probe.timer",
+        "-eval.service", "-eval.timer",
+    )
+    known = {f"{unit}.service", f"{unit}.timer", *(f"{unit}{suffix}" for suffix in optional)}
+    existing = {name for name in known if (host.unit_dir() / name).exists()}
+    return existing != set(wanted) or any(
+        (host.unit_dir() / name).read_text() != body for name, body in wanted.items()
+    )
+
+
+def plan_apply(targets: dict[str, dict]) -> dict[str, bool]:
+    changes = {}
+    for slug, table in targets.items():
+        if table.get("disabled_at"):
+            changes[slug] = False
+            continue
+        proc = run(["factory", "install", "--print"], cwd=Path(table["path"]))
+        changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout)
+    return changes
+
+
+def busy_units(services: list[str]) -> list[str]:
+    return [service for service in services
+            if host.is_active(service) in ("active", "activating", "deactivating")]
+
+
+def drain(timers: list[str], services: list[str], data: dict,
+          record: install_state.ApplyRun | None = None) -> list[str]:
+    if record:
+        record.observe(data)
+    for timer in timers:
+        systemctl("disable", "--now", timer)
+        if record:
+            record.disabled.add(timer)
+    return busy_units(services)
 
 
 def restart_dashboards(data: dict) -> None:
@@ -222,12 +276,8 @@ def restart_dashboards(data: dict) -> None:
             systemctl("restart", dash, check=False)
 
 
-def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD",
-            record: install_state.ApplyRun | None = None) -> None:
-    """Stop → wait → reinstall an export of `ref` → restart dashboards. Timers are re-enabled by the caller.
-
-    Records `[defaults.engine]` (ref, sha, previous, installed_at) and prints the rollback command.
-    """
+def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None = None) -> str:
+    """Reinstall an export of `ref` only while every local Factory service is idle."""
     extras = factory_extras(data)
     src = Path(os.path.expanduser(host.default(data, "factory_source")))
     proc = run(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=src)
@@ -236,35 +286,43 @@ def upgrade(data: dict, active_timers: list[str], ref: str = "HEAD",
     sha = proc.stdout.strip()
     if ref == "HEAD" and run(["git", "status", "--porcelain"], cwd=src, check=True).stdout.strip():
         raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
-    if record:
-        record.observe(data)
-    for timer in active_timers:
+    services = [f"{host.unit_name(slug)}.service" for slug in _local_repos(data)]
+    if busy := busy_units(services):
+        _defer(record, "engine", busy)
+        return "deferred"
+    timers = [f"{host.unit_name(slug)}.timer" for slug in _local_repos(data)]
+    active_timers = [timer for timer in timers if host.is_active(timer) == "active"]
+    try:
+        if busy := drain(active_timers, services, data, record):
+            _defer(record, "engine", busy)
+            return "deferred"
+        with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
+            tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
+            tree.mkdir()
+            run(["git", "archive", "-o", str(tar), sha], cwd=src, check=True)
+            run(["tar", "-x", "-C", str(tree), "-f", str(tar)], check=True)
+            source = f"{tree}[{','.join(extras)}]" if extras else str(tree)
+            proc = run(["uv", "tool", "install", "--reinstall", "--from", source, "factory"])
+        sys.stdout.write(proc.stdout)
+        if proc.returncode != 0:
+            sys.stderr.write(proc.stderr)
+            raise DistrictError("uv tool install failed")
+        version = run(["factory", "--version"], check=True).stdout.strip()
+        print(f"installed factory {version} from {src}@{sha[:7]} ({ref})")
+        previous = data.get("defaults", {}).get("engine", {}).get("sha")
+        engine = {
+            "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
+        }
+        data.setdefault("defaults", {})["engine"] = engine
+        host.save(data)
+        if previous:
+            print(f"rollback: district apply --upgrade {previous}")
+        restart_dashboards(data)
         if record:
-            record.disabled.add(timer)
-        systemctl("disable", "--now", timer)
-    print(f"disabled {len(active_timers)} timer(s); waiting for running passes")
-    # A pass can still be running with its timer already disabled (e.g. an interrupted upgrade).
-    wait_inactive([f"{host.unit_name(s)}.service" for s in _local_repos(data)], SERVICE_WAIT)
-    with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
-        tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
-        tree.mkdir()
-        run(["git", "archive", "-o", str(tar), sha], cwd=src, check=True)
-        run(["tar", "-x", "-C", str(tree), "-f", str(tar)], check=True)
-        source = f"{tree}[{','.join(extras)}]" if extras else str(tree)
-        proc = run(["uv", "tool", "install", "--reinstall", "--from", source, "factory"])
-    sys.stdout.write(proc.stdout)
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stderr)
-        raise DistrictError("uv tool install failed")
-    version = run(["factory", "--version"], check=True).stdout.strip()
-    print(f"installed factory {version} from {src}@{sha[:7]} ({ref})")
-    previous = data.get("defaults", {}).get("engine", {}).get("sha")
-    engine = {"ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now())}
-    data.setdefault("defaults", {})["engine"] = engine
-    host.save(data)
-    if previous:
-        print(f"rollback: district apply --upgrade {previous}")
-    restart_dashboards(data)
+            record.clear_deferred("engine")
+        return "applied"
+    finally:
+        restore(active_timers, data, record)
 
 
 def restore(timers: list[str], data: dict, record: install_state.ApplyRun | None = None) -> None:
@@ -303,7 +361,10 @@ def reset(slug: str, table: dict, data: dict, record: install_state.ApplyRun | N
 def repo_pass(slug: str, table: dict, data: dict,
               record: install_state.ApplyRun | None = None) -> dict:
     root = Path(table["path"])
-    row = {"slug": slug, "version": None, "doctor": "?", "drift": [], "failures": None, "fail": [], "disabled": table.get("disabled_at")}
+    row = {
+        "slug": slug, "version": None, "doctor": "?", "drift": [], "failures": None,
+        "fail": [], "disabled": table.get("disabled_at"),
+    }
     unit = host.unit_name(slug)
 
     def step(*cmd: str) -> str | None:
@@ -314,8 +375,6 @@ def repo_pass(slug: str, table: dict, data: dict,
             return None
         return proc.stdout
 
-    if not row["disabled"]:
-        step("factory", "install")
     step("factory", "init", "--labels-only")
     if (out := step("factory", "doctor", "--json")) is not None:
         try:
@@ -352,7 +411,17 @@ def repo_pass(slug: str, table: dict, data: dict,
     return row
 
 
+def deferred_row(slug: str, table: dict, reason: str) -> dict:
+    return {
+        "slug": slug, "version": None, "doctor": "?", "drift": [], "failures": None,
+        "fail": [], "disabled": table.get("disabled_at"), "timer": host.is_active(f"{host.unit_name(slug)}.timer"),
+        "deferred": reason,
+    }
+
+
 def line(row: dict, status: str) -> str:
+    if reason := row.get("deferred"):
+        return f"{row['slug']} deferred ({reason})"
     parts = [row["slug"], row["version"] or "?", f"doctor {row['doctor']}"]
     parts.append("drift: " + (", ".join(row["drift"]) if row["drift"] else "none"))
     parts.append(f"failures {row['failures'] if row['failures'] is not None else '?'}")
@@ -428,22 +497,56 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         status, warnings = policy(data)
         host.save(data)
 
-        all_timers = [f"{host.unit_name(s)}.timer" for s in _local_repos(data)]
-        active = [t for t in all_timers if host.is_active(t) == "active"]
         rows = []
+        completed = {}
         code = 0
-        if args.upgrade:
-            try:
-                upgrade(data, active, args.upgrade, record)
-            finally:
-                restore(active, data, record)
-        elif not reconcile_engine(data, targets, active, record):
+        engine_result = (
+            upgrade(data, args.upgrade, record) if args.upgrade else reconcile_engine(data, record)
+        )
+        if engine_result == "deferred":
+            return 0
+        if engine_result == "failed":
             code = 1
+
         record.observe(data)
         for slug, table in targets.items():
             if args.reset and not reset(slug, table, data, record):
                 code = 1
-            rows.append(repo_pass(slug, table, data, record))
+        changes = plan_apply(targets)
+        for slug, table in targets.items():
+            service = f"{host.unit_name(slug)}.service"
+            if changes[slug]:
+                if busy := busy_units([service]):
+                    reason = f"busy: {', '.join(busy)}"
+                    record.defer(slug, reason)
+                    rows.append(deferred_row(slug, table, reason))
+                    continue
+                timer = f"{host.unit_name(slug)}.timer"
+                active_timers = [timer] if host.is_active(timer) == "active" else []
+                install_error = None
+                try:
+                    if busy := drain(active_timers, [service], data, record):
+                        reason = f"busy: {', '.join(busy)}"
+                        record.defer(slug, reason)
+                        rows.append(deferred_row(slug, table, reason))
+                        continue
+                    proc = run(["factory", "install"], cwd=Path(table["path"]))
+                    if proc.returncode:
+                        tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
+                        install_error = f"install: {tail[0]}"
+                finally:
+                    restore(active_timers, data, record)
+                row = repo_pass(slug, table, data, record)
+                if install_error:
+                    row["fail"].insert(0, install_error)
+                else:
+                    record.clear_deferred(slug)
+            else:
+                row = repo_pass(slug, table, data, record)
+                if not table.get("disabled_at"):
+                    record.clear_deferred(slug)
+            rows.append(row)
+            completed[slug] = table
 
         engine = data.get("defaults", {}).get("engine")
         if engine and not args.upgrade and "factory_ref" not in data.get("defaults", {}):
@@ -452,13 +555,14 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             print(line(row, status))
         for w in warnings:
             print(w)
-        versions = {r["version"] for r in rows}
-        if any(r["fail"] or r["disabled"] or r["timer"] != "active" for r in rows):
+        converged = [row for row in rows if "deferred" not in row]
+        versions = {row["version"] for row in converged}
+        if any(row["fail"] or row["disabled"] or row["timer"] != "active" for row in converged):
             code = 1
         if len(versions) > 1:
             print(f"versions differ across the fleet: {', '.join(str(v) for v in sorted(versions, key=str))}")
             code = 1
-        units, smoke_fails = smoke(targets)
+        units, smoke_fails = smoke(completed)
         for fail in smoke_fails:
             print(f"smoke FAIL {fail}")
         if smoke_fails:

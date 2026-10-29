@@ -46,12 +46,14 @@ class FactoryRefTest(unittest.TestCase):
             return self.proc(argv)
 
         document = data or self.data()
+        active = set(active_timers or [])
         with tempfile.TemporaryDirectory() as directory, \
                 mock.patch.dict("os.environ", {"XDG_CONFIG_HOME": directory}), \
                 mock.patch.object(Path, "is_dir", return_value=True), \
                 mock.patch.object(apply, "run", side_effect=run), \
-                mock.patch.object(apply, "wait_inactive"):
-            result = apply.reconcile_engine(document, document["repo"], active_timers or [])
+                mock.patch.object(host, "is_active",
+                                  side_effect=lambda unit: "active" if unit in active else "inactive"):
+            result = apply.reconcile_engine(document)
         return result, calls, document
 
     def test_same_sha_does_not_install(self) -> None:
@@ -91,12 +93,14 @@ class FactoryRefTest(unittest.TestCase):
 
     def test_partial_timer_disable_failure_still_restores(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
-        timers = ["one.timer", "two.timer"]
+        timers = ["factory-one.timer", "factory-two.timer"]
+        data = self.data()
+        data["repo"] = {"acme/one": {"path": "/one"}, "acme/two": {"path": "/two"}}
         with mock.patch.object(apply, "systemctl",
                                side_effect=[self.proc([], returncode=0), host.DistrictError("disable failed")]), \
                 mock.patch.object(apply, "restore") as restore:
             with self.assertRaises(host.DistrictError):
-                self.calls(checks, active_timers=timers)
+                self.calls(checks, data=data, active_timers=timers)
         restore.assert_called_once()
         self.assertEqual(restore.call_args.args[0], timers)
 
@@ -123,7 +127,7 @@ class FactoryRefTest(unittest.TestCase):
     def test_absent_factory_ref_does_not_reconcile(self) -> None:
         document = self.data(ref=None)
         with mock.patch.object(apply, "run") as run:
-            self.assertTrue(apply.reconcile_engine(document, document["repo"], []))
+            self.assertTrue(apply.reconcile_engine(document))
         run.assert_not_called()
 
 

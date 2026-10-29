@@ -15,7 +15,7 @@
     "holds"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "observed_at": {"type": "string", "minLength": 1},
     "host": {"type": "string", "minLength": 1},
     "district": {
@@ -86,6 +86,7 @@
         "exit_status",
         "disabled",
         "reenabled",
+        "deferred",
         "engine_change",
         "config_sha_before",
         "config_sha_after"
@@ -101,6 +102,19 @@
         },
         "disabled": {"$ref": "#/$defs/unitNames"},
         "reenabled": {"$ref": "#/$defs/unitNames"},
+        "deferred": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["target", "reason", "since"],
+            "properties": {
+              "target": {"type": "string", "minLength": 1},
+              "reason": {"type": "string", "minLength": 1},
+              "since": {"type": "string", "minLength": 1}
+            }
+          }
+        },
         "engine_change": {
           "type": "object",
           "additionalProperties": false,
