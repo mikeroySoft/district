@@ -58,7 +58,7 @@ class FactoryRefTest(unittest.TestCase):
 
     def test_same_sha_does_not_install(self) -> None:
         result, calls, _ = self.calls("", data=self.data(sha=SHA))
-        self.assertTrue(result)
+        self.assertEqual(result, "unchanged")
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
         self.assertIn(f"refs/heads/{self.data()['defaults']['factory_ref']}", calls[1])
 
@@ -67,7 +67,7 @@ class FactoryRefTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             result, calls, document = self.calls(checks)
-        self.assertTrue(result)
+        self.assertEqual(result, "unchanged")
         self.assertIn(f"engine {SHA[:12]} CI failed", out.getvalue())
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
         self.assertEqual(document["defaults"]["engine"]["sha"], OLD)
@@ -76,7 +76,7 @@ class FactoryRefTest(unittest.TestCase):
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
         result, calls, document = self.calls(checks)
         installs = [call for call in calls if call[:3] == ["uv", "tool", "install"]]
-        self.assertTrue(result)
+        self.assertEqual(result, "applied")
         self.assertEqual(len(installs), 1)
         self.assertIn(f"git+{ORIGIN}@{SHA}", installs[0])
         self.assertEqual(document["defaults"]["engine"]["sha"], SHA)
@@ -108,7 +108,7 @@ class FactoryRefTest(unittest.TestCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             result, calls, document = self.calls("", resolve_code=2)
-        self.assertTrue(result)
+        self.assertEqual(result, "unchanged")
         self.assertIn("engine main unresolved: network down; keeping installed engine", out.getvalue())
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
         self.assertEqual(document["defaults"]["engine"]["sha"], OLD)
@@ -121,13 +121,13 @@ class FactoryRefTest(unittest.TestCase):
                             for call in self.calls(passing)[1]))
         pending = '{"total_count":1,"check_runs":[{"status":"in_progress","conclusion":null}]}'
         result, calls, _ = self.calls(pending)
-        self.assertTrue(result)
+        self.assertEqual(result, "unchanged")
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
 
     def test_absent_factory_ref_does_not_reconcile(self) -> None:
         document = self.data(ref=None)
         with mock.patch.object(apply, "run") as run:
-            self.assertTrue(apply.reconcile_engine(document))
+            self.assertEqual(apply.reconcile_engine(document), "unchanged")
         run.assert_not_called()
 
 

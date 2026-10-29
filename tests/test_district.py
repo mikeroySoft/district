@@ -791,7 +791,8 @@ class ApplyTest(DistrictCase):
                   ("is-active *.service", "inactive\n"),
                   ("is-active *", "active\n"))
 
-        code, out = self.district("apply")
+        with mock.patch.object(apply, "plan_apply", return_value=dict.fromkeys(repos, False)):
+            code, out = self.district("apply")
 
         self.assertEqual(code, 0, out)
         self.assertFalse(any(call.startswith(("disable ", "enable ")) for call in self.calls("systemctl")))
@@ -804,6 +805,9 @@ class ApplyTest(DistrictCase):
             "since": record["last_apply"]["deferred"][0]["since"],
         }])
         self.assertIn("engine deferred (busy: factory-factory.service)", out)
+        self.assertEqual(self.calls("factory").count("init --labels-only"), len(repos))
+        self.assertEqual(self.calls("factory").count("doctor --json"), len(repos))
+        self.assertEqual(self.calls("factory").count("dashboard --json"), len(repos))
         with host.operation_lock_path().open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -886,6 +890,25 @@ class ApplyTest(DistrictCase):
                 self.assertLess(calls.index("disable --now factory-widgets.timer"),
                                 calls.index("enable --now factory-widgets.timer"))
                 (self.bin / "systemctl.log").unlink()
+
+    def test_upgrade_bounds_install_time_and_restores_timer(self) -> None:
+        self.engine_source()
+        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
+        real_run = apply.run
+
+        def slow_install(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                return real_run([sys.executable, "-c", "import time; time.sleep(0.2)"], **kwargs)
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(apply, "DRAIN_TIMEOUT", 0.01, create=True), \
+             mock.patch.object(apply, "run", side_effect=slow_install), \
+             self.assertRaises(subprocess.TimeoutExpired):
+            apply.upgrade(host.load())
+        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
+        calls = self.calls("systemctl")
+        self.assertLess(calls.index("disable --now factory-widgets.timer"),
+                        calls.index("enable --now factory-widgets.timer"))
 
     def test_upgrade_race_after_drain_restores_and_defers(self) -> None:
         self.engine_source()

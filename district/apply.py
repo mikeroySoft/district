@@ -26,6 +26,7 @@ POLICY_ENV = ("NPM_CONFIG_MIN_RELEASE_AGE", "UV_EXCLUDE_NEWER")
 # doctor rows about committed files: drift the repo owner decides on
 DRIFT_LABELS = (".factory.toml keys", "host settings committed", ".github/ISSUE_TEMPLATE/agent_task.md", ".factory.toml committed")
 SMOKE_TIMEOUT = 10  # seconds per `--version` probe under a unit's PATH
+DRAIN_TIMEOUT = 120  # maximum seconds an install may keep timers drained
 SMOKE_BINARIES = ("gh", "factory")
 DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
 EXTRA_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
@@ -132,33 +133,36 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None) -
         return "deferred"
     timers = [f"{host.unit_name(slug)}.timer" for slug in _local_repos(data)]
     active_timers = [timer for timer in timers if host.is_active(timer) == "active"]
+    install_url = origin
+    if origin.startswith("git@"):
+        install_url = "ssh://" + origin.replace(":", "/", 1)
+    source = f"git+{install_url}@{sha}"
+    if extras:
+        source += f"[{','.join(extras)}]"
     try:
         if busy := drain(active_timers, services, data, record):
             _defer(record, "engine", busy)
             return "deferred"
-        install_url = origin
-        if origin.startswith("git@"):
-            install_url = "ssh://" + origin.replace(":", "/", 1)
-        source = f"git+{install_url}@{sha}"
-        if extras:
-            source += f"[{','.join(extras)}]"
-        proc = run(["uv", "tool", "install", "--reinstall", "--from", source, "factory"])
-        if proc.returncode:
-            detail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
-            print(f"engine {sha[:12]} install failed" + (f": {detail[-1]}" if detail else ""))
-            return "failed"
-        previous = data.get("defaults", {}).get("engine", {}).get("sha")
-        data.setdefault("defaults", {})["engine"] = {
-            "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
-        }
-        host.save(data)
-        restart_dashboards(data)
-        if record:
-            record.clear_deferred("engine")
-        print(f"installed factory engine {sha[:12]} ({ref})")
-        return "applied"
+        proc = run(
+            ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
+            timeout=DRAIN_TIMEOUT,
+        )
     finally:
         restore(active_timers, data, record)
+    if proc.returncode:
+        detail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+        print(f"engine {sha[:12]} install failed" + (f": {detail[-1]}" if detail else ""))
+        return "failed"
+    previous = data.get("defaults", {}).get("engine", {}).get("sha")
+    data.setdefault("defaults", {})["engine"] = {
+        "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
+    }
+    host.save(data)
+    restart_dashboards(data)
+    if record:
+        record.clear_deferred("engine")
+    print(f"installed factory engine {sha[:12]} ({ref})")
+    return "applied"
 
 
 
@@ -291,38 +295,41 @@ def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None
         _defer(record, "engine", busy)
         return "deferred"
     timers = [f"{host.unit_name(slug)}.timer" for slug in _local_repos(data)]
-    active_timers = [timer for timer in timers if host.is_active(timer) == "active"]
-    try:
-        if busy := drain(active_timers, services, data, record):
-            _defer(record, "engine", busy)
-            return "deferred"
-        with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
-            tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
-            tree.mkdir()
-            run(["git", "archive", "-o", str(tar), sha], cwd=src, check=True)
-            run(["tar", "-x", "-C", str(tree), "-f", str(tar)], check=True)
-            source = f"{tree}[{','.join(extras)}]" if extras else str(tree)
-            proc = run(["uv", "tool", "install", "--reinstall", "--from", source, "factory"])
-        sys.stdout.write(proc.stdout)
-        if proc.returncode != 0:
-            sys.stderr.write(proc.stderr)
-            raise DistrictError("uv tool install failed")
-        version = run(["factory", "--version"], check=True).stdout.strip()
-        print(f"installed factory {version} from {src}@{sha[:7]} ({ref})")
-        previous = data.get("defaults", {}).get("engine", {}).get("sha")
-        engine = {
-            "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
-        }
-        data.setdefault("defaults", {})["engine"] = engine
-        host.save(data)
-        if previous:
-            print(f"rollback: district apply --upgrade {previous}")
-        restart_dashboards(data)
-        if record:
-            record.clear_deferred("engine")
-        return "applied"
-    finally:
-        restore(active_timers, data, record)
+    with tempfile.TemporaryDirectory(prefix="district-engine-") as tmp:
+        tar, tree = Path(tmp) / "engine.tar", Path(tmp) / sha
+        tree.mkdir()
+        run(["git", "archive", "-o", str(tar), sha], cwd=src, check=True)
+        run(["tar", "-x", "-C", str(tree), "-f", str(tar)], check=True)
+        source = f"{tree}[{','.join(extras)}]" if extras else str(tree)
+        active_timers = [timer for timer in timers if host.is_active(timer) == "active"]
+        try:
+            if busy := drain(active_timers, services, data, record):
+                _defer(record, "engine", busy)
+                return "deferred"
+            proc = run(
+                ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
+                timeout=DRAIN_TIMEOUT,
+            )
+        finally:
+            restore(active_timers, data, record)
+    sys.stdout.write(proc.stdout)
+    if proc.returncode != 0:
+        sys.stderr.write(proc.stderr)
+        raise DistrictError("uv tool install failed")
+    version = run(["factory", "--version"], check=True).stdout.strip()
+    print(f"installed factory {version} from {src}@{sha[:7]} ({ref})")
+    previous = data.get("defaults", {}).get("engine", {}).get("sha")
+    engine = {
+        "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
+    }
+    data.setdefault("defaults", {})["engine"] = engine
+    host.save(data)
+    if previous:
+        print(f"rollback: district apply --upgrade {previous}")
+    restart_dashboards(data)
+    if record:
+        record.clear_deferred("engine")
+    return "applied"
 
 
 def restore(timers: list[str], data: dict, record: install_state.ApplyRun | None = None) -> None:
@@ -503,8 +510,6 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         engine_result = (
             upgrade(data, args.upgrade, record) if args.upgrade else reconcile_engine(data, record)
         )
-        if engine_result == "deferred":
-            return 0
         if engine_result == "failed":
             code = 1
 
@@ -530,7 +535,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                         record.defer(slug, reason)
                         rows.append(deferred_row(slug, table, reason))
                         continue
-                    proc = run(["factory", "install"], cwd=Path(table["path"]))
+                    proc = run(["factory", "install"], cwd=Path(table["path"]), timeout=DRAIN_TIMEOUT)
                     if proc.returncode:
                         tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
                         install_error = f"install: {tail[0]}"
