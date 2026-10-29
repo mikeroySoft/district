@@ -1630,7 +1630,7 @@ class MetricsTest(DistrictCase):
         (repo / "logo.bin").write_bytes(b"\x89PNG\x00\x00binary\n\n\n")
         git = ["git", "-C", str(repo), "-c", "user.name=Ada", "-c", "user.email=ada@example.com"]
         subprocess.run([*git, "add", "."], check=True)
-        subprocess.run([*git, "commit", "-q", "-m", "init"], check=True)
+        subprocess.run([*git, "-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"], check=True)
         return repo
 
     def test_collect_parses_git_and_gh(self) -> None:
