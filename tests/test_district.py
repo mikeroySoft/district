@@ -27,7 +27,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from district import add, apply, atlas, cli, health, host, install_state, metrics, status  # noqa: E402
+from district import add, apply, atlas, cli, doctor, health, host, install_state, metrics, status  # noqa: E402
 from district import dashboard as dash  # noqa: E402  (dashboard() below is the snapshot fixture)
 
 STUB = '''#!/usr/bin/env python3
@@ -1348,7 +1348,7 @@ class DoctorTest(DistrictCase):
             "ssh",
             ("*printenv PATH*", "/usr/bin:/bin\n"),
             ("*xcodebuild -version*", "Xcode 27.1\nBuild version 18B77\n"),
-            ("*brew --prefix xcodegen*", "/opt/homebrew/opt/xcodegen\n"),
+            ("*brew --prefix --installed xcodegen*", "/opt/homebrew/opt/xcodegen\n"),
             ("*xcodegen --version*", "Version: 2.44.1\n"),
             ("*swift --version*", "Apple Swift version 6.2\n"),
             ("*cargo --version*", "cargo 1.91.0\n"),
@@ -1384,6 +1384,38 @@ class DoctorTest(DistrictCase):
         self.assertEqual(drift_code, 0)
         self.assertEqual(drift["status"], "WARN")
         self.assertIn("installed 27.1, expected 27.2", drift["detail"])
+
+    def test_macos_toolchain_requires_installed_homebrew_xcodegen(self) -> None:
+        def fake(_name, _table, argv, **_kwargs):
+            if argv == ["brew", "--prefix", "--installed", "xcodegen"]:
+                return subprocess.CompletedProcess(argv, 1, "", "Error: No such keg: xcodegen\n")
+            stdout = "/opt/homebrew/opt/xcodegen\n" if argv == ["brew", "--prefix", "xcodegen"] else "ok\n"
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        with mock.patch("district.doctor._host_run", side_effect=fake):
+            rows = doctor.macos_xcode_rows("ultron", {"ssh": "factory@ultron.example"})
+
+        xcodegen = next(item for item in rows if item["label"].endswith("xcodegen"))
+        self.assertEqual(xcodegen, {
+            "status": "FAIL",
+            "label": "host ultron macos-xcode xcodegen",
+            "detail": "Error: No such keg: xcodegen",
+        })
+
+    def test_macos_toolchain_timeout_with_partial_output_remains_json(self) -> None:
+        timeout = subprocess.TimeoutExpired(
+            ["ssh"], doctor.HOST_COMMAND_TIMEOUT,
+            output=b"partial stdout\n", stderr=b"ssh warning\n",
+        )
+        with mock.patch("district.doctor.host.run", side_effect=timeout):
+            rows = doctor.macos_xcode_rows("ultron", {"ssh": "factory@ultron.example"})
+
+        payload = json.loads(json.dumps(rows))
+        self.assertEqual(payload, [{
+            "status": "FAIL",
+            "label": "host ultron macos-xcode",
+            "detail": "ssh warning",
+        }])
 
     def test_doctor_reports_each_host_toolchain_failure_without_stopping(self) -> None:
         host.save({
