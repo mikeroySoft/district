@@ -747,6 +747,19 @@ class ApplyTest(DistrictCase):
         self.assertIn("start factory-widgets.service", self.calls("systemctl"))
         self.assertIn("install", self.calls("factory"))
 
+    def test_units_unchanged_on_launchd_backend(self) -> None:
+        backend = host.service_backend(
+            {"platform": "macos"}, run=mock.Mock(), home=self.tmp / "home", uid=501,
+            raw_path=os.environ["PATH"],
+        )
+        name = "factory-widgets.plist"
+        body = "<?xml version=\"1.0\"?>\n<plist><dict/></plist>\n"
+        backend.agent_dir.mkdir(parents=True)
+        (backend.agent_dir / name).write_text(body)
+
+        self.assertFalse(apply._units_changed("widgets", f"# {name}\n{body}\n", backend))
+
+
     def test_per_repo_change_drains_only_the_changed_repo(self) -> None:
         roots = {name: self.repo(name) for name in ("alpha", "beta")}
         host.save({"repo": {f"acme/{name}": {"path": str(root)} for name, root in roots.items()}})
