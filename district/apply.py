@@ -209,7 +209,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     if extras:
         install_source += f"[{','.join(extras)}]"
     try:
-        if busy := drain(active_timers, services, repos, record, backend=backend):
+        if busy := drain(active_timers, services, data, record, backend=backend):
             _defer(record, engine_target, busy)
             return "deferred"
         try:
