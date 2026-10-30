@@ -2095,5 +2095,20 @@ class DryRunTest(DistrictCase):
         self.assertEqual(host.load(), {})
 
 
+
+class TempdirHygieneTest(unittest.TestCase):
+    def test_district_case_leaves_no_tempdir_behind(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            tmpdir = Path(directory) / "tmp"
+            tmpdir.mkdir()
+            proc = subprocess.run(
+                [sys.executable, "-m", "unittest",
+                 "tests.test_district.HostTest.test_round_trip_regex_strings"],
+                cwd=ROOT, env={**os.environ, "TMPDIR": str(tmpdir)},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(list(tmpdir.iterdir()), [])
+
 if __name__ == "__main__":
     unittest.main()
