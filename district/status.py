@@ -548,7 +548,7 @@ def fleet(data: dict) -> dict[str, dict]:
             try:
                 collector._runner(name)(["true"], timeout=collector.timeout, quiet=True)
                 collector._host_success(name)
-            except host.RemoteHostError as exc:
+            except (host.RemoteHostError, subprocess.TimeoutExpired) as exc:
                 collector.mark_unreachable(name, str(exc))
                 return
         with ThreadPoolExecutor(max_workers=min(len(slugs), collector.concurrency)) as pool:
