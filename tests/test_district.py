@@ -161,7 +161,7 @@ class HostRunTest(unittest.TestCase):
 
 class DistrictCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         self.env = mock.patch.dict(os.environ, {
