@@ -108,6 +108,25 @@ class InstallStateTest(DistrictCase):
         self.assertTrue(str(install_state.state_path()).startswith(os.environ["XDG_STATE_HOME"]))
         self.assertEqual(self.calls("uv"), ["tool list --show-version-specifiers"])
 
+    def test_engine_policy_reflects_factory_ref_mode(self) -> None:
+        versions = {"district": "0.1.4", "factory": "0.4.9"}
+        cases = [
+            ("latest-odd", "v0.4.9-rc.1", "latest-odd-tag"),
+            ("v0.4.6", "v0.4.6", "pinned"),
+            ("c" * 40, "c" * 40, "pinned"),
+            ("release-candidate", "release-candidate", "main-green-ci"),
+        ]
+        for factory_ref, installed_ref, expected in cases:
+            with self.subTest(factory_ref=factory_ref), \
+                    mock.patch.object(install_state, "commit_counts", return_value=None):
+                data = host.load()
+                data["defaults"]["factory_ref"] = factory_ref
+                data["defaults"]["engine"]["ref"] = installed_ref
+                document = install_state.collect(
+                    data=data, releases=RELEASES, timers={}, last_apply={}, versions=versions)
+
+            self.assertEqual(document["engine"]["policy"], expected)
+
     def test_offline_release_lookup_exits_zero_with_unknown_release_fields(self) -> None:
         with mock.patch.object(install_state, "_fetch_releases", side_effect=OSError("offline")):
             code, output = self.district("install-state", "--json")

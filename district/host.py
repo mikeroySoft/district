@@ -2,9 +2,9 @@
 
 Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
-clone_dir / factory_source / factory_ref / factory_extras / min_package_age /
-max_failed_passes, `[defaults.engine]` ref / sha / previous / installed_at
-(what engine reconciliation or `apply --upgrade` last installed), `[hosts.*]`
+clone_dir / factory_source / factory_ref (`latest-odd`, tag, or branch) /
+factory_extras / min_package_age / max_failed_passes, `[defaults.engine]` ref /
+sha / previous / installed_at (what engine reconciliation or `apply --upgrade` last installed), `[hosts.*]`
 SSH / platform / root / optional Xcode version, and per repo `path`, `host`,
 `toolchain`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
 """

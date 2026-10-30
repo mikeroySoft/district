@@ -108,16 +108,22 @@ factory's `.factory/logs/` directory. `local` is reserved for this machine.
 Remote factories are recorded but skipped until remote execution support lands
 in #96.
 
-Set `factory_ref = "main"` under `[defaults]` to let the hourly plain
-`district apply` follow Factory's remote `main` branch. District never checks
-out or requires a clean developer clone: it resolves that branch on the clone's
-GitHub `origin`, requires successful check runs for the resolved SHA, installs
-that immutable Git revision with `factory_extras`, and records it in
-`[defaults.engine]`. A busy local Factory service defers the shared-engine
+Set `factory_ref = "latest-odd"` under `[defaults]` to let the hourly plain
+`district apply` follow Factory's highest odd-patch semver tag, including
+prereleases. District resolves remote tags without checking out or requiring a
+clean developer clone, uses the peeled commit for annotated tags, and never
+falls back to `main`. A tag, such as `factory_ref = "v0.4.7"`, or a branch,
+such as `"main"`, pins that explicit remote ref instead; tags take precedence
+over branches with the same name.
+
+Every resolved commit must have successful GitHub check runs before District
+installs its immutable Git revision with `factory_extras` and records it in
+`[defaults.engine]`. An unchanged commit is left alone without checking CI or
+reinstalling. A busy local Factory service defers a changed shared-engine
 install without disabling any timer; the next apply retries it and clears the
 deferral after success. Remove `factory_ref` before rolling back, or the next
-apply will reinstall the branch's SHA. Omit `factory_ref` to retain explicit
-`district apply --upgrade` behavior.
+apply will reinstall the configured ref's SHA. Omit `factory_ref` to retain
+explicit `district apply --upgrade` behavior.
 
 ## Agent use
 

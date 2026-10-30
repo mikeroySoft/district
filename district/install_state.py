@@ -23,6 +23,7 @@ CACHE_SECONDS = 3600
 LOCAL_TIMEOUT = 0.5
 RELEASE_TIMEOUT = 1.0
 SHA = re.compile(r"^[0-9a-f]{40}$")
+PINNED_REF = re.compile(r"^(?:[0-9a-f]{40}|v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
 TOOL_VERSION = re.compile(r"^(district|factory)\s+v?([^\s]+)", re.MULTILINE)
 RELEASE_QUERY = """query {
   district: repository(owner: "mikeroySoft", name: "district") {
@@ -220,9 +221,17 @@ def collect(*, data: dict | None = None, releases: dict | None = None,
     installed_sha = _engine_sha(data)
     latest_sha = factory_release.get("sha", UNKNOWN)
     counts = commit_counts(data.get("defaults", {}).get("factory_source"), latest_sha, installed_sha)
+    factory_ref = data.get("defaults", {}).get("factory_ref")
     configured_ref = data.get("defaults", {}).get("engine", {}).get("ref")
     if not isinstance(configured_ref, str) or not configured_ref:
-        configured_ref = data.get("defaults", {}).get("factory_ref", UNKNOWN)
+        configured_ref = factory_ref if isinstance(factory_ref, str) and factory_ref else UNKNOWN
+    policy_ref = factory_ref if isinstance(factory_ref, str) else configured_ref
+    if policy_ref == "latest-odd":
+        policy = "latest-odd-tag"
+    elif isinstance(policy_ref, str) and PINNED_REF.fullmatch(policy_ref):
+        policy = "pinned"
+    else:
+        policy = "main-green-ci"
     latest_district = district_release.get("tag", UNKNOWN)
     up_to_date = (versions["district"].lstrip("v") == latest_district.lstrip("v")
                   if latest_district != UNKNOWN else UNKNOWN)
@@ -252,7 +261,7 @@ def collect(*, data: dict | None = None, releases: dict | None = None,
             "latest_release_sha": latest_sha,
             "commits_ahead": counts[0] if counts else UNKNOWN,
             "commits_behind": counts[1] if counts else UNKNOWN,
-            "policy": "main-green-ci",
+            "policy": policy,
         },
         "timers": timers if isinstance(timers, dict) else timer_states(data),
         "last_apply": last_apply if isinstance(last_apply, dict) else (
