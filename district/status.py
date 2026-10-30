@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -95,6 +96,34 @@ EVENT_LIMIT = 512
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _host_state_path() -> Path:
+    base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(base) / "district" / "host-last-seen.json"
+
+
+def _load_host_last_seen() -> dict[str, str]:
+    try:
+        value = json.loads(_host_state_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {name: seen for name, seen in value.items()
+            if isinstance(name, str) and isinstance(seen, str)}
+
+
+def _save_host_last_seen(value: dict[str, str]) -> bool:
+    path = _host_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        temporary.write_text(json.dumps(value, sort_keys=True) + "\n")
+        os.replace(temporary, path)
+    except OSError:
+        return False
+    return True
 
 
 class UnsupportedRuntime(ValueError):
@@ -277,7 +306,10 @@ class FleetCollector:
         self.revision = 0
         self._records = {slug: self._new_record() for slug in self.repos}
         names = {table.get("host", "local") for table in self.repos.values()}
-        self._hosts = {name: self._new_host() for name in names}
+        saved = _load_host_last_seen()
+        self._last_seen = {name: saved[name] for name in names if name != "local" and name in saved}
+        self._host_saved_at: dict[str, float] = {}
+        self._hosts = {name: self._new_host(self._last_seen.get(name)) for name in names}
         self._runners: dict[str, object] = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
@@ -295,8 +327,8 @@ class FleetCollector:
                 "runtime_collected_at": None, "full_collected_at": None}
 
     @staticmethod
-    def _new_host() -> dict:
-        return {"host_state": "pending", "host_last_seen": None, "host_error": None}
+    def _new_host(last_seen: str | None = None) -> dict:
+        return {"host_state": "pending", "host_last_seen": last_seen, "host_error": None}
 
     def _runner(self, name: str):
         if name == "local":
@@ -309,9 +341,15 @@ class FleetCollector:
             return runner
 
     def _host_success(self, name: str) -> None:
+        seen = _utcnow()
+        now = time.monotonic()
         with self._lock:
             state = self._hosts.setdefault(name, self._new_host())
-            state.update(host_state="reachable", host_last_seen=_utcnow(), host_error=None)
+            state.update(host_state="reachable", host_last_seen=seen, host_error=None)
+            if name != "local" and now - self._host_saved_at.get(name, float("-inf")) >= self.full_interval:
+                self._last_seen[name] = seen
+                if _save_host_last_seen(self._last_seen):
+                    self._host_saved_at[name] = now
 
     def mark_unreachable(self, name: str, error: str) -> None:
         attempted_at = _utcnow()
@@ -350,7 +388,8 @@ class FleetCollector:
                 for slug, table in repos.items()
             }
             names = {table.get("host", "local") for table in repos.values()}
-            self._hosts = {name: self._hosts.get(name, self._new_host()) for name in names}
+            self._hosts = {name: self._hosts.get(name, self._new_host(self._last_seen.get(name)))
+                           for name in names}
             self._runners = {}
             self.data = data
             self.repos = repos

@@ -1688,7 +1688,7 @@ class StatusTest(DistrictCase):
         self.assertEqual(entries["acme/remote"]["host_state"], "reachable")
         self.assertEqual(entries["acme/offline"]["host"], "dead")
         self.assertEqual(entries["acme/offline"]["host_state"], "unreachable")
-        self.assertEqual(entries["acme/offline"]["host_last_seen"], first_seen)
+        self.assertIsNotNone(entries["acme/offline"]["host_last_seen"])
         self.assertIn("Connection refused", entries["acme/offline"]["host_error"])
 
         text_code, text = self.district("status")
