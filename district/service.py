@@ -46,6 +46,7 @@ class ServiceStatus:
     def loaded(self) -> bool:
         return self.load_state == "loaded"
 
+
 @dataclass(frozen=True)
 class ScheduledJobStatus:
     unit_file_state: str
@@ -365,11 +366,11 @@ class SystemdUserBackend(ServiceBackend):
         for name, service in zip(ordered, services):
             timer = blocks.get(name, {})
             result[name] = ScheduledJobStatus(
-                timer.get("UnitFileState", ""),
-                timer.get("ActiveState", ""),
-                blocks.get(service, {}).get("ActiveState", ""),
-                timer.get("LastTriggerUSec", ""),
-                timer.get("NextElapseUSecRealtime", ""),
+                unit_file_state=timer.get("UnitFileState", ""),
+                active_state=timer.get("ActiveState", ""),
+                service_active_state=blocks.get(service, {}).get("ActiveState", ""),
+                last_trigger=timer.get("LastTriggerUSec", ""),
+                next_trigger=timer.get("NextElapseUSecRealtime", ""),
             )
         return result
 
@@ -417,8 +418,12 @@ class LaunchdBackend(ServiceBackend):
     def agent_dir(self) -> Path:
         return self.home / "Library" / "LaunchAgents"
 
-    def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        return self.run([self.executable, *args], check=check)
+    def _run(self, *args: str, check: bool = True,
+             timeout: float | None = None) -> subprocess.CompletedProcess:
+        argv = [self.executable, *args]
+        if timeout is None:
+            return self.run(argv, check=check)
+        return self.run(argv, check=check, timeout=timeout)
 
     def _path(self, label: str) -> Path:
         return self.agent_dir / f"{label}.plist"
@@ -547,7 +552,7 @@ class LaunchdBackend(ServiceBackend):
             return self._unload_when_idle(label, check=check, timeout=timeout)
         return self._run("bootout", f"{self.domain}/{label}", check=check)
 
-    def status(self, name: str) -> ServiceStatus:
+    def status(self, name: str, *, timeout: float | None = None) -> ServiceStatus:
         label = self._label(name)
         path = self._path(label)
         try:
@@ -557,7 +562,7 @@ class LaunchdBackend(ServiceBackend):
         environment = document.get("EnvironmentVariables")
         if not isinstance(environment, dict):
             environment = {}
-        proc = self._run("print", f"{self.domain}/{label}", check=False)
+        proc = self._run("print", f"{self.domain}/{label}", check=False, timeout=timeout)
         if proc.returncode:
             return ServiceStatus(
                 "not-found",
@@ -595,13 +600,14 @@ class LaunchdBackend(ServiceBackend):
         except OSError:
             pass
         result = {}
+        deadline = time.monotonic() + timeout if timeout is not None else None
         for name in sorted(timers):
-            timer = self.status(name)
-            service = self.status(name.removesuffix(".timer") + ".service")
+            remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            status = self.status(name.removesuffix(".timer") + ".service", timeout=remaining)
             result[name] = ScheduledJobStatus(
-                timer.unit_file_state,
-                timer.active_state,
-                service.active_state,
+                unit_file_state=status.unit_file_state,
+                active_state="active" if status.loaded else "inactive",
+                service_active_state=status.active_state,
             )
         return result
 
