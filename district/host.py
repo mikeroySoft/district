@@ -4,19 +4,25 @@ Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
 clone_dir / factory_source / factory_ref (`latest-odd`, tag, or branch) /
 factory_extras / min_package_age / max_failed_passes, `[defaults.engine]` ref /
-sha / previous / installed_at (what engine reconciliation or `apply --upgrade` last installed), `[hosts.*]`
-SSH / platform / root / optional Xcode version, and per repo `path`, `host`,
-`toolchain`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
+sha / previous / installed_at (local engine state), `[hosts.*]` SSH / platform /
+root / optional Xcode version / engine (remote engine state), and per repo `path`,
+`host`, `toolchain`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
 """
 
 from __future__ import annotations
 
+import base64
+import copy
+import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+import uuid
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath
 
 import tomli_w
 from district import service
@@ -30,12 +36,43 @@ DEFAULTS = {
     "min_package_age": "24h",
     "max_failed_passes": 10,
 }
+SSH_CONNECT_TIMEOUT = 10
+# The supervisor lives on the remote host, outside the command's process group.
+# It kills descendants even if the controller loses its SSH client.
+REMOTE_DEADLINE = """\
+import os, signal, subprocess, sys
+limit, marker, command = sys.argv[1:]
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+child = subprocess.Popen(["/bin/sh", "-c", command], start_new_session=True,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+try:
+    stdout, stderr = child.communicate(timeout=float(limit))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    stdout, stderr = child.communicate()
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    sys.stderr.write("\\n" + marker + "\\n")
+    raise SystemExit(124)
+sys.stdout.write(stdout)
+sys.stderr.write(stderr)
+raise SystemExit(child.returncode)
+"""
 
 
 class DistrictError(SystemExit):
     def __init__(self, msg: str) -> None:
         super().__init__(f"district: {msg}")
 
+
+class RemoteHostError(RuntimeError):
+    def __init__(self, host_name: str, detail: str) -> None:
+        self.host_name = host_name
+        self.detail = detail
+        super().__init__(f"host {host_name} unreachable: {detail}")
 
 def path() -> Path:
     base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
@@ -183,16 +220,20 @@ def select(data: dict, slug: str | None) -> dict[str, dict]:
 
 
 def run(argv: list[str], cwd: Path | None = None, check: bool = False, quiet: bool = False,
-        timeout: float | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+        timeout: float | None = None, env: dict[str, str] | None = None,
+        input: str | None = None) -> subprocess.CompletedProcess:
     if timeout is None:
-        proc = subprocess.run(argv, cwd=cwd, capture_output=True, text=True, check=False, env=env)
+        proc = subprocess.run(
+            argv, cwd=cwd, capture_output=True, text=True, check=False, env=env, input=input,
+        )
     else:
         # Collector deadlines cover the command's process group, not just its
         # Python wrapper: inherited output pipes can belong to a surviving child.
         with subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              stdin=subprocess.PIPE if input is not None else None,
                               text=True, start_new_session=True, env=env) as child:
             try:
-                stdout, stderr = child.communicate(timeout=timeout)
+                stdout, stderr = child.communicate(input=input, timeout=timeout)
             except BaseException:
                 try:
                     os.killpg(child.pid, signal.SIGKILL)
@@ -209,6 +250,201 @@ def run(argv: list[str], cwd: Path | None = None, check: bool = False, quiet: bo
     return proc
 
 
+class RemotePath:
+    def __init__(self, runner: RemoteRunner, value: str | PurePosixPath) -> None:
+        self.runner = runner
+        self.value = PurePosixPath(value)
+
+    def __truediv__(self, part: str) -> RemotePath:
+        return RemotePath(self.runner, self.value / part)
+
+    @property
+    def parent(self) -> RemotePath:
+        return RemotePath(self.runner, self.value.parent)
+
+    def __str__(self) -> str:
+        return str(self.value)
+
+    def __repr__(self) -> str:
+        return f"RemotePath({self.runner.name!r}, {str(self)!r})"
+
+    def __eq__(self, other: object) -> bool:
+        return str(self) == str(other)
+
+    def resolve(self) -> RemotePath:
+        return self
+
+    def exists(self) -> bool:
+        script = "import os,sys; raise SystemExit(not os.path.exists(sys.argv[1]))"
+        return self.runner(["python3", "-c", script, str(self)]).returncode == 0
+
+    def mkdir(self, parents: bool = False, exist_ok: bool = False) -> None:
+        script = "import pathlib,sys; pathlib.Path(sys.argv[1]).mkdir(parents=bool(int(sys.argv[2])), exist_ok=bool(int(sys.argv[3])))"
+        self.runner(
+            ["python3", "-c", script, str(self), str(int(parents)), str(int(exist_ok))],
+            check=True,
+        )
+
+    def read_text(self) -> str:
+        script = "import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
+        proc = self.runner(["python3", "-c", script, str(self)])
+        if proc.returncode:
+            raise OSError(proc.stderr.strip() or f"cannot read {self}")
+        return proc.stdout
+
+    def read_bytes(self) -> bytes:
+        script = "import base64,pathlib,sys; print(base64.b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode())"
+        proc = self.runner(["python3", "-c", script, str(self)])
+        if proc.returncode:
+            raise OSError(proc.stderr.strip() or f"cannot read {self}")
+        return base64.b64decode(proc.stdout)
+
+    def write_text(self, body: str) -> None:
+        script = (
+            "import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); "
+            "t=p.with_name('.'+p.name+'.district.tmp'); t.write_text(sys.stdin.read()); os.replace(t,p)"
+        )
+        self.runner(["python3", "-c", script, str(self)], input=body, check=True)
+
+    def write_bytes(self, body: bytes) -> None:
+        script = (
+            "import base64,os,pathlib,sys; p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); "
+            "t=p.with_name('.'+p.name+'.district.tmp'); t.write_bytes(base64.b64decode(sys.stdin.read())); os.replace(t,p)"
+        )
+        self.runner(
+            ["python3", "-c", script, str(self)],
+            input=base64.b64encode(body).decode(),
+            check=True,
+        )
+
+    def unlink(self, missing_ok: bool = False) -> None:
+        script = "import pathlib,sys; pathlib.Path(sys.argv[1]).unlink(missing_ok=bool(int(sys.argv[2])))"
+        self.runner(["python3", "-c", script, str(self), str(int(missing_ok))], check=True)
+
+
+class RemoteRunner:
+    def __init__(self, name: str, target: str, *, transport=run) -> None:
+        self.name = name
+        self.target = target
+        self.transport = transport
+        self._facts: dict | None = None
+
+    def __call__(self, argv: list[str], cwd: Path | RemotePath | None = None,
+                 check: bool = False, quiet: bool = False, timeout: float | None = None,
+                 env: dict[str, str] | None = None, input: str | None = None) -> subprocess.CompletedProcess:
+        print(f"{self.name}: $ {shlex.join(argv)}")
+        command = shlex.join(argv)
+        if env:
+            assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
+            command = f"env {assignments} {command}"
+        if cwd is not None:
+            command = f"cd {shlex.quote(str(cwd))} && {command}"
+        marker = None
+        if timeout is not None:
+            marker = f"district-timeout-{uuid.uuid4().hex}"
+            # Reserve time for connecting and returning the cleanup result within
+            # the controller's deadline. The remote watchdog must expire first.
+            limit = max(0, timeout - min(SSH_CONNECT_TIMEOUT, timeout / 2))
+            command = shlex.join(["python3", "-c", REMOTE_DEADLINE, str(limit), marker, command])
+        ssh = [
+            "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+            self.target, "--", command,
+        ]
+        try:
+            proc = self.transport(ssh, timeout=timeout, input=input)
+        except OSError as exc:
+            raise RemoteHostError(self.name, str(exc)) from exc
+        if marker and proc.returncode == 124 and marker in proc.stderr.splitlines():
+            raise subprocess.TimeoutExpired(argv, timeout, output=proc.stdout, stderr=proc.stderr)
+        if proc.returncode == 255:
+            detail = (proc.stderr or proc.stdout).strip().splitlines()
+            raise RemoteHostError(self.name, detail[-1] if detail else f"ssh exited {proc.returncode}")
+        result = subprocess.CompletedProcess(argv, proc.returncode, proc.stdout, proc.stderr)
+        if check and result.returncode:
+            if not quiet:
+                sys.stdout.write(result.stdout)
+                sys.stderr.write(result.stderr)
+            raise DistrictError(f"{self.name}: `{' '.join(argv)}` exited {result.returncode}")
+        return result
+
+    def facts(self) -> dict:
+        if self._facts is None:
+            script = (
+                "import json,os; from pathlib import Path; "
+                "home=Path.home(); config=Path(os.environ.get('XDG_CONFIG_HOME', home/'.config')); "
+                "print(json.dumps({'home':str(home),'config_home':str(config),'path':os.environ.get('PATH',''),"
+                "'uid':os.getuid()}))"
+            )
+            proc = self(["python3", "-c", script])
+            if proc.returncode:
+                raise DistrictError(
+                    f"{self.name}: cannot inspect remote host: "
+                    f"{(proc.stderr or proc.stdout).strip() or f'python3 exited {proc.returncode}'}"
+                )
+            try:
+                self._facts = json.loads(proc.stdout)
+            except (TypeError, ValueError) as exc:
+                raise DistrictError(f"{self.name}: remote host returned invalid environment details") from exc
+        return self._facts
+
+    def path(self, value: str | PurePosixPath) -> RemotePath:
+        return RemotePath(self, value)
+
+    def which(self, name: str, path: str) -> str | None:
+        script = "import shutil,sys; print(shutil.which(sys.argv[1], path=sys.argv[2]) or '')"
+        proc = self(["python3", "-c", script, name, path])
+        return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else None
+
+    @contextmanager
+    def temporary_directory(self):
+        proc = self(["mktemp", "-d", "-t", "district-engine-XXXXXX"], check=True)
+        directory = proc.stdout.strip()
+        if not directory:
+            raise DistrictError(f"{self.name}: mktemp returned no directory")
+        try:
+            yield self.path(directory)
+        finally:
+            self(["rm", "-rf", "--", directory])
+
+
+def remote_runner(name: str, table: dict) -> RemoteRunner:
+    return RemoteRunner(name, table["ssh"])
+
+
+def remote_config(data: dict, name: str) -> dict:
+    result = {}
+    defaults = copy.deepcopy(data.get("defaults", {}))
+    defaults.pop("engine", None)
+    engine = data["hosts"][name].get("engine")
+    if engine is not None:
+        defaults["engine"] = copy.deepcopy(engine)
+    if defaults:
+        result["defaults"] = defaults
+    tables = {}
+    for slug, table in repos(data).items():
+        if table.get("host", "local") == name:
+            tables[slug] = {key: copy.deepcopy(value) for key, value in table.items() if key != "host"}
+    if tables:
+        result["repo"] = tables
+    return result
+
+
+def sync_remote_config(data: dict, name: str, runner: RemoteRunner) -> None:
+    config = runner.path(PurePosixPath(runner.facts()["config_home"]) / "factory" / "config.toml")
+    config.write_text(tomli_w.dumps(remote_config(data, name)))
+
+
+def engine(data: dict, name: str) -> dict | None:
+    container = data.get("defaults", {}) if name == "local" else data.get("hosts", {}).get(name, {})
+    value = container.get("engine")
+    return value if isinstance(value, dict) else None
+
+
+def set_engine(data: dict, name: str, value: dict) -> None:
+    container = data.setdefault("defaults", {}) if name == "local" else data["hosts"][name]
+    container["engine"] = value
+
+
 def _service_run(argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
     return run(argv, check=check, quiet=True)
 
@@ -222,8 +458,20 @@ def service_backend(target: str | dict = "local", *, run=None, **kwargs) -> serv
     else:
         platform = None
     runner = _service_run if run is None else run
+    if isinstance(runner, RemoteRunner):
+        facts = runner.facts()
+        if platform == "linux":
+            kwargs.setdefault(
+                "unit_dir",
+                runner.path(PurePosixPath(facts["config_home"]) / "systemd" / "user"),
+            )
+        elif platform == "macos":
+            kwargs.setdefault("home", runner.path(facts["home"]))
+            kwargs.setdefault("uid", facts["uid"])
+            kwargs.setdefault("raw_path", facts["path"])
     if platform == "linux":
-        return service.SystemdUserBackend(runner, unit_dir=unit_dir(), **kwargs)
+        directory = kwargs.pop("unit_dir") if "unit_dir" in kwargs else unit_dir()
+        return service.SystemdUserBackend(runner, unit_dir=directory, **kwargs)
     if platform == "macos":
         return service.LaunchdBackend(runner, **kwargs)
     raise DistrictError(f"unsupported service platform: {platform!r}")

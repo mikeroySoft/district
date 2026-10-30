@@ -13,6 +13,7 @@ import contextlib
 import io
 import json
 import os
+import plistlib
 import re
 import subprocess
 import sys
@@ -50,6 +51,50 @@ for pat, out, rc in json.loads((here / "NAME.json").read_text()):
         sys.stdout.write(out)
         sys.exit(rc)
 sys.exit(0)
+'''
+
+FAKE_SSH = r'''#!/usr/bin/env python3
+import json, os, pathlib, subprocess, sys
+config = json.loads(pathlib.Path(os.environ["FAKE_SSH_CONFIG"]).read_text())
+args = sys.argv[1:]
+with pathlib.Path(config["log"]).open("a") as stream:
+    stream.write(json.dumps(args) + "\n")
+split = args.index("--")
+target = args[split - 1]
+if target in config["unreachable"]:
+    print(f"ssh: connect to host {target}: Connection refused", file=sys.stderr)
+    raise SystemExit(255)
+remote = config["targets"][target]
+env = dict(os.environ)
+env.update(HOME=remote["home"], XDG_CONFIG_HOME=str(pathlib.Path(remote["home"]) / ".config"),
+           PATH=remote.get("path", config["path"]))
+proc = subprocess.run(args[split + 1], shell=True, executable="/bin/sh", env=env,
+                      input=sys.stdin.read(), text=True, start_new_session=True)
+raise SystemExit(proc.returncode)
+'''
+
+FAKE_LAUNCHCTL = r'''#!/usr/bin/env python3
+import os, pathlib, sys
+args = sys.argv[1:]
+here = pathlib.Path(__file__).parent
+with (here / "launchctl.log").open("a") as stream:
+    stream.write(" ".join(args) + "\n")
+if args[:1] == ["bootout"]:
+    label = args[1].split("/", 2)[-1]
+    (pathlib.Path.home() / f"{label}.unloaded").touch()
+if args[:1] == ["bootstrap"]:
+    label = pathlib.Path(args[2]).stem
+    (pathlib.Path.home() / f"{label}.unloaded").unlink(missing_ok=True)
+if args[:1] == ["print"]:
+    label = args[1].split("/", 2)[-1]
+    if label.isdigit():
+        raise SystemExit(0)
+    path = pathlib.Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    if path.exists() and not (pathlib.Path.home() / f"{label}.unloaded").exists():
+        print("state = exited")
+        raise SystemExit(0)
+    raise SystemExit(3)
+raise SystemExit(0)
 '''
 
 DOCTOR = {"ok": True, "version": "0.2.0", "repo": "acme/widgets", "root": "", "rows": [
@@ -158,6 +203,31 @@ class HostRunTest(unittest.TestCase):
             time.sleep(0.3)
             self.assertFalse((root / "survived").exists(), "child kept working after timeout")
 
+    def test_remote_runner_uses_noninteractive_bounded_ssh_and_logs_the_command(self) -> None:
+        transport = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "ok\n", ""))
+        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            proc = runner(["printf", "%s", "a b"], cwd=Path("/remote/path with spaces"))
+
+        self.assertEqual(proc.stdout, "ok\n")
+        argv = transport.call_args.args[0]
+        self.assertEqual(argv[:7], [
+            "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={host.SSH_CONNECT_TIMEOUT}",
+            "factory@ultron.example", "--",
+        ])
+        self.assertEqual(argv[7], "cd '/remote/path with spaces' && printf %s 'a b'")
+        self.assertEqual(output.getvalue(), "ultron: $ printf %s 'a b'\n")
+
+    def test_remote_runner_preserves_command_timeout(self) -> None:
+        transport = mock.Mock(side_effect=subprocess.TimeoutExpired(["ssh"], 120))
+        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runner(["factory", "install"], timeout=120)
+
+
 
 class DistrictCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -189,6 +259,55 @@ class DistrictCase(unittest.TestCase):
     def calls(self, name: str) -> list[str]:
         log = self.bin / f"{name}.log"
         return [c.removeprefix("--user ") for c in log.read_text().splitlines()] if log.exists() else []
+
+    def fake_ssh(self, *targets: str, unreachable: tuple[str, ...] = ()) -> dict[str, Path]:
+        homes = {target: self.tmp / f"remote-{index}" for index, target in enumerate(targets)}
+        for home in homes.values():
+            home.mkdir()
+        config = {
+            "log": str(self.tmp / "ssh.log"),
+            "path": os.environ["PATH"],
+            "targets": {target: {"home": str(home)} for target, home in homes.items()},
+            "unreachable": list(unreachable),
+        }
+        config_path = self.tmp / "ssh.json"
+        config_path.write_text(json.dumps(config))
+        os.environ["FAKE_SSH_CONFIG"] = str(config_path)
+        ssh = self.bin / "ssh"
+        ssh.write_text(FAKE_SSH)
+        ssh.chmod(0o755)
+        launchctl = self.bin / "launchctl"
+        launchctl.write_text(FAKE_LAUNCHCTL)
+        launchctl.chmod(0o755)
+
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            "for pat, out, rc in",
+            'if args in ("install", "install --print"):\n'
+            '    import os, plistlib\n'
+            '    root = pathlib.Path.cwd()\n'
+            '    agents = pathlib.Path.home() / "Library" / "LaunchAgents"\n'
+            '    agents.mkdir(parents=True, exist_ok=True)\n'
+            '    unit = f"factory-{root.name}"\n'
+            '    for label, interval in ((unit, 600), (f"{unit}-dashboard", None)):\n'
+            '        doc = {"Label": label, "ProgramArguments": [str(here / "factory"), "dispatch"], '
+            '"WorkingDirectory": str(root), "EnvironmentVariables": {"PATH": os.environ["PATH"]}}\n'
+            '        if interval: doc["StartInterval"] = interval\n'
+            '        if args == "install --print":\n'
+            '            print(f"# {label}.plist\\n{plistlib.dumps(doc).decode()}", end="\\n")\n'
+            '        else:\n'
+            '            (agents / f"{label}.plist").write_bytes(plistlib.dumps(doc))\n'
+            "for pat, out, rc in",
+        ))
+        cases_path = self.bin / "factory.json"
+        cases = json.loads(cases_path.read_text())
+        cases.insert(0, ["--version", "factory 0.2.0\n", 0])
+        cases_path.write_text(json.dumps(cases))
+        return homes
+
+    def ssh_calls(self) -> list[list[str]]:
+        path = self.tmp / "ssh.log"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
     def repo(self, name: str = "widgets", toml: str | None = None, origin: str = "git@github.com:acme/widgets.git") -> Path:
         repo = self.tmp / name
@@ -628,17 +747,350 @@ class ApplyTest(DistrictCase):
         self.assertFalse(any(call.startswith(("disable ", "enable ", "start ", "stop ", "restart "))
                              for call in self.calls("systemctl")))
 
-    def test_remote_factory_is_skipped_without_commands(self) -> None:
+    def test_remote_apply_writes_config_and_runs_factory_through_fake_ssh(self) -> None:
+        target = "factory@ultron.example"
+        home = self.fake_ssh(target)[target]
+        repo = self.repo(toml="")
         host.save({
-            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
-            "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron", "dashboard": {"port": 8765}}},
+        })
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("acme/widgets  0.2.0  doctor WARN(1)", out)
+        remote = tomllib.loads((home / ".config/factory/config.toml").read_text())
+        self.assertEqual(set(remote["repo"]), {"acme/widgets"})
+        self.assertNotIn("host", remote["repo"]["acme/widgets"])
+        self.assertTrue((home / "Library/LaunchAgents/factory-widgets.plist").exists())
+        self.assertTrue(self.ssh_calls())
+        self.assertTrue(all(call[:5] == [
+            "-o", "BatchMode=yes", "-o", f"ConnectTimeout={host.SSH_CONNECT_TIMEOUT}", target,
+        ] for call in self.ssh_calls()))
+
+    def test_unreachable_host_fails_only_its_factories(self) -> None:
+        dead, live = "factory@dead.example", "factory@ultron.example"
+        homes = self.fake_ssh(dead, live, unreachable=(dead,))
+        repos = {name: self.repo(name, toml="") for name in ("offline", "widgets")}
+        host.save({
+            "hosts": {
+                "dead": {"ssh": dead, "platform": "macos"},
+                "ultron": {"ssh": live, "platform": "macos"},
+            },
+            "repo": {
+                "acme/offline": {"path": str(repos["offline"]), "host": "dead"},
+                "acme/widgets": {"path": str(repos["widgets"]), "host": "ultron"},
+            },
+        })
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("acme/offline: host dead unreachable: ssh: connect to host", out)
+        self.assertIn("acme/widgets  0.2.0  doctor WARN(1)", out)
+        self.assertFalse((homes[dead] / ".config/factory/config.toml").exists())
+        self.assertTrue((homes[live] / ".config/factory/config.toml").exists())
+
+    def test_remote_reachable_host_failure_does_not_skip_later_hosts(self) -> None:
+        broken, healthy = "factory@broken.example", "factory@healthy.example"
+        homes = self.fake_ssh(broken, healthy)
+        repos = {name: self.repo(name, toml="") for name in ("broken", "healthy")}
+        # The host can be inspected, but its config destination cannot be created.
+        (homes[broken] / ".config").write_text("not a directory")
+        host.save({
+            "hosts": {
+                "broken": {"ssh": broken, "platform": "macos"},
+                "healthy": {"ssh": healthy, "platform": "macos"},
+            },
+            "repo": {
+                f"acme/{name}": {"path": str(repo), "host": name}
+                for name, repo in repos.items()
+            },
+        })
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("acme/broken: host broken operation failed:", out)
+        self.assertNotIn("unreachable", out)
+        self.assertIn("acme/healthy  0.2.0  doctor WARN(1)", out)
+        self.assertTrue((homes[healthy] / ".config/factory/config.toml").exists())
+
+    def test_remote_unchanged_busy_units_still_run_doctor_and_failure_cap(self) -> None:
+        target = "factory@ultron.example"
+        self.fake_ssh(target)
+        repo = self.repo(toml="")
+        host.save({
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
         })
         code, out = self.district("apply")
         self.assertEqual(code, 0, out)
-        self.assertEqual(out.strip(), "acme/widgets: on host ultron (remote hosts not supported yet, #96)")
-        self.assertEqual(self.calls("factory"), [])
-        self.assertFalse(any(call.startswith(("disable ", "enable ", "start ", "stop ", "restart "))
+        (self.bin / "launchctl.log").write_text("")
+        launchctl = self.bin / "launchctl"
+        launchctl.write_text(launchctl.read_text().replace(
+            'print("state = exited")',
+            'print("state = running" if label == "factory-widgets" else "state = exited")',
+        ))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("deferred", out)
+        self.assertIn("acme/widgets  0.2.0  doctor WARN(1)", out)
+        self.assertFalse(any(call.startswith(("bootout ", "bootstrap "))
+                             for call in self.calls("launchctl")))
+        cases = self.bin / "factory.json"
+        cases.write_text(cases.read_text().replace(
+            '\\"consecutive_failures\\": 0', '\\"consecutive_failures\\": 10',
+        ))
+        # A busy job reaching the failure cap is checked, but never killed.
+        with mock.patch.object(apply, "DRAIN_TIMEOUT", 0.3):
+            code, out = self.district("apply")
+        self.assertEqual(code, 1, out)
+        self.assertIn("still running after", out)
+        self.assertNotIn("deferred", out)
+
+    def test_remote_systemd_plan_compares_installed_units(self) -> None:
+        target = "factory@linux.example"
+        home = self.fake_ssh(target)[target]
+        repo = self.repo(toml="")
+        host.save({
+            "hosts": {"linux": {"ssh": target, "platform": "linux"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "linux"}},
+        })
+        self.stub("factory", ("--version", "factory 0.2.0\n"),
+                  ("doctor --json", json.dumps(DOCTOR)),
+                  ("dashboard --json", json.dumps(dashboard())))
+        self.render_installed_units()
+        directory = home / ".config/systemd/user"
+        directory.mkdir(parents=True)
+        for suffix, body in (("service", f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=x\n"),
+                             ("timer", "[Timer]\nOnUnitActiveSec=10min\n")):
+            (directory / f"factory-widgets.{suffix}").write_text(body)
+        self.stub("systemctl", ("is-active *.service", "activating\n"),
+                  ("is-active *", "active\n"))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("doctor WARN(1)", out)
+        self.assertNotIn("deferred", out)
+        self.assertFalse(any(call.startswith(("disable ", "enable "))
                              for call in self.calls("systemctl")))
+
+    def test_remote_install_timeout_restores_timer_and_continues(self) -> None:
+        target = "factory@ultron.example"
+        home = self.fake_ssh(target)[target]
+        repos = {name: self.repo(name, toml="") for name in ("slow", "later")}
+        host.save({
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {f"acme/{name}": {"path": str(repo), "host": "ultron"}
+                     for name, repo in repos.items()},
+        })
+        code, out = self.district("apply")
+        self.assertEqual(code, 0, out)
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            'if args in ("install", "install --print"):',
+            'if args == "install" and pathlib.Path.cwd().name == "slow":\n'
+            '    import time\n'
+            '    (here / "slow-started").touch()\n'
+            '    time.sleep(2)\n'
+            '    (here / "slow-survived").touch()\n'
+            'if args in ("install", "install --print"):',
+        ))
+        plist = home / "Library/LaunchAgents/factory-slow.plist"
+        document = plistlib.loads(plist.read_bytes())
+        document["StartInterval"] = 999
+        plist.write_bytes(plistlib.dumps(document))
+        (self.bin / "launchctl.log").write_text("")
+
+        with mock.patch.object(apply, "DRAIN_TIMEOUT", 1.2):
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("acme/slow  0.2.0", out)
+        self.assertIn("install: timed out after 1.2s", out)
+        self.assertIn("acme/later  0.2.0", out)
+        self.assertNotIn("unreachable", out)
+        self.assertTrue((self.bin / "slow-started").exists())
+        self.assertTrue(any(call.startswith("bootout ") and call.endswith("/factory-slow")
+                            for call in self.calls("launchctl")))
+        self.assertTrue(any(call.startswith("bootstrap ") and call.endswith("/factory-slow.plist")
+                            for call in self.calls("launchctl")))
+        time.sleep(2)
+        self.assertFalse((self.bin / "slow-survived").exists(),
+                         "the remote install kept running after the timer was restored")
+
+    def test_remote_timeout_kills_detached_command_descendants(self) -> None:
+        target = "factory@ultron.example"
+        self.fake_ssh(target)
+        runner = host.RemoteRunner("ultron", target)
+        marker = self.tmp / "survived"
+        child = f"import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).touch()"
+        parent = f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child!r}]); time.sleep(3)"
+        started = time.monotonic()
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runner([sys.executable, "-c", parent], timeout=1.2)
+
+        self.assertLess(time.monotonic() - started, 1.8)
+        time.sleep(2)
+        self.assertFalse(marker.exists(), "remote descendants survived the SSH deadline")
+        result = runner(["sh", "-c", "exit 124"], timeout=1.2)
+        self.assertEqual(result.returncode, 124, "a command's own exit 124 is not a timeout")
+
+    def test_remote_timeout_kills_children_after_their_parent_exits(self) -> None:
+        target = "factory@ultron.example"
+        self.fake_ssh(target)
+        runner = host.RemoteRunner("ultron", target)
+        marker = self.tmp / "survived"
+        child = f"import time; from pathlib import Path; time.sleep(2); Path({str(marker)!r}).touch()"
+        parent = f"import subprocess,sys; subprocess.Popen([sys.executable,'-c',{child!r}])"
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runner([sys.executable, "-c", parent], timeout=1.2)
+
+        time.sleep(2)
+        self.assertFalse(marker.exists(), "orphaned remote child survived the deadline")
+
+    def test_remote_timeout_preserves_partial_output_without_a_newline(self) -> None:
+        target = "factory@ultron.example"
+        self.fake_ssh(target)
+        runner = host.RemoteRunner("ultron", target)
+        script = (
+            "import sys,time; print('output', end='', flush=True); "
+            "print('diagnostic', end='', file=sys.stderr, flush=True); time.sleep(2)"
+        )
+
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            runner([sys.executable, "-c", script], timeout=1.2)
+
+        self.assertEqual(raised.exception.output, "output")
+        self.assertIn("diagnostic", raised.exception.stderr)
+
+    def test_remote_engine_timeout_restores_timers_and_runs_repo_checks(self) -> None:
+        target = "factory@ultron.example"
+        self.fake_ssh(target)
+        repo = self.repo(toml="")
+        source = self.repo("engine")
+        host.save({
+            "defaults": {"factory_source": str(source)},
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
+        })
+        code, out = self.district("apply")
+        self.assertEqual(code, 0, out)
+        data = host.load()
+        data["defaults"]["factory_ref"] = "main"
+        host.save(data)
+        sha = "a" * 40
+        self.stub("git", ("remote get-url origin", "https://github.com/acme/factory.git\n"),
+                  ("ls-remote *", f"{sha}\trefs/heads/main\n"))
+        self.stub("gh", ("api *", json.dumps({"total_count": 1, "check_runs": [
+            {"status": "completed", "conclusion": "success"},
+        ]})))
+        uv = self.bin / "uv"
+        uv.write_text(uv.read_text().replace(
+            "for pat, out, rc in",
+            'if args.startswith("tool install"):\n'
+            '    import time\n'
+            '    time.sleep(2)\n'
+            '    (here / "engine-survived").touch()\n'
+            "for pat, out, rc in",
+        ))
+        (self.bin / "launchctl.log").write_text("")
+
+        with mock.patch.object(apply, "DRAIN_TIMEOUT", 1.2):
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(f"engine {sha[:12]} install timed out", out)
+        self.assertIn("acme/widgets  0.2.0  doctor WARN(1)", out)
+        self.assertNotIn("unreachable", out)
+        self.assertNotIn("engine", host.load()["hosts"]["ultron"])
+        self.assertTrue(any(call.startswith("bootstrap ") and call.endswith("/factory-widgets.plist")
+                            for call in self.calls("launchctl")))
+        time.sleep(2)
+        self.assertFalse((self.bin / "engine-survived").exists())
+
+    def test_remote_smoke_uses_each_units_baked_path(self) -> None:
+        target = "factory@ultron.example"
+        self.fake_ssh(target)
+        repo = self.repo(toml="")
+        host.save({
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
+        })
+        good = self.tmp / "unit-bin"
+        good.mkdir()
+        (good / "unit-helper").write_text("#!/bin/sh\nexit 0\n")
+        for binary in ("gh", "factory"):
+            (good / binary).write_text("#!/bin/sh\nexec unit-helper\n")
+        for exe in good.iterdir():
+            exe.chmod(0o755)
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            '"EnvironmentVariables": {"PATH": os.environ["PATH"]}',
+            f'"EnvironmentVariables": {{"PATH": {str(good)!r}}}',
+        ))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("smoke OK: gh, factory --version under 2 unit(s)", out)
+
+    def test_remote_install_normalizes_the_remote_service_path(self) -> None:
+        target = "factory@ultron.example"
+        home = self.fake_ssh(target)[target]
+        wrapper = home / ".local/bin"
+        tools = home / ".local/share/mise/installs/python/3/bin"
+        wrapper.mkdir(parents=True)
+        tools.mkdir(parents=True)
+        raw = f"{wrapper}:{tools}:{os.environ['PATH']}"
+        config = self.tmp / "ssh.json"
+        payload = json.loads(config.read_text())
+        payload["targets"][target]["path"] = raw
+        config.write_text(json.dumps(payload))
+        repo = self.repo(toml="")
+        host.save({
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
+        })
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        document = plistlib.loads((home / "Library/LaunchAgents/factory-widgets.plist").read_bytes())
+        self.assertEqual(document["EnvironmentVariables"]["PATH"],
+                         host.service_path(raw, home=home))
+
+    def test_remote_upgrade_uses_remote_uv_and_records_engine_per_host(self) -> None:
+        target = "factory@ultron.example"
+        self.fake_ssh(target)
+        repo = self.repo(toml="")
+        source = self.repo("engine")
+        (source / "VERSION").write_text("1\n")
+        self.git(source, "add", ".")
+        self.git(source, "commit", "-q", "-m", "engine")
+        sha = self.git(source, "rev-parse", "HEAD")
+        host.save({
+            "defaults": {"factory_source": str(source)},
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
+        })
+
+        code, out = self.district("apply", "--upgrade")
+
+        self.assertEqual(code, 0, out)
+        data = host.load()
+        self.assertEqual((data["hosts"]["ultron"]["engine"]["ref"],
+                          data["hosts"]["ultron"]["engine"]["sha"]), ("HEAD", sha))
+        self.assertNotIn("engine", data["defaults"])
+        self.assertTrue(any(call.startswith("tool install --reinstall --from ")
+                            for call in self.calls("uv")))
 
     def test_npm_day_conversion_and_policy_env(self) -> None:
         self.assertEqual((apply.npm_days("24h"), apply.npm_days("36h"), apply.npm_days("1h"), apply.npm_days("3d")), (1, 2, 1, 3))
@@ -1327,17 +1779,26 @@ class RmTest(DistrictCase):
         calls = self.calls("systemctl")
         self.assertLess(calls.index("disable --now factory-widgets.timer"), calls.index("daemon-reload"))
 
-    def test_remote_factory_is_not_removed(self) -> None:
-        data = {
-            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
-            "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
-        }
-        host.save(data)
+    def test_remote_factory_removes_launchd_agents_and_registry_entry(self) -> None:
+        target = "factory@ultron.example"
+        home = self.fake_ssh(target)[target]
+        repo = self.repo(toml="")
+        host.save({
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
+        })
+        code, applied = self.district("apply")
+        self.assertEqual(code, 0, applied)
+
         code, out = self.district("rm", "widgets")
+
         self.assertEqual(code, 0, out)
-        self.assertEqual(out.strip(), "acme/widgets: on host ultron (remote hosts not supported yet, #96)")
-        self.assertEqual(host.load(), data)
-        self.assertEqual(self.calls("systemctl"), [])
+        self.assertNotIn("repo", host.load())
+        self.assertFalse((home / "Library/LaunchAgents/factory-widgets.plist").exists())
+        self.assertFalse((home / "Library/LaunchAgents/factory-widgets-dashboard.plist").exists())
+        remote = tomllib.loads((home / ".config/factory/config.toml").read_text())
+        self.assertNotIn("repo", remote)
+        self.assertIn("removed acme/widgets", out)
 
 
 class DoctorTest(DistrictCase):
