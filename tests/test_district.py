@@ -1657,7 +1657,7 @@ class StatusTest(DistrictCase):
 
     def test_mixed_local_remote_and_unreachable_host(self) -> None:
         live, dead = "factory@ultron.example", "factory@dead.example"
-        self.fake_ssh(live, dead, unreachable=(dead,))
+        self.fake_ssh(live, dead)
         repos = {name: self.repo(name, toml="") for name in ("local", "remote", "offline")}
         host.save({
             "hosts": {
@@ -1670,6 +1670,13 @@ class StatusTest(DistrictCase):
                 "acme/offline": {"path": str(repos["offline"]), "host": "dead"},
             },
         })
+        _, first_out = self.district("status", "--json")
+        first_seen = json.loads(first_out)["acme/offline"]["host_last_seen"]
+        self.assertIsNotNone(first_seen)
+        ssh_config = self.tmp / "ssh.json"
+        config = json.loads(ssh_config.read_text())
+        config["unreachable"] = [dead]
+        ssh_config.write_text(json.dumps(config))
 
         code, out = self.district("status", "--json")
 
@@ -1681,7 +1688,7 @@ class StatusTest(DistrictCase):
         self.assertEqual(entries["acme/remote"]["host_state"], "reachable")
         self.assertEqual(entries["acme/offline"]["host"], "dead")
         self.assertEqual(entries["acme/offline"]["host_state"], "unreachable")
-        self.assertIsNone(entries["acme/offline"]["host_last_seen"])
+        self.assertEqual(entries["acme/offline"]["host_last_seen"], first_seen)
         self.assertIn("Connection refused", entries["acme/offline"]["host_error"])
 
         text_code, text = self.district("status")
@@ -1689,7 +1696,13 @@ class StatusTest(DistrictCase):
         self.assertIn("host", text.splitlines()[0])
         self.assertRegex(text, r"acme/local\s+local")
         self.assertRegex(text, r"acme/remote\s+ultron")
-        self.assertIn("dead (unreachable; last seen never)", text)
+        self.assertIn("dead (unreachable; last seen ", text)
+        self.assertNotIn("last seen never", text)
+
+        report_code, report_text = self.district("report")
+        self.assertEqual(report_code, 2, report_text)
+        self.assertIn("- Host: dead (unreachable; last seen ", report_text)
+        self.assertNotIn("last seen never", report_text)
 
     def test_remote_probe_timeout_marks_host_unreachable(self) -> None:
         data = {
