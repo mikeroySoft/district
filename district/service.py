@@ -46,6 +46,14 @@ class ServiceStatus:
     def loaded(self) -> bool:
         return self.load_state == "loaded"
 
+@dataclass(frozen=True)
+class ScheduledJobStatus:
+    unit_file_state: str
+    active_state: str
+    service_active_state: str
+    last_trigger: str = ""
+    next_trigger: str = ""
+
 
 @dataclass(frozen=True)
 class LogLocation:
@@ -91,6 +99,12 @@ class ServiceBackend(ABC):
 
     @abstractmethod
     def status(self, name: str) -> ServiceStatus:
+        raise NotImplementedError
+
+    @abstractmethod
+    def scheduled_jobs(
+        self, names: set[str], *, timeout: float | None = None,
+    ) -> Mapping[str, ScheduledJobStatus]:
         raise NotImplementedError
 
     @abstractmethod
@@ -188,6 +202,15 @@ def _exec_start(raw: str) -> tuple[str, ...] | None:
     return argv if argv and argv[0] == match[1] else None
 
 
+def _show_blocks(output: str) -> dict[str, dict[str, str]]:
+    result = {}
+    for raw in output.strip().split("\n\n") if output.strip() else []:
+        values = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
+        if values.get("Id"):
+            result[values["Id"]] = values
+    return result
+
+
 class SystemdUserBackend(ServiceBackend):
     def __init__(self, run: Runner, *, unit_dir: Path, executable: str = "systemctl") -> None:
         self.run = run
@@ -207,8 +230,12 @@ class SystemdUserBackend(ServiceBackend):
         )
 
 
-    def _run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:
-        return self.run([self.executable, "--user", *args], check=check)
+    def _run(self, *args: str, check: bool = True,
+             timeout: float | None = None) -> subprocess.CompletedProcess:
+        argv = [self.executable, "--user", *args]
+        if timeout is None:
+            return self.run(argv, check=check)
+        return self.run(argv, check=check, timeout=timeout)
 
     @staticmethod
     def _service(definition: ServiceDefinition) -> str:
@@ -319,6 +346,32 @@ class SystemdUserBackend(ServiceBackend):
             load, active, enabled, int(pid) if pid.isdigit() else 0,
             _exec_start(raw) if raw else file_argv, environment,
         )
+
+    def scheduled_jobs(self, names: set[str], *,
+                       timeout: float | None = None) -> dict[str, ScheduledJobStatus]:
+        timers = set(names)
+        try:
+            timers.update(path.name for path in self.unit_dir.glob("factory-*.timer"))
+        except OSError:
+            pass
+        ordered = sorted(timers)
+        services = [name.removesuffix(".timer") + ".service" for name in ordered]
+        properties = "Id,UnitFileState,ActiveState,LastTriggerUSec,NextElapseUSecRealtime"
+        proc = self._run(
+            "show", *ordered, *services, f"--property={properties}", check=False, timeout=timeout,
+        )
+        blocks = _show_blocks(proc.stdout)
+        result = {}
+        for name, service in zip(ordered, services):
+            timer = blocks.get(name, {})
+            result[name] = ScheduledJobStatus(
+                timer.get("UnitFileState", ""),
+                timer.get("ActiveState", ""),
+                blocks.get(service, {}).get("ActiveState", ""),
+                timer.get("LastTriggerUSec", ""),
+                timer.get("NextElapseUSecRealtime", ""),
+            )
+        return result
 
     def logs(self, label: str, root: Path) -> LogLocation:
         command = f"journalctl --user -u {shlex.quote(label)}.service"
@@ -526,6 +579,31 @@ class LaunchdBackend(ServiceBackend):
         return ServiceStatus(
             "loaded", active, "enabled", int(pid_match.group(1)) if pid_match else 0, command, environment,
         )
+
+    def scheduled_jobs(self, names: set[str], *,
+                       timeout: float | None = None) -> dict[str, ScheduledJobStatus]:
+        timers = set(names)
+        try:
+            paths = self.agent_dir.glob("factory-*.plist")
+            for path in paths:
+                try:
+                    document = plistlib.loads(path.read_bytes())
+                except (OSError, plistlib.InvalidFileException):
+                    continue
+                if "StartInterval" in document:
+                    timers.add(f"{path.stem}.timer")
+        except OSError:
+            pass
+        result = {}
+        for name in sorted(timers):
+            timer = self.status(name)
+            service = self.status(name.removesuffix(".timer") + ".service")
+            result[name] = ScheduledJobStatus(
+                timer.unit_file_state,
+                timer.active_state,
+                service.active_state,
+            )
+        return result
 
     def is_active(self, name: str) -> str:
         return self.status(name).active_state
