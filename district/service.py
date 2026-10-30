@@ -603,6 +603,8 @@ class LaunchdBackend(ServiceBackend):
         deadline = time.monotonic() + timeout if timeout is not None else None
         for name in sorted(timers):
             remaining = None if deadline is None else max(0, deadline - time.monotonic())
+            if remaining is not None and remaining <= 0:
+                break
             status = self.status(name.removesuffix(".timer") + ".service", timeout=remaining)
             result[name] = ScheduledJobStatus(
                 unit_file_state=status.unit_file_state,

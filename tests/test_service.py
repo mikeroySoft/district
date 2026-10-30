@@ -258,6 +258,23 @@ class LaunchdBackendTest(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 backend.start("factory-widgets.service", check=False, timeout=0)
 
+    def test_scheduled_job_deadline_preserves_completed_reads(self) -> None:
+        def run(argv: list[str], *, check: bool = False,
+                timeout: float | None = None) -> subprocess.CompletedProcess:
+            if timeout == 0:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            return subprocess.CompletedProcess(argv, 0, "state = running\npid = 4242\n", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            backend = self.backend(run, Path(directory))
+            with mock.patch.object(service.time, "monotonic", side_effect=[0, 0.5, 2]):
+                states = backend.scheduled_jobs(
+                    {"factory-a.timer", "factory-b.timer"}, timeout=1,
+                )
+
+        self.assertEqual(set(states), {"factory-a.timer"})
+        self.assertEqual(states["factory-a.timer"].service_active_state, "active")
+
     def test_doctor_reports_service_manager_failures_instead_of_raising(self) -> None:
         def failed(argv: list[str], *, check: bool = False, **_: object) -> subprocess.CompletedProcess:
             proc = subprocess.CompletedProcess(argv, 1, "", "cannot connect to bus")
