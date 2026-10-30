@@ -1164,6 +1164,24 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("smoke FAIL factory-widgets.service: gh", out)
         self.assertNotIn("smoke OK", out)
 
+    def test_remote_smoke_uses_installed_unit_path(self) -> None:
+        proc = lambda stdout="": subprocess.CompletedProcess([], 0, stdout, "")
+        transport = mock.Mock(side_effect=[
+            proc("/unit/bin/gh\n"), proc(),
+            proc("/unit/bin/factory\n"), proc(),
+        ])
+        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
+        loaded = mock.Mock(loaded=True, environment={"PATH": "/unit/bin"})
+        missing = mock.Mock(loaded=False)
+        backend = mock.Mock()
+        backend.status.side_effect = lambda name: missing if "-dashboard" in name else loaded
+
+        self.assertEqual(apply.smoke(["acme/widgets"], backend, run_cmd=runner), (1, []))
+        commands = [call.args[0][7] for call in transport.call_args_list]
+        self.assertIn("env PATH=/unit/bin /unit/bin/gh --version", commands)
+        self.assertIn("env PATH=/unit/bin /unit/bin/factory --version", commands)
+
+
     def test_failure_cap(self) -> None:
         self.register(failures=9)
         code, out = self.district("apply")
@@ -1824,6 +1842,15 @@ class RmTest(DistrictCase):
         remote = tomllib.loads((home / ".config/factory/config.toml").read_text())
         self.assertNotIn("repo", remote)
         self.assertIn("removed acme/widgets", out)
+
+    def test_unknown_remote_host_is_a_district_error(self) -> None:
+        host.save({"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}})
+
+        code, out = self.district("rm", "widgets")
+
+        self.assertEqual(code, 1)
+        self.assertIn("acme/widgets: host 'missing' is not defined in [hosts]", out)
+
 
 
 class DoctorTest(DistrictCase):
