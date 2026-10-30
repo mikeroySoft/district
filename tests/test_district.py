@@ -1691,6 +1691,20 @@ class StatusTest(DistrictCase):
         self.assertRegex(text, r"acme/remote\s+ultron")
         self.assertIn("dead (unreachable; last seen never)", text)
 
+    def test_remote_probe_timeout_marks_host_unreachable(self) -> None:
+        data = {
+            "hosts": {"slow": {"ssh": "factory@slow.example", "platform": "linux"}},
+            "repo": {"acme/widgets": {"path": "/x", "host": "slow"}},
+        }
+        timeout = subprocess.TimeoutExpired(["ssh"], status.COLLECTION_TIMEOUT)
+        with mock.patch.object(host, "remote_runner",
+                               return_value=mock.Mock(side_effect=timeout)):
+            entries = status.fleet(data)
+
+        self.assertEqual(entries["acme/widgets"]["host_state"], "unreachable")
+        self.assertIn("timed out", entries["acme/widgets"]["host_error"])
+
+
     def test_unknown_factory_host_fails_before_collection(self) -> None:
         host.save({"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}})
         code, out = self.district("status")
