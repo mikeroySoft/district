@@ -97,6 +97,38 @@ class FleetCollectorTest(unittest.TestCase):
         self.assertEqual(entry["executions"][0]["id"], "acme/fast/worker")
         self.assertNotIn("execution telemetry unavailable", entry["unknowns"])
 
+    def test_one_shot_collection_caps_total_workers(self):
+        active = maximum = 0
+        lock = threading.Lock()
+        data = {
+            "hosts": {
+                f"h{index}": {"ssh": f"factory@h{index}.example", "platform": "linux"}
+                for index in range(3)
+            },
+            "repo": {
+                f"acme/repo-{index}": {"path": f"/repo-{index}", "host": f"h{index // 4}"}
+                for index in range(12)
+            },
+        }
+
+        def collect_runtime(_collector, _slug):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        with mock.patch.object(host, "remote_runner", return_value=runner), \
+             mock.patch.object(status.FleetCollector, "collect_runtime", collect_runtime), \
+             mock.patch.object(status.FleetCollector, "collect_full", return_value=None):
+            status.fleet(data)
+
+        self.assertLessEqual(maximum, status.COLLECTION_CONCURRENCY)
+
+
     def test_bounded_history_does_not_invalidate_complete_current_evidence(self):
         data = runtime("acme/fast", errors=[
             {"source": "events.jsonl", "scope": "history", "code": "event_limit"}])
