@@ -157,6 +157,7 @@ class FleetCollectorTest(unittest.TestCase):
         self.assertEqual(stale["host_last_seen"], first["host_last_seen"])
         self.assertIn("connection refused", stale["host_error"])
         self.assertEqual(stale["executions"][0]["id"], "acme/fast/worker")
+
     def test_filtered_collection_preserves_other_hosts_last_seen(self):
         state = status._host_state_path()
         state.parent.mkdir(parents=True)
@@ -393,6 +394,22 @@ class FleetCollectorTest(unittest.TestCase):
             item = collector.read()[1]
             self.assertEqual(item["acme/fast"]["operating_state"], "running")
             self.assertEqual(item["acme/slow"]["executions"], [])
+
+    def test_new_registry_host_uses_saved_last_seen(self):
+        state = status._host_state_path()
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"new": STAMP}))
+        collector = status.FleetCollector({"repo": {"acme/fast": self.tables["acme/fast"]}})
+        updated = {
+            "hosts": {"new": {"ssh": "factory@new.example", "platform": "linux"}},
+            "repo": {"acme/new": {"path": "/new", "host": "new"}},
+        }
+
+        with mock.patch.object(status.host, "load", return_value=updated):
+            collector.refresh_registry()
+
+        self.assertEqual(collector.read()[1]["acme/new"]["host_last_seen"], STAMP)
+
 
     def test_slow_reader_does_not_block_publication_and_keeps_coherent_revision(self):
         collector = status.FleetCollector({"repo": {"acme/fast": self.tables["acme/fast"]}})

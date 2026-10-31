@@ -118,6 +118,7 @@ def _save_host_last_seen(value: dict[str, str]) -> bool:
     path = _host_state_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        value = {**_load_host_last_seen(), **value}
         temporary = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         temporary.write_text(json.dumps(value, sort_keys=True) + "\n")
         os.replace(temporary, path)
@@ -388,6 +389,8 @@ class FleetCollector:
                 for slug, table in repos.items()
             }
             names = {table.get("host", "local") for table in repos.values()}
+            saved = _load_host_last_seen()
+            self._last_seen.update({name: saved[name] for name in names if name in saved})
             self._hosts = {name: self._hosts.get(name, self._new_host(self._last_seen.get(name)))
                            for name in names}
             self._runners = {}
