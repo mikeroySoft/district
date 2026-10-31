@@ -584,24 +584,24 @@ def fleet(data: dict) -> dict[str, dict]:
         collector.collect_runtime(slug)
         collector.collect_full(slug)
 
-    def collect_host(group: tuple[str, list[str]]) -> None:
+    def probe_host(group: tuple[str, list[str]]) -> list[str]:
         name, slugs = group
-        if name != "local":
-            try:
-                collector._runner(name)(["true"], timeout=collector.timeout, quiet=True)
-                collector._host_success(name)
-            except (host.RemoteHostError, subprocess.TimeoutExpired) as exc:
-                collector.mark_unreachable(name, str(exc))
-                return
-        with ThreadPoolExecutor(max_workers=min(len(slugs), collector.concurrency)) as pool:
-            for _ in pool.map(collect, slugs):
-                pass
+        if name == "local":
+            return slugs
+        try:
+            collector._runner(name)(["true"], timeout=collector.timeout, quiet=True)
+            collector._host_success(name)
+        except (host.RemoteHostError, subprocess.TimeoutExpired) as exc:
+            collector.mark_unreachable(name, str(exc))
+            return []
+        return slugs
 
     groups: dict[str, list[str]] = {}
     for slug, table in collector.repos.items():
         groups.setdefault(table.get("host", "local"), []).append(slug)
-    with ThreadPoolExecutor(max_workers=min(len(groups), collector.concurrency)) as pool:
-        for _ in pool.map(collect_host, groups.items()):
+    with ThreadPoolExecutor(max_workers=collector.concurrency) as pool:
+        slugs = [slug for group in pool.map(probe_host, groups.items()) for slug in group]
+        for _ in pool.map(collect, slugs):
             pass
     return collector.fleet()
 
