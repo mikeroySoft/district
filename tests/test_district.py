@@ -285,48 +285,35 @@ class DistrictCase(unittest.TestCase):
         return [c.removeprefix("--user ") for c in log.read_text().splitlines()] if log.exists() else []
 
     def fake_remote_transport(self, logical_home: str = "/Users/mike"):
-        actual_home = self.tmp / "remote"
-        actual_home.mkdir()
+        target = "factory@ultron.example"
+        actual_home = self.fake_ssh(target)[target]
+        self.stub("pytest", ("--version", "pytest 9.0\n"))
         commands: list[str] = []
+        gh = self.bin / "gh"
+        gh.write_text(gh.read_text().replace(
+            "for pat, out, rc in",
+            'if sys.argv[1:3] == ["repo", "clone"]:\n'
+            '    import subprocess\n'
+            '    destination = pathlib.Path(sys.argv[4])\n'
+            '    destination.mkdir(parents=True)\n'
+            '    subprocess.run(["git", "-C", str(destination), "init", "-q"], check=True)\n'
+            '    slug = sys.argv[3].removeprefix("https://github.com/").removesuffix(".git")\n'
+            '    subprocess.run(["git", "-C", str(destination), "remote", "add", "origin", '
+            '"https://github.com/" + slug + ".git"], check=True)\n'
+            '    (destination / "pyproject.toml").write_text('
+            '\'[project]\\nname = "remote-fixture"\\ndependencies = ["pytest"]\\n\')\n'
+            '    sys.exit(0)\n'
+            "for pat, out, rc in",
+        ))
 
-        def transport(argv: list[str], timeout: float | None = None,
-                      input: str | None = None) -> subprocess.CompletedProcess:
-            command = argv[-1]
+        def transport(argv, **kwargs):
+            command = remote_command(argv)
             commands.append(command)
-            if "print(json.dumps({'home':str(home)" in command:
-                facts = {
-                    "home": logical_home,
-                    "config_home": f"{logical_home}/.config",
-                    "path": os.environ["PATH"],
-                    "uid": os.getuid(),
-                }
-                return subprocess.CompletedProcess(argv, 0, json.dumps(facts) + "\n", "")
-            parts = shlex.split(command)
-            if parts[:3] == ["gh", "repo", "clone"]:
-                destination = Path(parts[4].replace(logical_home, str(actual_home)))
-                destination.mkdir(parents=True)
-                subprocess.run(["git", "-C", str(destination), "init", "-q"], check=True)
-                subprocess.run([
-                    "git", "-C", str(destination), "remote", "add", "origin",
-                    f"https://github.com/{parts[3]}.git",
-                ], check=True)
-                (destination / "pyproject.toml").write_text(
-                    '[project]\nname = "remote-fixture"\ndependencies = ["pytest"]\n'
-                )
-                return subprocess.CompletedProcess(argv, 0, "", "")
-            env = dict(os.environ, HOME=str(actual_home),
-                       XDG_CONFIG_HOME=str(actual_home / ".config"))
-            proc = subprocess.run(
-                command.replace(logical_home, str(actual_home)),
-                shell=True,
-                executable="/bin/sh",
-                env=env,
-                input=input,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
+            mapped = [*argv[:-1], shlex.join(["sh", "-c", command.replace(logical_home, str(actual_home))])]
+            proc = host.run(mapped, quiet=True, **kwargs)
+            return subprocess.CompletedProcess(
+                argv, proc.returncode, proc.stdout.replace(str(actual_home), logical_home), proc.stderr,
             )
-            return subprocess.CompletedProcess(argv, proc.returncode, proc.stdout, proc.stderr)
 
         return transport, actual_home, commands
 
@@ -737,6 +724,39 @@ class AddTest(DistrictCase):
         self.assertNotIn("install", self.calls("factory"))
         self.assertFalse(any("bootstrap" in call for call in self.calls("launchctl")))
 
+    def test_add_remote_existing_path_is_checked_on_remote_host(self) -> None:
+        target = "factory@ultron.example"
+        host.save({"hosts": {"ultron": {"ssh": target, "platform": "macos"}}})
+        transport, remote_home, commands = self.fake_remote_transport()
+        repo = remote_home / "projects/widgets"
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        subprocess.run([
+            "git", "-C", str(repo), "remote", "add", "origin",
+            "https://github.com/acme/widgets.git",
+        ], check=True)
+        original = '# keep this gate and its comment\n[[gate.check]]\nname = "tests"\nrun = ["python3", "-m", "unittest"]\n'
+        (repo / ".factory.toml").write_text(original)
+        runner = host.RemoteRunner("ultron", target, transport=transport)
+
+        with mock.patch.object(host, "remote_runner", return_value=runner):
+            add.main(["~/projects/widgets", "--host", "ultron", "--no-edit"])
+
+        table = host.load()["repo"]["acme/widgets"]
+        self.assertEqual(table["path"], "/Users/mike/projects/widgets")
+        self.assertEqual(table["host"], "ultron")
+        self.assertTrue(any(
+            "os.path.exists" in command and "/Users/mike/projects/widgets/.git" in command
+            for command in commands
+        ))
+        self.assertEqual((repo / ".factory.toml").read_text(), original)
+        self.assertIn("init --labels-only", self.calls("factory"))
+        self.assertNotIn("install", self.calls("factory"))
+        self.assertFalse(any("bootstrap" in call for call in self.calls("launchctl")))
+        remote_config = tomllib.loads((remote_home / ".config/factory/config.toml").read_text())
+        self.assertEqual(remote_config["repo"]["acme/widgets"]["path"], "/Users/mike/projects/widgets")
+        self.assertNotIn("host", remote_config["repo"]["acme/widgets"])
+
     def test_add_slug_with_remote_host_clones_on_that_host(self) -> None:
         target = "factory@ultron.example"
         host.save({"hosts": {"ultron": {
@@ -758,6 +778,44 @@ class AddTest(DistrictCase):
         self.assertTrue((remote_home / "factories/benito-app/.factory.toml").exists())
         self.assertFalse((Path(os.environ["HOME"]) / "factories/benito-app").exists())
         self.assertFalse((Path.cwd() / "mikeroySoft-org/benito-app").exists())
+
+    def test_add_remote_dry_run_prints_remote_destination_and_writes_nothing(self) -> None:
+        target = "factory@ultron.example"
+        host.save({"hosts": {"ultron": {
+            "ssh": target,
+            "platform": "macos",
+            "root": "~/factories",
+        }}})
+        transport, remote_home, commands = self.fake_remote_transport()
+        runner = host.RemoteRunner("ultron", target, transport=transport)
+
+        with mock.patch.object(host, "remote_runner", return_value=runner):
+            code, out = self.district(
+                "add", "mikeroySoft-org/benito-app", "--host", "ultron", "--dry-run",
+            )
+
+        self.assertEqual(code, 0, out)
+        self.assertIn(
+            "would clone mikeroySoft-org/benito-app -> /Users/mike/factories/benito-app",
+            out,
+        )
+        self.assertNotIn("repo", host.load())
+        self.assertFalse((remote_home / "factories").exists())
+        self.assertFalse((remote_home / ".config").exists())
+        self.assertFalse(any(command.startswith("gh repo clone ") for command in commands))
+
+    def test_add_remote_unreachable_host_registers_nothing(self) -> None:
+        target = "factory@ultron.example"
+        host.save({"hosts": {"ultron": {"ssh": target, "platform": "macos"}}})
+
+        self.fake_ssh(target, unreachable=(target,))
+        code, out = self.district(
+            "add", "mikeroySoft-org/benito-app", "--host", "ultron", "--no-edit",
+        )
+
+        self.assertEqual(code, 1)
+        self.assertIn("host ultron unreachable", out)
+        self.assertNotIn("repo", host.load())
 
     def test_add_rejects_unknown_host_before_touching_repo(self) -> None:
         repo = self.repo(toml="")

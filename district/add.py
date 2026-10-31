@@ -16,7 +16,7 @@ import shlex
 import subprocess
 import sys
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import tomli_w
 
@@ -127,8 +127,8 @@ def lift(text: str) -> tuple[str, dict]:
 # ---------------------------------------------------------------- detection
 
 
-def doctor(root: Path) -> dict:
-    proc = run(["factory", "doctor", "--json"], cwd=root)
+def doctor(root: Path | host.RemotePath, run_cmd=run) -> dict:
+    proc = run_cmd(["factory", "doctor", "--json"], cwd=root)
     try:
         return json.loads(proc.stdout)
     except ValueError:
@@ -137,8 +137,8 @@ def doctor(root: Path) -> dict:
         raise DistrictError(f"`factory doctor --json` in {root} produced no report (exit {proc.returncode})") from None
 
 
-def gh_json(*args: str) -> dict:
-    proc = run(["gh", *args], check=True)
+def gh_json(*args: str, run_cmd=run) -> dict:
+    proc = run_cmd(["gh", *args], check=True)
     return json.loads(proc.stdout)
 
 
@@ -148,29 +148,29 @@ def remote_slug(url: str) -> str | None:
     return url.rsplit("github.com", 1)[-1].strip(":/").removesuffix(".git").lower()
 
 
-def remotes(root: Path) -> dict[str, str]:
+def remotes(root: Path | host.RemotePath, run_cmd=run) -> dict[str, str]:
     out = {}
-    for line in run(["git", "remote", "-v"], cwd=root, check=True).stdout.splitlines():
+    for line in run_cmd(["git", "remote", "-v"], cwd=root, check=True).stdout.splitlines():
         name, url, *_ = line.split()
         out.setdefault(name, url)
     return out
 
 
-def ensure_upstream(root: Path, parent: str) -> str:
+def ensure_upstream(root: Path | host.RemotePath, parent: str, run_cmd=run) -> str:
     """Name of the remote pointing at `parent`, adding `upstream` if none does."""
-    have = remotes(root)
+    have = remotes(root, run_cmd)
     for name, url in have.items():
         if remote_slug(url) == parent.lower():
             return name
     if "upstream" in have:
         raise DistrictError(f"remote `upstream` is {have['upstream']}, not the parent {parent}; fix it and re-run")
-    run(["git", "remote", "add", "upstream", f"https://github.com/{parent}.git"], cwd=root, check=True)
+    run_cmd(["git", "remote", "add", "upstream", f"https://github.com/{parent}.git"], cwd=root, check=True)
     print(f"added remote upstream -> https://github.com/{parent}.git")
     return "upstream"
 
 
-def fork_parent(slug: str) -> str | None:
-    info = gh_json("repo", "view", slug, "--json", "isFork,parent")
+def fork_parent(slug: str, run_cmd=run) -> str | None:
+    info = gh_json("repo", "view", slug, "--json", "isFork,parent", run_cmd=run_cmd)
     parent = (info.get("parent") or {}) if info.get("isFork") else {}
     # gh 2.x returns {name, owner:{login}}; older builds returned nameWithOwner
     return parent.get("nameWithOwner") or (f"{parent['owner']['login']}/{parent['name']}" if parent.get("owner") else None)
@@ -184,11 +184,11 @@ WORKFLOW_COMMANDS = {
 }
 
 
-def workflow_runs(root: Path) -> list[tuple[Path, int, str, str]]:
+def workflow_runs(root: Path | host.RemotePath) -> list[tuple[Path | PurePosixPath, int, str, str]]:
     """Allowed commands from GitHub Actions run steps."""
     runs = []
     workflows = root / ".github" / "workflows"
-    paths = sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml"))) if workflows.is_dir() else []
+    paths = sorted((*workflows.glob("*.yml"), *workflows.glob("*.yaml")), key=str) if workflows.is_dir() else []
     for path in paths:
         lines = path.read_text().splitlines()
         i = 0
@@ -263,7 +263,7 @@ def workflow_runs(root: Path) -> list[tuple[Path, int, str, str]]:
     return runs
 
 
-def propose_checks(root: Path) -> list[dict]:
+def propose_checks(root: Path | host.RemotePath) -> list[dict]:
     """Gate checks derivable from CI and marker files; each names its source."""
     checks = []
     seen_runs: set[tuple[str, ...]] = set()
@@ -339,9 +339,14 @@ def installed_units(unit: str) -> dict:
 # ---------------------------------------------------------------- main
 
 
-def clone_destination(target: str, data: dict) -> Path:
+def clone_destination(target: str, data: dict, runner: host.RemoteRunner | None = None,
+                      host_name: str | None = None) -> Path | host.RemotePath:
     name = target.rstrip("/").rsplit("/", 1)[-1].removesuffix(".git")
-    return Path(os.path.expanduser(host.default(data, "clone_dir"))) / name
+    parent = host.default(data, "clone_dir")
+    if runner is None:
+        return Path(os.path.expanduser(parent)) / name
+    parent = host.hosts(data)[host_name].get("root", parent)
+    return remote_path(str(PurePosixPath(parent) / name), runner)
 
 
 def dashboard_port(slug: str, existing: dict, data: dict) -> int:
@@ -351,20 +356,54 @@ def dashboard_port(slug: str, existing: dict, data: dict) -> int:
     return port if port and port not in used else host.next_port(data)
 
 
-def resolve_target(arg: str, data: dict) -> Path:
-    if "://" in arg or arg.startswith("git@"):
+def target_slug(target: str) -> str | None:
+    if slug := remote_slug(target):
+        return slug
+    if target.startswith(("/", "~", ".")):
+        return None
+    parts = target.strip("/").split("/")
+    return target.lower() if len(parts) == 2 and all(parts) else None
+
+
+def remote_path(arg: str, runner: host.RemoteRunner) -> host.RemotePath:
+    home = PurePosixPath(runner.facts()["home"])
+    if arg == "~":
+        value = home
+    elif arg.startswith("~/"):
+        value = home / arg[2:]
+    else:
+        value = PurePosixPath(arg)
+        if not value.is_absolute():
+            value = home / value
+    return runner.path(value)
+
+
+def resolve_target(arg: str, data: dict, runner: host.RemoteRunner | None = None,
+                   host_name: str | None = None) -> Path | host.RemotePath:
+    if runner is not None:
+        if target_slug(arg):
+            dest = clone_destination(arg, data, runner, host_name)
+            if not dest.exists():
+                runner(["gh", "repo", "clone", arg, str(dest)], check=True)
+                print(f"cloned {arg} -> {dest}")
+            root = dest
+        else:
+            root = remote_path(arg, runner)
+    elif "://" in arg or arg.startswith("git@"):
         dest = clone_destination(arg, data)
         if not dest.exists():
             run(["gh", "repo", "clone", arg, str(dest)], check=True)
             print(f"cloned {arg} -> {dest}")
         return dest
-    root = Path(arg).expanduser().resolve()
+    else:
+        root = Path(arg).expanduser().resolve()
     if not (root / ".git").exists():
-        raise DistrictError(f"{root} is not a git checkout")
+        where = f"host {runner.name}: " if runner is not None else ""
+        raise DistrictError(f"{where}{root} is not a git checkout")
     return root
 
 
-def write_repo_file(path: Path, checks: list[dict], upstream: str | None) -> None:
+def write_repo_file(path: Path | host.RemotePath, checks: list[dict], upstream: str | None) -> None:
     doc: dict = {}
     if upstream:
         doc["repo"] = {"upstream": upstream}
@@ -374,7 +413,8 @@ def write_repo_file(path: Path, checks: list[dict], upstream: str | None) -> Non
     path.write_text(header + tomli_w.dumps(doc))
 
 
-def onboard(root: Path, repo_file: Path, args: argparse.Namespace, upstream: str | None) -> None:
+def onboard(root: Path | host.RemotePath, repo_file: Path | host.RemotePath,
+            args: argparse.Namespace, upstream: str | None, run_cmd=run) -> None:
     """Net-new: propose checks from markers (or --check), ask exclusivity, confirm in $EDITOR, write."""
     checks = [parse_check(s) for s in args.check] or propose_checks(root)
     if not checks:
@@ -396,7 +436,10 @@ def onboard(root: Path, repo_file: Path, args: argparse.Namespace, upstream: str
     try:
         if not args.no_edit:
             editor = shlex.split(os.environ.get("EDITOR") or "vi")
-            if subprocess.run([*editor, str(repo_file)], check=False).returncode != 0:
+            proc = (run_cmd([*editor, str(repo_file)])
+                    if isinstance(run_cmd, host.RemoteRunner)
+                    else subprocess.run([*editor, str(repo_file)], check=False))
+            if proc.returncode != 0:
                 raise DistrictError("editor exited nonzero; nothing written")
         try:
             final = tomllib.loads(repo_file.read_text())
@@ -409,10 +452,21 @@ def onboard(root: Path, repo_file: Path, args: argparse.Namespace, upstream: str
         raise
 
 
-def dry_run(target: str, args: argparse.Namespace, data: dict) -> int:
+def dry_run(target: str, args: argparse.Namespace, data: dict,
+            runner: host.RemoteRunner | None = None) -> int:
     """Print what `add` would do — slug, port, fork parent, checks or lifted keys — and write nothing."""
     print("dry run: nothing written")
-    if "://" in target or target.startswith("git@"):
+    run_cmd = runner or run
+    if runner is not None and (slug := target_slug(target)):
+        dest = clone_destination(target, data, runner, args.host)
+        if not dest.exists():
+            print(f"repo: {slug} (clone)\nwould clone {target} -> {dest}")
+            parent = fork_parent(slug, run_cmd)
+            print(f"fork of: {parent}" if parent else "not a fork")
+            print("checks: detected after the clone")
+            return 0
+        root = dest
+    elif runner is None and ("://" in target or target.startswith("git@")):
         dest = clone_destination(target, data)
         if not dest.exists():
             slug = remote_slug(target)
@@ -423,15 +477,21 @@ def dry_run(target: str, args: argparse.Namespace, data: dict) -> int:
             print(f"fork of: {parent}" if parent else "not a fork")
             print("checks: detected after the clone")
             return 0
-        target = str(dest)
-    root = resolve_target(target, data)
-    slug = doctor(root)["repo"]
+        root = dest
+    else:
+        root = resolve_target(target, data, runner, args.host)
     repo_file = root / CONFIG_NAME
     adopt = repo_file.exists()
     existing = tomllib.loads(repo_file.read_text()) if adopt else {}
+    if runner is None:
+        slug = doctor(root)["repo"]
+    else:
+        slug = existing.get("repo", {}).get("slug") or remote_slug(remotes(root, runner).get("origin", ""))
+        if not slug:
+            raise DistrictError(f"cannot identify the GitHub repository for {root}")
     port = dashboard_port(slug, existing, data)
     print(f"repo: {slug} ({'adopt' if adopt else 'onboard'})\npath: {root}\ndashboard port: {port}")
-    parent = fork_parent(slug)
+    parent = fork_parent(slug, run_cmd)
     print(f"fork of: {parent}" if parent else "not a fork")
     if adopt:
         try:
@@ -483,16 +543,23 @@ def main(argv: list[str]) -> int:
     os.environ["PATH"] = host.service_path()
 
     data = host.load()
-    if args.host not in (None, "local") and args.host not in host.hosts(data):
+    hosts = host.hosts(data)
+    if args.host not in (None, "local") and args.host not in hosts:
         raise DistrictError(f"host {args.host!r} is not defined in [hosts]")
+    runner = host.remote_runner(args.host, hosts[args.host]) if args.host not in (None, "local") else None
+    if runner is not None:
+        try:
+            runner.facts()
+        except host.RemoteHostError as exc:
+            raise DistrictError(str(exc)) from None
     if args.dry_run:
-        return dry_run(args.target, args, data)
-    root = resolve_target(args.target, data)
+        return dry_run(args.target, args, data, runner)
+    root = resolve_target(args.target, data, runner, args.host)
     repo_file = root / CONFIG_NAME
     adopt = repo_file.exists()
     existing = tomllib.loads(repo_file.read_text()) if adopt else {}
-    if args.host not in (None, "local"):
-        slug = existing.get("repo", {}).get("slug") or remote_slug(remotes(root).get("origin", ""))
+    if runner is not None:
+        slug = existing.get("repo", {}).get("slug") or remote_slug(remotes(root, runner).get("origin", ""))
         if not slug:
             raise DistrictError(f"cannot identify the GitHub repository for {root}")
     else:
@@ -531,14 +598,15 @@ def main(argv: list[str]) -> int:
     table.setdefault("dashboard", {})["port"] = port
     host.save(data)
     print(f"registered {slug} at {root} (dashboard port {port})")
-    if wanted != "local":
+    if wanted != "local" and runner is None:
         scheduler_preflight(data, wanted, slug, table)
         print(f"{slug}: on host {wanted}; run `district apply {slug}` to install")
         return 0
+    run_cmd = runner or run
 
     # 2. fork detection
-    parent = fork_parent(slug)
-    upstream = ensure_upstream(root, parent) if parent else None
+    parent = fork_parent(slug, run_cmd)
+    upstream = ensure_upstream(root, parent, run_cmd) if parent else None
     if parent:
         print(f"fork of {parent}: upstream remote `{upstream}`")
 
@@ -551,7 +619,7 @@ def main(argv: list[str]) -> int:
         for name, val in lifted.items():
             if name != "dashboard":  # port already decided above
                 table[name] = val
-        if units := installed_units(host.unit_name(slug)):
+        if runner is None and (units := installed_units(host.unit_name(slug))):
             table["install"] = {**table.get("install", {}), **units}
         if promoted := host.dedupe(data):
             print(f"shared by every repo, now in [defaults]: {', '.join(promoted)}")
@@ -567,7 +635,7 @@ def main(argv: list[str]) -> int:
             print(f"WARN {CONFIG_NAME} does not set [repo].upstream = \"{upstream}\"; upstream sync stays off until it does")
     else:
         try:
-            onboard(root, repo_file, args, upstream)
+            onboard(root, repo_file, args, upstream, run_cmd)
         except DistrictError:
             # nothing for `apply` to resume without a repo file: forget the entry
             del data["repo"][slug]
@@ -578,9 +646,14 @@ def main(argv: list[str]) -> int:
         print(f"wrote {repo_file}")
 
     # 3. the factory finishes its own onboarding; any failure leaves the registry entry so `apply` can resume
-    scheduler_preflight(data, "local", slug, table)
-    for cmd in (["factory", "init", "--no-labels"], ["factory", "init", "--labels-only"], ["factory", "doctor"], ["factory", "install"]):
-        proc = run(cmd, cwd=root)
+    scheduler_preflight(data, wanted, slug, table)
+    factory_cli = str(host.factory_tool_paths(runner)[1]) if runner is not None else "factory"
+    commands = [["init", "--no-labels"], ["init", "--labels-only"], ["doctor"]]
+    if runner is None:
+        commands.append(["install"])
+    for command in commands:
+        cmd = [factory_cli, *command]
+        proc = run_cmd(cmd, cwd=root)
         sys.stdout.write(proc.stdout)
         if proc.returncode != 0:
             sys.stderr.write(proc.stderr)
@@ -589,4 +662,6 @@ def main(argv: list[str]) -> int:
     files = f"{CONFIG_NAME} .gitignore .github/ISSUE_TEMPLATE/agent_task.md"
     verb = "adopt" if adopt else "onboard"
     print(f"\ncommit in the repo (District never commits):\n  git -C {root} add {files} && git -C {root} commit -s -m 'factory: {verb} under District'")
+    if runner is not None:
+        print(f"{slug}: on host {wanted}; run `district apply {slug}` to install")
     return 0

@@ -464,6 +464,18 @@ class RemotePath:
         script = "import os,sys; raise SystemExit(not os.path.exists(sys.argv[1]))"
         return self.runner(["python3", "-c", script, str(self)]).returncode == 0
 
+    def is_dir(self) -> bool:
+        script = "import os,sys; raise SystemExit(not os.path.isdir(sys.argv[1]))"
+        return self.runner(["python3", "-c", script, str(self)]).returncode == 0
+
+    def glob(self, pattern: str) -> list[RemotePath]:
+        script = "import glob,json,sys; print(json.dumps(glob.glob(sys.argv[1])))"
+        proc = self.runner(["python3", "-c", script, str(self.value / pattern)], check=True)
+        return [RemotePath(self.runner, value) for value in json.loads(proc.stdout)]
+
+    def relative_to(self, other: RemotePath) -> PurePosixPath:
+        return self.value.relative_to(other.value)
+
     def mkdir(self, parents: bool = False, exist_ok: bool = False) -> None:
         script = "import pathlib,sys; pathlib.Path(sys.argv[1]).mkdir(parents=bool(int(sys.argv[2])), exist_ok=bool(int(sys.argv[3])))"
         self.runner(
