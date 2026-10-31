@@ -332,7 +332,8 @@ class RemoteRunner:
     def __call__(self, argv: list[str], cwd: Path | RemotePath | None = None,
                  check: bool = False, quiet: bool = False, timeout: float | None = None,
                  env: dict[str, str] | None = None, input: str | None = None) -> subprocess.CompletedProcess:
-        print(f"{self.name}: $ {shlex.join(argv)}")
+        if not quiet:
+            print(f"{self.name}: $ {shlex.join(argv)}")
         command = shlex.join(argv)
         if env:
             assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())

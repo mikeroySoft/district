@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import http.client
 import subprocess
+import tempfile
 import threading
 import time
 import unittest
@@ -11,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from district import health, status
+from district import health, host, status
 
 
 STAMP = "2026-09-05T12:00:00Z"
@@ -44,6 +45,8 @@ def runtime(slug: str, *, stamp: str = STAMP, events=None, errors=None, schema=1
 
 class FleetCollectorTest(unittest.TestCase):
     def setUp(self):
+        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.dict("os.environ", {"XDG_STATE_HOME": str(self.tmp)}))
         self.tables = {
             "acme/fast": {"path": "/fast", "dashboard": {"port": 8765}},
             "acme/slow": {"path": "/slow", "dashboard": {"port": 8766}},
@@ -94,6 +97,38 @@ class FleetCollectorTest(unittest.TestCase):
         self.assertEqual(entry["executions"][0]["id"], "acme/fast/worker")
         self.assertNotIn("execution telemetry unavailable", entry["unknowns"])
 
+    def test_one_shot_collection_caps_total_workers(self):
+        active = maximum = 0
+        lock = threading.Lock()
+        data = {
+            "hosts": {
+                f"h{index}": {"ssh": f"factory@h{index}.example", "platform": "linux"}
+                for index in range(3)
+            },
+            "repo": {
+                f"acme/repo-{index}": {"path": f"/repo-{index}", "host": f"h{index // 4}"}
+                for index in range(12)
+            },
+        }
+
+        def collect_runtime(_collector, _slug):
+            nonlocal active, maximum
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+
+        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        with mock.patch.object(host, "remote_runner", return_value=runner), \
+             mock.patch.object(status.FleetCollector, "collect_runtime", collect_runtime), \
+             mock.patch.object(status.FleetCollector, "collect_full", return_value=None):
+            status.fleet(data)
+
+        self.assertLessEqual(maximum, status.COLLECTION_CONCURRENCY)
+
+
     def test_bounded_history_does_not_invalidate_complete_current_evidence(self):
         data = runtime("acme/fast", errors=[
             {"source": "events.jsonl", "scope": "history", "code": "event_limit"}])
@@ -129,6 +164,49 @@ class FleetCollectorTest(unittest.TestCase):
             entry = collector.fleet()["acme/fast"]
             self.assertEqual(entry["executions"][0]["id"], "acme/fast/worker")
             self.assertIn("timeout", entry["sources"][0]["error"])
+
+
+    def test_remote_failure_retains_last_seen_observation(self):
+        table = {"path": "/remote/fast", "host": "ultron", "dashboard": {"port": 8765}}
+        runner = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, json.dumps(runtime("acme/fast")), ""))
+        data = {
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "linux"}},
+            "repo": {"acme/fast": table},
+        }
+        with mock.patch.object(host, "remote_runner", return_value=runner), \
+             mock.patch.object(status.metrics, "read", return_value=None):
+            collector = status.FleetCollector(data)
+            collector.collect_runtime("acme/fast")
+            first = collector.fleet()["acme/fast"]
+            runner.side_effect = host.RemoteHostError("ultron", "connection refused")
+            collector.collect_runtime("acme/fast")
+            stale = collector.fleet()["acme/fast"]
+
+        self.assertEqual(first["host_state"], "reachable")
+        self.assertIsNotNone(first["host_last_seen"])
+        self.assertEqual(stale["host_state"], "unreachable")
+        self.assertEqual(stale["host_last_seen"], first["host_last_seen"])
+        self.assertIn("connection refused", stale["host_error"])
+        self.assertEqual(stale["executions"][0]["id"], "acme/fast/worker")
+
+    def test_filtered_collection_preserves_other_hosts_last_seen(self):
+        state = status._host_state_path()
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"a": STAMP, "b": STAMP}))
+        data = {
+            "hosts": {"a": {"ssh": "factory@a.example", "platform": "linux"}},
+            "repo": {"acme/fast": {"path": "/remote/fast", "host": "a"}},
+        }
+        runner = mock.Mock(return_value=subprocess.CompletedProcess(
+            [], 0, json.dumps(runtime("acme/fast")), ""))
+
+        with mock.patch.object(host, "remote_runner", return_value=runner), \
+             mock.patch.object(status.metrics, "read", return_value=None):
+            status.FleetCollector(data).collect_runtime("acme/fast")
+
+        self.assertEqual(json.loads(state.read_text()), {"a": mock.ANY, "b": STAMP})
+
 
     def test_schema_history_errors_and_duplicate_events_remain_explicit(self):
         event = {"event_id": "event-1", "execution_id": "execution-1", "sequence": 1,
@@ -348,6 +426,22 @@ class FleetCollectorTest(unittest.TestCase):
             item = collector.read()[1]
             self.assertEqual(item["acme/fast"]["operating_state"], "running")
             self.assertEqual(item["acme/slow"]["executions"], [])
+
+    def test_new_registry_host_uses_saved_last_seen(self):
+        state = status._host_state_path()
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"new": STAMP}))
+        collector = status.FleetCollector({"repo": {"acme/fast": self.tables["acme/fast"]}})
+        updated = {
+            "hosts": {"new": {"ssh": "factory@new.example", "platform": "linux"}},
+            "repo": {"acme/new": {"path": "/new", "host": "new"}},
+        }
+
+        with mock.patch.object(status.host, "load", return_value=updated):
+            collector.refresh_registry()
+
+        self.assertEqual(collector.read()[1]["acme/new"]["host_last_seen"], STAMP)
+
 
     def test_slow_reader_does_not_block_publication_and_keeps_coherent_revision(self):
         collector = status.FleetCollector({"repo": {"acme/fast": self.tables["acme/fast"]}})

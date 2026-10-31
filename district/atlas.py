@@ -301,8 +301,15 @@ def projection_rows(record: dict, label: str) -> list[list[str]]:
 
 def factory_kpis(slug: str, e: dict) -> list[list[str]]:
     m, snap, table = mapping(e.get("metrics")), mapping(e.get("snap")), mapping(e["table"])
+    host_name = text(e.get("host", "local"))
+    host_state = text(e.get("host_state", "reachable"))
+    host_value = host_name
+    if host_state != "reachable":
+        last_seen = text(e["host_last_seen"]) if e.get("host_last_seen") else "never"
+        host_value += f" · {host_state} · last seen {last_seen}"
     rows = [
         ["assessment", e["assessment"]],
+        ["host", host_value],
         ["operating state", e["operating_state"]],
         ["execution state", e["execution_state"]],
         ["observation", e["observation"]],
@@ -425,10 +432,14 @@ def factory_block(i: int, slug: str, e: dict, max_loc: int) -> dict:
     else:
         size = "metrics not collected yet"
     origin = "Fork" if fork else "Net-new repository" if origin_known else "Repository origin unknown"
-    blurb = f"{origin}: {size}. Gate: {gate}{' (* exclusive)' if exclusive else ''}. "
+    host_name = text(e.get("host", "local"))
+    host_state = text(e.get("host_state", "reachable"))
+    blurb = f"{origin}: {size}. Host: {host_name} ({host_state}). Gate: {gate}{' (* exclusive)' if exclusive else ''}. "
     blurb += f"Assessment: {e['assessment']}. Operating state: {e['operating_state']}. Execution state: {e['execution_state']}. Observation: {e['observation']}."
     return {
-        "id": block_id(slug), "slug": slug, "name": slug.rsplit("/", 1)[-1], "cat": "factory",
+        "id": block_id(slug), "slug": slug, "name": f"{slug.rsplit('/', 1)[-1]} [{host_name}]",
+        "host": host_name, "host_state": host_state, "host_last_seen": e.get("host_last_seen"),
+        "cat": "factory",
         "gx": gx, "gy": gy, "w": w, "d": w, "h": h, "kind": "tower3" if h >= 60 else "hall", "ring": fork,
         **{key: e[key] for key in ("schema_version", "assessment", "operating_state", "execution_state", "observation", "findings", "sources")},
         **{key: e[key] for key in ("executions", "resources", "unknowns", "activity", "collection", "projection") if key in e},

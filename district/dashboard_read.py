@@ -332,6 +332,11 @@ def safe_fleet(fleet: dict) -> dict:
         table = _dict(raw.get("table"))
         port = _count(_dict(table.get("dashboard")).get("port"))
         result[slug] = {
+            "host": _match(raw.get("host"), LABEL) or "unknown",
+            "host_state": _choice(raw.get("host_state"),
+                                  ("pending", "reachable", "unreachable"), "pending"),
+            "host_last_seen": _stamp(raw.get("host_last_seen")),
+            "host_error": "host unreachable" if raw.get("host_error") else None,
             "table": {"disabled_at": _stamp(table.get("disabled_at"))
                       or ("disabled" if table.get("disabled_at") else None),
                       "dashboard": {"port": port if 1 <= port <= 65535 else None}},

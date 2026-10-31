@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from district import apply, host
+from district import apply, host, install_state
 
 
 SHA = "a" * 40
@@ -33,7 +33,8 @@ class FactoryRefTest(unittest.TestCase):
 
     def calls(self, checks: str, *, data: dict | None = None, resolve_code: int = 0,
               remote_refs: str | None = None, pinned_refs: str | None = None,
-              active_timers: list[str] | None = None, backend: mock.Mock | None = None):
+              active_timers: list[str] | None = None, backend: mock.Mock | None = None,
+              record: install_state.ApplyRun | None = None):
         calls: list[list[str]] = []
         if backend is None:
             # Never let the default backend reach the real systemctl/launchctl.
@@ -71,7 +72,7 @@ class FactoryRefTest(unittest.TestCase):
                     mock.patch.object(apply, "run", side_effect=run), \
                     mock.patch.object(host, "save"):
                 self.assertTrue(host.path().is_relative_to(root), host.path())
-                result = apply.reconcile_engine(document, backend=backend)
+                result = apply.reconcile_engine(document, record, backend=backend)
         return result, calls, document
 
     def test_same_sha_does_not_install(self) -> None:
@@ -180,6 +181,14 @@ class FactoryRefTest(unittest.TestCase):
         )
 
         self.assertEqual(apply.latest_odd_tag(refs), ("v1.2.7", final))
+
+    def test_engine_reconciliation_records_every_local_repo_timer(self) -> None:
+        checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
+        record = install_state.ApplyRun("", "", "")
+        with mock.patch.object(install_state.host, "run", return_value=self.proc([])):
+            self.calls(checks, record=record)
+
+        self.assertIn("factory-widgets.timer", record.timers_before)
 
     def test_install_restarts_installed_dashboard(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'

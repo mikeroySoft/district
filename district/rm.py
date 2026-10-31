@@ -23,7 +23,7 @@ def main(argv: list[str]) -> int:
     if host_name == "local":
         backend = host.service_backend()
     else:
-        target = host.hosts(data)[host_name]
+        target = host.factory_host(data, slug)
         runner = host.remote_runner(host_name, target)
         try:
             backend = host.service_backend(target, run=runner)

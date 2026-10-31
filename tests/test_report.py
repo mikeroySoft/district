@@ -91,6 +91,20 @@ class ReportTest(unittest.TestCase):
         self.assertIn("First-gate pass aggregate: unavailable (incompatible or unspecified producer windows/cohorts)", output)
         self.assertIn("Review-bounce aggregate: unavailable (incompatible or unspecified producer windows/cohorts)", output)
 
+
+    def test_repository_sections_name_host_and_unreachable_last_seen(self) -> None:
+        remote = entry(assessment="unknown", snapshot=False, quality="unavailable")
+        remote.update(host="ultron", host_state="unreachable",
+                      host_last_seen="2026-09-17T11:55:00Z",
+                      host_error="host ultron unreachable: connection refused")
+
+        output = report.render({"acme/remote": remote}, AT)
+
+        self.assertIn("- Host: ultron (unreachable; last seen 5m ago)", output)
+        remote["host_last_seen"] = None
+        self.assertIn("- Host: ultron (unreachable; last seen never)",
+                      report.render({"acme/remote": remote}, AT))
+
     def test_missing_and_zero_rate_denominators_are_not_derived(self) -> None:
         zero = entry()
         zero["snap"]["metrics"].update(first_pass=0, first_pass_numerator=0,

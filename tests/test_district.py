@@ -1164,6 +1164,28 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("smoke FAIL factory-widgets.service: gh", out)
         self.assertNotIn("smoke OK", out)
 
+    def test_remote_smoke_uses_installed_unit_path(self) -> None:
+        unit_bin = self.tmp / "unit-bin"
+        unit_bin.mkdir()
+        for name in ("gh", "factory"):
+            executable = unit_bin / name
+            executable.write_text(f'#!/bin/sh\n[ "$PATH" = "{unit_bin}" ]\n')
+            executable.chmod(0o755)
+
+        def transport(argv, **kwargs):
+            return subprocess.run(
+                argv[7], shell=True, executable="/bin/sh", text=True, capture_output=True,
+                timeout=kwargs.get("timeout"), input=kwargs.get("input"),
+            )
+
+        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
+        loaded = mock.Mock(loaded=True, environment={"PATH": str(unit_bin)})
+        backend = mock.Mock()
+        backend.status.side_effect = lambda name: mock.Mock(loaded=False) if "-dashboard" in name else loaded
+
+        self.assertEqual(apply.smoke(["acme/widgets"], backend, run_cmd=runner), (1, []))
+
+
     def test_failure_cap(self) -> None:
         self.register(failures=9)
         code, out = self.district("apply")
@@ -1637,16 +1659,68 @@ class StatusTest(DistrictCase):
         code, out = self.district("status", "--json")
         self.assertEqual((code, json.loads(out)), (0, {}))
 
-    def test_remote_factory_is_skipped_without_collection(self) -> None:
+    def test_mixed_local_remote_and_unreachable_host(self) -> None:
+        live, dead = "factory@ultron.example", "factory@dead.example"
+        self.fake_ssh(live, dead)
+        repos = {name: self.repo(name, toml="") for name in ("local", "remote", "offline")}
         host.save({
-            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
-            "repo": {"acme/widgets": {"path": "/remote/widgets", "host": "ultron"}},
+            "hosts": {
+                "ultron": {"ssh": live, "platform": "macos"},
+                "dead": {"ssh": dead, "platform": "linux"},
+            },
+            "repo": {
+                "acme/local": {"path": str(repos["local"])},
+                "acme/remote": {"path": str(repos["remote"]), "host": "ultron"},
+                "acme/offline": {"path": str(repos["offline"]), "host": "dead"},
+            },
         })
-        code, out = self.district("status")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(out.strip(), "acme/widgets: on host ultron (remote hosts not supported yet, #96)")
-        self.assertEqual(self.calls("factory"), [])
-        self.assertEqual(self.calls("systemctl"), [])
+        _, first_out = self.district("status", "--json")
+        first_seen = json.loads(first_out)["acme/offline"]["host_last_seen"]
+        self.assertIsNotNone(first_seen)
+        ssh_config = self.tmp / "ssh.json"
+        config = json.loads(ssh_config.read_text())
+        config["unreachable"] = [dead]
+        ssh_config.write_text(json.dumps(config))
+
+        code, out = self.district("status", "--json")
+
+        entries = json.loads(out)
+        self.assertEqual(code, 2, out)
+        self.assertEqual(set(entries), {"acme/local", "acme/remote", "acme/offline"})
+        self.assertEqual(entries["acme/local"]["host"], "local")
+        self.assertEqual(entries["acme/remote"]["host"], "ultron")
+        self.assertEqual(entries["acme/remote"]["host_state"], "reachable")
+        self.assertEqual(entries["acme/offline"]["host"], "dead")
+        self.assertEqual(entries["acme/offline"]["host_state"], "unreachable")
+        self.assertIsNotNone(entries["acme/offline"]["host_last_seen"])
+        self.assertIn("Connection refused", entries["acme/offline"]["host_error"])
+
+        text_code, text = self.district("status")
+        self.assertEqual(text_code, 2, text)
+        self.assertIn("host", text.splitlines()[0])
+        self.assertRegex(text, r"acme/local\s+local")
+        self.assertRegex(text, r"acme/remote\s+ultron")
+        self.assertIn("dead (unreachable; last seen ", text)
+        self.assertNotIn("last seen never", text)
+
+        report_code, report_text = self.district("report")
+        self.assertEqual(report_code, 2, report_text)
+        self.assertIn("- Host: dead (unreachable; last seen ", report_text)
+        self.assertNotIn("last seen never", report_text)
+
+    def test_remote_probe_timeout_marks_host_unreachable(self) -> None:
+        data = {
+            "hosts": {"slow": {"ssh": "factory@slow.example", "platform": "linux"}},
+            "repo": {"acme/widgets": {"path": "/x", "host": "slow"}},
+        }
+        timeout = subprocess.TimeoutExpired(["ssh"], status.COLLECTION_TIMEOUT)
+        with mock.patch.object(host, "remote_runner",
+                               return_value=mock.Mock(side_effect=timeout)):
+            entries = status.fleet(data)
+
+        self.assertEqual(entries["acme/widgets"]["host_state"], "unreachable")
+        self.assertIn("timed out", entries["acme/widgets"]["host_error"])
+
 
     def test_unknown_factory_host_fails_before_collection(self) -> None:
         host.save({"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}})
@@ -1799,6 +1873,15 @@ class RmTest(DistrictCase):
         remote = tomllib.loads((home / ".config/factory/config.toml").read_text())
         self.assertNotIn("repo", remote)
         self.assertIn("removed acme/widgets", out)
+
+    def test_unknown_remote_host_is_a_district_error(self) -> None:
+        host.save({"repo": {"acme/widgets": {"path": "/x", "host": "missing"}}})
+
+        code, out = self.district("rm", "widgets")
+
+        self.assertEqual(code, 1)
+        self.assertIn("acme/widgets: host 'missing' is not defined in [hosts]", out)
+
 
 
 class DoctorTest(DistrictCase):
@@ -2219,6 +2302,21 @@ class AtlasTest(unittest.TestCase):
         roads = [l for l in data.splitlines() if l.startswith('  {"id": "p')]
         self.assertEqual(len(roads), 4)  # one dispatch road per factory + one upstream road for the fork
         self.assertEqual(atlas.data({}).count('"id": "f_'), 0)
+
+    def test_factory_cards_include_host_badges_and_reachability(self) -> None:
+        remote = fleet_entry(100)
+        remote.update(host="ultron", host_state="unreachable",
+                      host_last_seen="2026-09-05T12:30:00Z")
+
+        block = atlas.factory_block(0, "acme/big", remote, 100)
+
+        self.assertEqual((block["host"], block["host_state"]), ("ultron", "unreachable"))
+        self.assertEqual(block["name"], "big [ultron]")
+        self.assertEqual(dict(block["kpis"])["host"],
+                         "ultron · unreachable · last seen 2026-09-05T12:30:00Z")
+        remote["host_last_seen"] = None
+        self.assertEqual(dict(atlas.factory_kpis("acme/big", remote))["host"],
+                         "ultron · unreachable · last seen never")
 
     def test_partial_fleet_metrics_keep_known_totals(self) -> None:
         rows = {label: (value, detail) for label, value, detail in atlas.kpis(self.FLEET)}
