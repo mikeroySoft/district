@@ -1165,21 +1165,25 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("smoke OK", out)
 
     def test_remote_smoke_uses_installed_unit_path(self) -> None:
-        proc = lambda stdout="": subprocess.CompletedProcess([], 0, stdout, "")
-        transport = mock.Mock(side_effect=[
-            proc("/unit/bin/gh\n"), proc(),
-            proc("/unit/bin/factory\n"), proc(),
-        ])
+        unit_bin = self.tmp / "unit-bin"
+        unit_bin.mkdir()
+        for name in ("gh", "factory"):
+            executable = unit_bin / name
+            executable.write_text(f'#!/bin/sh\n[ "$PATH" = "{unit_bin}" ]\n')
+            executable.chmod(0o755)
+
+        def transport(argv, **kwargs):
+            return subprocess.run(
+                argv[7], shell=True, executable="/bin/sh", text=True, capture_output=True,
+                timeout=kwargs.get("timeout"), input=kwargs.get("input"),
+            )
+
         runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
-        loaded = mock.Mock(loaded=True, environment={"PATH": "/unit/bin"})
-        missing = mock.Mock(loaded=False)
+        loaded = mock.Mock(loaded=True, environment={"PATH": str(unit_bin)})
         backend = mock.Mock()
-        backend.status.side_effect = lambda name: missing if "-dashboard" in name else loaded
+        backend.status.side_effect = lambda name: mock.Mock(loaded=False) if "-dashboard" in name else loaded
 
         self.assertEqual(apply.smoke(["acme/widgets"], backend, run_cmd=runner), (1, []))
-        commands = [call.args[0][7] for call in transport.call_args_list]
-        self.assertIn("env PATH=/unit/bin /unit/bin/gh --version", commands)
-        self.assertIn("env PATH=/unit/bin /unit/bin/factory --version", commands)
 
 
     def test_failure_cap(self) -> None:
