@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from district import apply, host, install_state, report
-from test_district import DOCTOR, DistrictCase, dashboard
+from tests.test_district import DOCTOR, DistrictCase, dashboard
 
 AT = datetime(2026, 10, 27, 18, 30, tzinfo=timezone.utc)
 SHA = "a" * 40

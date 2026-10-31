@@ -12,8 +12,8 @@ from unittest import mock
 
 from district import report
 from district import host, metrics
-from test_collector import runtime
-from test_district import DistrictCase, dashboard
+from tests.test_collector import runtime
+from tests.test_district import DistrictCase, dashboard
 
 
 AT = datetime(2026, 9, 17, 12, 0, tzinfo=timezone.utc)
