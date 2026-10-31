@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from ipaddress import ip_address
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from district import host
 from district.add import remote_slug
@@ -194,6 +196,79 @@ def toolchain_rows(data: dict) -> list[dict[str, str]]:
 
 
 
+def _config_strings(table: dict, prefix: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+    values = []
+    for key, value in table.items():
+        path = (*prefix, key)
+        if isinstance(value, dict):
+            values += _config_strings(value, path)
+        elif isinstance(value, str):
+            values.append((".".join(path), value))
+    return values
+
+
+def _is_loopback_url(value: str) -> bool:
+    try:
+        hostname = urlsplit(value).hostname
+    except ValueError:
+        return False
+    if not hostname:
+        return False
+    if hostname.casefold() == "localhost":
+        return True
+    try:
+        return ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _controller_path_rows(name: str, table: dict, defaults: dict) -> list[dict[str, str]]:
+    controller_paths = []
+    controller_home = Path.home()
+    for key, value in _config_strings(defaults):
+        path = Path(value)
+        if path.is_absolute() and path.is_relative_to(controller_home):
+            controller_paths.append((key, value))
+    if not controller_paths:
+        return []
+    paths = sorted({value for _, value in controller_paths})
+    script = (
+        "import json,os,sys; "
+        "print(json.dumps([path for path in sys.argv[1:] if not os.path.exists(path)]))"
+    )
+    proc = _host_run(name, table, ["python3", "-c", script, *paths])
+    if proc.returncode:
+        return []
+    try:
+        missing = set(json.loads(proc.stdout))
+    except (TypeError, ValueError):
+        return []
+    return [
+        row(
+            "WARN",
+            f"host {name} remote config {key}",
+            f"controller path {value} does not exist on host",
+        )
+        for key, value in controller_paths
+        if value in missing
+    ]
+
+
+def remote_config_rows(data: dict) -> list[dict[str, str]]:
+    rows = []
+    for name, table in sorted(data.get("hosts", {}).items()):
+        defaults = host.remote_config(data, name).get("defaults", {})
+        rows += _controller_path_rows(name, table, defaults)
+        triage_url = defaults.get("triage", {}).get("url")
+        if isinstance(triage_url, str) and _is_loopback_url(triage_url):
+            rows.append(row(
+                "WARN",
+                f"host {name} remote config triage.url",
+                f"loopback URL {triage_url} resolves on the remote host",
+            ))
+    return rows
+
+
 def factory_rows(data: dict) -> list[dict[str, str]]:
     if not shutil.which("factory"):
         return [row("FAIL", "factory", "not found on PATH")]
@@ -308,6 +383,7 @@ def check() -> list[dict[str, str]]:
     rows += factory_rows(data)
     rows.append(gh_auth())
     rows += toolchain_rows(data)
+    rows += remote_config_rows(data)
 
     state = backend.manager_status()
     manager = "systemd user manager" if isinstance(backend, SystemdUserBackend) else "launchd user manager"

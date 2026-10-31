@@ -390,6 +390,79 @@ class HostTest(DistrictCase):
         with self.assertRaisesRegex(host.DistrictError, "acme/widgets.*missing"):
             host.factory_host(data, "acme/widgets")
 
+    def test_remote_config_applies_host_defaults_overrides(self) -> None:
+        defaults = {
+            "install": {"dispatch_env": {
+                "GH_CONFIG_DIR": "/home/mike/.config/factory-gh",
+                "GIT_AUTHOR_NAME": "Factory Agent",
+                "GIT_CONFIG_KEY_0": "commit.gpgsign",
+                "GIT_CONFIG_VALUE_0": "true",
+                "GIT_CONFIG_KEY_2": "user.signingkey",
+                "GIT_CONFIG_VALUE_2": "/home/mike/.ssh/factory-agent-signing.pub",
+            }},
+            "triage": {"url": "http://127.0.0.1:11435/v1/chat/completions"},
+        }
+        data = {
+            "defaults": defaults,
+            "hosts": {
+                "ultron": {"defaults": {
+                    "install": {"dispatch_env": {
+                        "GH_CONFIG_DIR": "/Users/mike/.config/factory-gh",
+                    }},
+                    "triage": {"url": "http://tank:11435/v1/chat/completions"},
+                }},
+                "benito": {},
+            },
+        }
+
+        self.assertEqual(host.remote_config(data, "ultron")["defaults"], {
+            "install": {"dispatch_env": {
+                **defaults["install"]["dispatch_env"],
+                "GH_CONFIG_DIR": "/Users/mike/.config/factory-gh",
+            }},
+            "triage": {"url": "http://tank:11435/v1/chat/completions"},
+        })
+        self.assertEqual(host.remote_config(data, "benito"), {"defaults": defaults})
+
+
+    def test_remote_config_host_override_can_unset_inherited_key(self) -> None:
+        data = {
+            "defaults": {
+                "install": {"dispatch_env": {
+                    "GIT_AUTHOR_NAME": "Factory Agent",
+                    "GIT_CONFIG_KEY_0": "commit.gpgsign",
+                }},
+                "triage": {"url": "http://127.0.0.1:11435/v1/chat/completions"},
+            },
+            "hosts": {"ultron": {"defaults_unset": [
+                "install.dispatch_env.GIT_CONFIG_KEY_0",
+                "triage.url",
+            ]}},
+        }
+
+        self.assertEqual(host.remote_config(data, "ultron"), {
+            "defaults": {"install": {"dispatch_env": {
+                "GIT_AUTHOR_NAME": "Factory Agent",
+            }}},
+        })
+
+    def test_hosts_defaults_table_is_validated(self) -> None:
+        base = {"ssh": "factory@ultron.example", "platform": "macos"}
+        self.assertEqual(host.hosts({"hosts": {"ultron": {
+            **base,
+            "defaults": {"triage": {"url": "http://tank:11435"}},
+            "defaults_unset": ["install.dispatch_env.GIT_CONFIG_KEY_0"],
+        }}})["ultron"]["defaults"]["triage"]["url"], "http://tank:11435")
+        for key, value, detail in (
+            ("defaults", [], r"\[hosts\.ultron\.defaults\]"),
+            ("defaults_unset", ["triage..url"], r"\[hosts\.ultron\]\.defaults_unset"),
+            ("defaults_unset", [1], r"\[hosts\.ultron\]\.defaults_unset"),
+        ):
+            with self.subTest(key=key):
+                with self.assertRaisesRegex(host.DistrictError, detail):
+                    host.hosts({"hosts": {"ultron": {**base, key: value}}})
+
+
     def test_next_port_after_gap_and_default_port_rejected(self) -> None:
         data = {"repo": {"a/b": {"path": "/a", "dashboard": {"port": 8765}}, "c/d": {"path": "/c", "dashboard": {"port": 8770}}}}
         self.assertEqual(host.next_port(data), 8771)
@@ -2056,6 +2129,41 @@ class DoctorTest(DistrictCase):
         )
         self.stub("loginctl", ("show-user * -p Linger --value", linger))
         self.stub("ss", ("-ltnp sport = :*", ss))
+
+    def test_doctor_warns_on_controller_path_in_remote_config(self) -> None:
+        controller_path = str(Path.home() / ".config" / "factory-gh")
+        host.save({
+            "defaults": {
+                "install": {"dispatch_env": {"GH_CONFIG_DIR": controller_path}},
+                "triage": {"url": "http://127.0.0.1:11435/v1/chat/completions"},
+            },
+            "hosts": {"ultron": {
+                "ssh": "factory@ultron.example",
+                "platform": "macos",
+            }},
+        })
+        self.doctor_tools()
+        self.fake_ssh("factory@ultron.example")
+
+        with mock.patch(
+            "district.doctor.shutil.which",
+            side_effect=lambda name: f"/bin/{name}" if name == "factory" else None,
+        ):
+            code, out = self.district("doctor", "--json")
+
+        rows = json.loads(out)["rows"]
+        self.assertEqual(code, 0, rows)
+        self.assertIn({
+            "status": "WARN",
+            "label": "host ultron remote config install.dispatch_env.GH_CONFIG_DIR",
+            "detail": f"controller path {controller_path} does not exist on host",
+        }, rows)
+        self.assertIn({
+            "status": "WARN",
+            "label": "host ultron remote config triage.url",
+            "detail": "loopback URL http://127.0.0.1:11435/v1/chat/completions resolves on the remote host",
+        }, rows)
+
 
     def test_doctor_checks_declared_macos_toolchain_on_its_host(self) -> None:
         host.save({
