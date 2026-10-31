@@ -181,6 +181,7 @@ class FactoryRefTest(unittest.TestCase):
         )
 
         self.assertEqual(apply.latest_odd_tag(refs), ("v1.2.7", final))
+
     def test_engine_reconciliation_records_every_local_repo_timer(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
         record = install_state.ApplyRun("", "", "")
