@@ -483,9 +483,27 @@ def main(argv: list[str]) -> int:
             raise DistrictError(f"{slug} would share unit {host.unit_name(slug)} with {other}; rename one checkout's origin")
 
     # 1. registry entry first: both paths depend on the port and path being persisted
+    wanted = args.host or "local"
+    current = host.repo_hosts(registered[slug], slug) if slug in registered else [wanted]
+    joining = wanted not in current
+    if joining:
+        names = [*current, wanted]
+        blocked = [name for name in names if not host.claims_supported(data, name)]
+        if blocked:
+            raise DistrictError(
+                f"{slug} already runs on {', '.join(current)}; a second host needs the factory on "
+                f"{', '.join(blocked)} to coordinate ticket claims ({host.CLAIMS_ISSUE}); nothing written"
+            )
     table = host.repo_table(data, slug)
     table["path"] = str(root)
-    if args.host == "local":
+    if joining:
+        table.pop("host", None)
+        table.setdefault("triage_host", current[0])
+        table["hosts"] = names
+        print(f"{slug}: hosts {', '.join(names)} (triage on {table['triage_host']})")
+    elif "hosts" in table:
+        pass
+    elif args.host == "local":
         table.pop("host", None)
     elif args.host:
         table["host"] = args.host

@@ -77,7 +77,7 @@ def entry(result: dict, table: dict) -> dict:
     if sources is None:
         sources = health.snapshot_sources(snap, result.get("error"))
     return {
-        "host": table.get("host", "local"),
+        "host": host.primary_host(table),
         "host_state": result.get("host_state", "reachable"),
         "host_last_seen": result.get("host_last_seen"),
         "host_error": result.get("host_error"),
@@ -306,7 +306,7 @@ class FleetCollector:
         self.concurrency = max(1, min(concurrency, COLLECTION_CONCURRENCY))
         self.revision = 0
         self._records = {slug: self._new_record() for slug in self.repos}
-        names = {table.get("host", "local") for table in self.repos.values()}
+        names = {host.primary_host(table) for table in self.repos.values()}
         saved = _load_host_last_seen()
         self._last_seen = {name: saved[name] for name in names if name != "local" and name in saved}
         self._host_saved_at: dict[str, float] = {}
@@ -359,7 +359,7 @@ class FleetCollector:
             state = self._hosts.setdefault(name, self._new_host())
             state.update(host_state="unreachable", host_error=error)
             for slug, table in self.repos.items():
-                if table.get("host", "local") != name:
+                if host.primary_host(table) != name:
                     continue
                 record = self._records[slug]
                 source = record["runtime"] or {
@@ -384,11 +384,11 @@ class FleetCollector:
             self._records = {
                 slug: self._records[slug]
                 if (slug in self.repos and table["path"] == self.repos[slug]["path"]
-                    and table.get("host", "local") == self.repos[slug].get("host", "local"))
+                    and host.primary_host(table) == host.primary_host(self.repos[slug]))
                 else self._new_record()
                 for slug, table in repos.items()
             }
-            names = {table.get("host", "local") for table in repos.values()}
+            names = {host.primary_host(table) for table in repos.values()}
             saved = _load_host_last_seen()
             self._last_seen.update({name: saved[name] for name in names if name in saved})
             self._hosts = {name: self._hosts.get(name, self._new_host(self._last_seen.get(name)))
@@ -455,7 +455,7 @@ class FleetCollector:
             if record is None:
                 return
             table = self.repos[slug]
-            name = table.get("host", "local")
+            name = host.primary_host(table)
         try:
             proc = self._runner(name)(["factory", "dashboard", "--runtime-json"],
                                       cwd=Path(table["path"]), timeout=self.timeout, quiet=True)
@@ -499,7 +499,7 @@ class FleetCollector:
             if record is None:
                 return
             table = self.repos[slug]
-            name = table.get("host", "local")
+            name = host.primary_host(table)
         result = (
             snapshot(slug, table, timeout=self.full_timeout)
             if name == "local"
@@ -546,7 +546,7 @@ class FleetCollector:
                 for source in full_sources:
                     source["cadence_seconds"] = self.full_interval
                 sources.extend(full_sources)
-            name = repos[slug].get("host", "local")
+            name = host.primary_host(repos[slug])
             item = entry({"slug": slug, "snap": record["snap"], "error": record["full_error"],
                           "sources": sources, **host_states.get(name, self._new_host())},
                          repos[slug])
@@ -598,7 +598,7 @@ def fleet(data: dict) -> dict[str, dict]:
 
     groups: dict[str, list[str]] = {}
     for slug, table in collector.repos.items():
-        groups.setdefault(table.get("host", "local"), []).append(slug)
+        groups.setdefault(host.primary_host(table), []).append(slug)
     with ThreadPoolExecutor(max_workers=collector.concurrency) as pool:
         slugs = [slug for group in pool.map(probe_host, groups.items()) for slug in group]
         for _ in pool.map(collect, slugs):
@@ -664,13 +664,20 @@ def main(argv: list[str]) -> int:
     gh = doctor.gh_auth()
     failed = gh["status"] == "FAIL"
     entries = fleet(data)
+    parity = doctor.parity_rows(data)
     if args.unhealthy:
         entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}
     if args.json:
-        print(json.dumps({"host": gh, **entries} if failed else entries, indent=2))
+        extra = {"host": gh} if failed else {}
+        if parity:
+            extra["parity"] = parity
+        print(json.dumps({**extra, **entries}, indent=2))
     else:
         if failed:
             print(f"  FAIL  {gh['label']}: {gh['detail']}")
+        for item in parity:
+            if item["status"] != "PASS":
+                print(f"  {item['status']}  {item['label']}: {item['detail']}")
         if entries:
             print(table([row(slug, e) for slug, e in entries.items()]))
         else:

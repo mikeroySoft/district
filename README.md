@@ -147,6 +147,42 @@ timers. Remove `factory_ref` before rolling back, or the next apply will
 reinstall the configured ref's SHA. Omit `factory_ref` to retain explicit
 `district apply --upgrade` behavior.
 
+### One repo on several hosts
+
+A repository can run on more than one host so they share its ticket queue:
+
+```toml
+[repo."mikeroySoft/factory"]
+path = "/home/mike/dev/factory"
+hosts = ["local", "ultron"]
+triage_host = "local"
+```
+
+Set either `host` or `hosts`, not both. With more than one host,
+`triage_host` is required and must be one of them; it is the only host that
+triages, and `district status` reads the repo's state from it. Each host's
+Factory config carries `[repo."SLUG".fleet]` with that host's `host_name` and
+the `triage_host`. `district add --host NAME` on a repo already registered on
+another host appends `NAME` to `hosts`, keeping the first host as
+`triage_host`.
+
+Several hosts on one repo need Factory's host claims
+([factory#526](https://github.com/mikeroySoft/factory/issues/526)) so two hosts
+never work the same ticket. Until `factory claims --supported` succeeds on
+every listed host, `district add` refuses to add a second host and
+`district apply` refuses any registry that lists several hosts for a repo, both
+with a link to that issue.
+
+All hosts of a shared repo run one engine commit. `district apply` resolves
+`factory_ref` on every one of those hosts and installs only when they agree,
+with no partial upgrade. If a host can't resolve the ref, or its install fails
+or is deferred, every host stays on its current engine: hosts that already
+moved are reinstalled at their previous commit, and apply names the host that
+blocked it. `district apply --upgrade` refuses for these repos; use
+`factory_ref`. `district doctor` and `district status` compare the hosts'
+installed engine, `omp` and `droid` versions, and configured worker and review
+models, with one `WARN` row per difference and one `PASS` row when they match.
+
 ### Manual Ultron smoke test
 
 From the controller, after registering `mikeroySoft-org/benito-app` on `ultron`

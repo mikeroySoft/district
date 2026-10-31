@@ -425,6 +425,48 @@ class HostTest(DistrictCase):
         self.assertEqual(host.remote_config(data, "benito"), {"defaults": defaults})
 
 
+    def test_multi_host_repo_requires_one_listed_triage_host(self) -> None:
+        ultron = {"ssh": "factory@ultron.example", "platform": "macos"}
+        for table, error in (
+            ({"hosts": ["local", "ultron"]}, "set triage_host to one of local, ultron"),
+            ({"hosts": ["local", "ultron"], "triage_host": "benito"}, "set triage_host to one of local, ultron"),
+            ({"hosts": ["local", "ultron"], "host": "ultron", "triage_host": "local"}, "set host or hosts, not both"),
+            ({"hosts": []}, "non-empty array of distinct host names"),
+            ({"hosts": ["ultron", "ultron"]}, "non-empty array of distinct host names"),
+            ({"hosts": ["local", "benito"], "triage_host": "local"}, "host 'benito' is not defined in [hosts]"),
+        ):
+            with self.subTest(table=table):
+                data = {"hosts": {"ultron": ultron}, "repo": {"acme/widgets": {"path": "/srv/widgets", **table}}}
+                with self.assertRaises(host.DistrictError) as caught:
+                    host.factory_host(data, "acme/widgets")
+                self.assertIn(error, str(caught.exception))
+                self.assertIn("acme/widgets", str(caught.exception))
+
+        data = {"hosts": {"ultron": ultron}, "repo": {"acme/widgets": {
+            "path": "/srv/widgets", "hosts": ["local", "ultron"], "triage_host": "ultron",
+        }}}
+        self.assertEqual(host.factory_host(data, "acme/widgets"), ultron)
+        self.assertEqual(host.repo_hosts(data["repo"]["acme/widgets"]), ["local", "ultron"])
+        single = {"path": "/srv/widgets", "hosts": ["ultron"]}
+        self.assertEqual((host.repo_hosts(single), host.primary_host(single)), (["ultron"], "ultron"))
+
+    def test_remote_config_carries_host_name_and_triage_host(self) -> None:
+        data = {
+            "hosts": {"ultron": {"ssh": "factory@ultron.example"}, "benito": {"ssh": "factory@benito.example"}},
+            "repo": {
+                "acme/widgets": {"path": "/srv/widgets", "hosts": ["local", "ultron", "benito"], "triage_host": "local"},
+                "acme/solo": {"path": "/srv/solo", "host": "ultron"},
+            },
+        }
+        for name in ("ultron", "benito"):
+            with self.subTest(host=name):
+                tables = host.remote_config(data, name)["repo"]
+                self.assertEqual(tables["acme/widgets"], {
+                    "path": "/srv/widgets", "fleet": {"host_name": name, "triage_host": "local"},
+                })
+        self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/solo"], {"path": "/srv/solo"})
+        self.assertNotIn("acme/solo", host.remote_config(data, "benito")["repo"])
+
     def test_remote_config_host_override_can_unset_inherited_key(self) -> None:
         data = {
             "defaults": {
@@ -563,6 +605,31 @@ class AddTest(DistrictCase):
         self.assertIn("ultron", out)
         self.assertEqual(host.load(), {})
         self.assertEqual(self.calls("factory"), [])
+
+    def test_add_refuses_second_host_until_factory_supports_claims(self) -> None:
+        repo = self.repo(toml="")
+        registry = {
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}}},
+        }
+        host.save(registry)
+        self.fake_ssh("factory@ultron.example")
+
+        code, out = self.district("add", str(repo), "--host", "ultron")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("acme/widgets already runs on local", out)
+        self.assertIn("https://github.com/mikeroySoft/factory/issues/526", out)
+        self.assertEqual(host.load(), registry)
+        self.assertEqual([c for c in self.calls("factory") if c != "claims --supported"], [])
+
+        cases_path = self.bin / "factory.json"
+        cases_path.write_text(json.dumps([["claims --supported", "host-claims 1\n", 0], *json.loads(cases_path.read_text())]))
+        code, out = self.district("add", str(repo), "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        table = host.load()["repo"]["acme/widgets"]
+        self.assertEqual((table["hosts"], table["triage_host"], "host" in table), (["local", "ultron"], "local", False))
 
     def test_basename_collision_refused(self) -> None:
         host.save({"repo": {"someone/widgets": {"path": "/elsewhere", "dashboard": {"port": 8765}}}})
@@ -1451,6 +1518,92 @@ class ApplyTest(DistrictCase):
         self.assertFalse(any("/home/controller/factory-src" in command for command in commands))
         self.assertEqual(host.load()["hosts"]["ultron"]["engine"]["sha"], sha)
 
+
+    def test_apply_refuses_multi_host_repo_until_factory_supports_claims(self) -> None:
+        repo = self.repo(toml="")
+        host.save({
+            "defaults": {"factory_ref": "main"},
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local"}},
+        })
+        self.fake_ssh("factory@ultron.example")
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("acme/widgets lists several hosts", out)
+        self.assertIn("https://github.com/mikeroySoft/factory/issues/526", out)
+        self.assertEqual([c for c in self.calls("uv") if "install" in c], [])
+        self.assertEqual([c for c in self.calls("factory") if c != "claims --supported"], [])
+        self.assertFalse(any("factory install" in " ".join(call) for call in self.ssh_calls()))
+
+    def test_multi_host_repo_pins_same_engine_sha_on_every_host(self) -> None:
+        old, new, other = "0" * 40, "a" * 40, "b" * 40
+
+        def runner(name: str, resolves: str, install_rc: int, log: list[str]) -> host.RemoteRunner:
+            def transport(argv, **_kwargs):
+                command = argv[-1]
+                log.append(command)
+                if "Path.home()" in command:
+                    out = json.dumps({"home": "/Users/m", "config_home": "/Users/m/.config", "path": "/usr/bin", "uid": 501})
+                    return subprocess.CompletedProcess(argv, 0, out + "\n", "")
+                if command.endswith("git remote get-url origin"):
+                    return subprocess.CompletedProcess(argv, 0, "https://github.com/mikeroySoft/factory.git\n", "")
+                if "git ls-remote --exit-code" in command:
+                    return subprocess.CompletedProcess(argv, 0, f"{resolves}\trefs/heads/main\n", "")
+                if command.startswith("gh api "):
+                    out = json.dumps([{"total_count": 1, "check_runs": [{"status": "completed", "conclusion": "success"}]}])
+                    return subprocess.CompletedProcess(argv, 0, out, "")
+                if command.startswith("uv tool install") and f"@{new}" in command:
+                    return subprocess.CompletedProcess(argv, install_rc, "", "install broke" if install_rc else "")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return host.RemoteRunner(name, f"factory@{name}.example", transport=transport)
+
+        def run_fleet(ultron: tuple[str, int], benito: tuple[str, int]):
+            host.save({
+                "defaults": {"factory_ref": "main"},
+                "hosts": {
+                    name: {"ssh": f"factory@{name}.example", "factory_source": "~/factory",
+                           "engine": {"ref": "main", "sha": old}}
+                    for name in ("ultron", "benito")
+                },
+                "repo": {"acme/widgets": {"path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron"}},
+            })
+            backend = mock.Mock()
+            backend.is_active.return_value = "inactive"
+            backend.status.return_value = mock.Mock(loaded=False)
+            logs = {"ultron": [], "benito": []}
+            data = host.load()
+            contexts = {
+                name: (backend, runner(name, *spec, logs[name]), {"acme/widgets": data["repo"]["acme/widgets"]})
+                for name, spec in (("ultron", ultron), ("benito", benito))
+            }
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                result = apply.reconcile_fleet_engine(data, None, contexts)
+            installs = {name: [c.split("@")[-1].split()[0][:1] for c in log if c.startswith("uv tool install")]
+                        for name, log in logs.items()}
+            engines = {name: host.load()["hosts"][name]["engine"]["sha"] for name in logs}
+            return result, installs, engines, out.getvalue()
+
+        with mock.patch.object(host, "sync_remote_config"):
+            result, installs, engines, out = run_fleet((new, 0), (new, 0))
+            self.assertEqual(result, "applied", out)
+            self.assertEqual(installs, {"ultron": ["a"], "benito": ["a"]})
+            self.assertEqual(engines, {"ultron": new, "benito": new})
+
+            result, installs, engines, out = run_fleet((new, 0), (other, 0))
+            self.assertEqual(result, "failed", out)
+            self.assertEqual(installs, {"ultron": [], "benito": []})
+            self.assertEqual(engines, {"ultron": old, "benito": old})
+            self.assertIn("resolves differently (ultron aaaaaaaaaaaa, benito bbbbbbbbbbbb)", out)
+
+            result, installs, engines, out = run_fleet((new, 0), (new, 1))
+            self.assertEqual(result, "failed", out)
+            self.assertEqual(installs, {"ultron": ["a", "0"], "benito": ["a"]})
+            self.assertEqual(engines, {"ultron": old, "benito": old})
+            self.assertIn("held by benito (failed)", out)
+            self.assertIn("rolled back ultron", out)
 
     def test_remote_host_with_unusable_source_fails_naming_host(self) -> None:
         source = "/Users/mike/missing-factory"
@@ -2477,9 +2630,9 @@ class DoctorTest(DistrictCase):
             }
 
         def fake_host_run(name, _table, argv, **_kwargs):
-            out = self.versions.get((name, argv[0])) if argv[1:] == ["--version"] else None
+            out = self.versions.get((name, argv[-2])) if argv[-1] == "--version" else None
             if out is None:
-                return subprocess.CompletedProcess(argv, 127, "", f"{argv[0]}: not found")
+                return subprocess.CompletedProcess(argv, 127, "", f"{argv[-2]}: not found")
             return subprocess.CompletedProcess(argv, 0, out, "")
 
         def parity(rows):
