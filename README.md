@@ -124,13 +124,14 @@ falls back to `main`. A tag, such as `factory_ref = "v0.4.7"`, or a branch,
 such as `"main"`, pins that explicit remote ref instead; tags take precedence
 over branches with the same name.
 
-Every target host resolves the ref from its Factory checkout, requires successful
-GitHub check runs, and installs the immutable revision there through `uv` with
+Every target resolves the ref from its Factory checkout, requires successful
+GitHub check runs, and installs the immutable revision through `uv` with
 `factory_extras`. Optional `[hosts.NAME].factory_source` overrides the default
-source on that host. A controller-absolute `[defaults].factory_source` is never
-sent remotely, so such hosts must define their own source. Engine state is
-recorded under `[defaults.engine]` for the
-controller and `[hosts.NAME.engine]` for each remote host. An unchanged commit
+source on that host. If a remote host has no override and the default is a
+controller-absolute path, the controller resolves its canonical Git origin and
+the remote installs `git+<origin>@<sha>`; the controller path is never sent
+remotely. Engine state is recorded under `[defaults.engine]` for the controller
+and `[hosts.NAME.engine]` for each remote host. An unchanged commit
 is left alone without checking CI or reinstalling. A busy Factory service
 defers only that host's changed engine install without disabling another host's
 timers. Remove `factory_ref` before rolling back, or the next apply will
