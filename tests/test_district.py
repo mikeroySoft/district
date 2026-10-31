@@ -390,6 +390,41 @@ class HostTest(DistrictCase):
         with self.assertRaisesRegex(host.DistrictError, "acme/widgets.*missing"):
             host.factory_host(data, "acme/widgets")
 
+    def test_remote_config_applies_host_defaults_overrides(self) -> None:
+        defaults = {
+            "install": {"dispatch_env": {
+                "GH_CONFIG_DIR": "/home/mike/.config/factory-gh",
+                "GIT_AUTHOR_NAME": "Factory Agent",
+                "GIT_CONFIG_KEY_0": "commit.gpgsign",
+                "GIT_CONFIG_VALUE_0": "true",
+                "GIT_CONFIG_KEY_2": "user.signingkey",
+                "GIT_CONFIG_VALUE_2": "/home/mike/.ssh/factory-agent-signing.pub",
+            }},
+            "triage": {"url": "http://127.0.0.1:11435/v1/chat/completions"},
+        }
+        data = {
+            "defaults": defaults,
+            "hosts": {
+                "ultron": {"defaults": {
+                    "install": {"dispatch_env": {
+                        "GH_CONFIG_DIR": "/Users/mike/.config/factory-gh",
+                    }},
+                    "triage": {"url": "http://tank:11435/v1/chat/completions"},
+                }},
+                "benito": {},
+            },
+        }
+
+        self.assertEqual(host.remote_config(data, "ultron")["defaults"], {
+            "install": {"dispatch_env": {
+                **defaults["install"]["dispatch_env"],
+                "GH_CONFIG_DIR": "/Users/mike/.config/factory-gh",
+            }},
+            "triage": {"url": "http://tank:11435/v1/chat/completions"},
+        })
+        self.assertEqual(host.remote_config(data, "benito"), {"defaults": defaults})
+
+
     def test_next_port_after_gap_and_default_port_rejected(self) -> None:
         data = {"repo": {"a/b": {"path": "/a", "dashboard": {"port": 8765}}, "c/d": {"path": "/c", "dashboard": {"port": 8770}}}}
         self.assertEqual(host.next_port(data), 8771)
