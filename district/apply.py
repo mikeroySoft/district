@@ -120,17 +120,21 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     if not isinstance(ref, str) or not ref.strip():
         raise DistrictError("[defaults].factory_ref must be a non-empty string")
     extras = factory_extras(data)
-    source = str(host.default(data, "factory_source"))
-    if isinstance(run_cmd, host.RemoteRunner) and source.startswith("~/"):
-        source = str(Path(run_cmd.facts()["home"]) / source[2:])
-    src = Path(os.path.expanduser(source)) if not isinstance(run_cmd, host.RemoteRunner) else Path(source)
+    source = host.factory_source(data, host_name)
+    source_cmd = run_cmd
+    if source is None:
+        source = str(host.default(data, "factory_source"))
+        source_cmd = run
+    if isinstance(source_cmd, host.RemoteRunner) and source.startswith("~/"):
+        source = str(Path(source_cmd.facts()["home"]) / source[2:])
+    src = Path(os.path.expanduser(source)) if not isinstance(source_cmd, host.RemoteRunner) else Path(source)
     try:
-        if isinstance(run_cmd, host.RemoteRunner):
-            if run_cmd(["test", "-d", str(src)]).returncode:
+        if isinstance(source_cmd, host.RemoteRunner):
+            if source_cmd(["test", "-d", str(src)]).returncode:
                 raise OSError(f"{src} does not exist")
         elif not src.is_dir():
             raise OSError(f"{src} does not exist")
-        origin_proc = run_cmd(["git", "remote", "get-url", "origin"], cwd=src)
+        origin_proc = source_cmd(["git", "remote", "get-url", "origin"], cwd=src)
         if origin_proc.returncode:
             raise OSError(origin_proc.stderr.strip() or "could not read origin")
         origin = origin_proc.stdout.strip()
@@ -138,7 +142,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
         if slug is None:
             raise OSError(f"{src} origin is not a GitHub repository")
         if ref == "latest-odd":
-            resolved = run_cmd(["git", "ls-remote", "--tags", origin], cwd=src)
+            resolved = source_cmd(["git", "ls-remote", "--tags", origin], cwd=src)
             if resolved.returncode:
                 raise OSError(resolved.stderr.strip() or "ls-remote failed")
             target = latest_odd_tag(resolved.stdout)
@@ -146,7 +150,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
                 raise OSError(f"no odd-patch tag on {origin}")
             resolved_ref, sha = target
         else:
-            resolved = run_cmd([
+            resolved = source_cmd([
                 "git", "ls-remote", "--exit-code", origin,
                 f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}",
             ], cwd=src)
@@ -164,6 +168,9 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
             else:
                 raise OSError("remote ref did not resolve to one commit")
     except OSError as exc:
+        if host_name != "local":
+            print(f"engine:{host_name} FAIL factory source {src}: {exc}")
+            return "failed"
         print(f"engine {ref} unresolved: {exc}; keeping installed engine")
         return "unchanged"
     if installed_engine_commit(data, host_name) == sha:
@@ -171,8 +178,8 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
             record.clear_deferred(engine_target)
         print(f"engine {sha[:7]} ({resolved_ref})")
         return "unchanged"
-    checks = run_cmd(["gh", "api", "--paginate", "--slurp",
-                      f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
+    checks = source_cmd(["gh", "api", "--paginate", "--slurp",
+                         f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
     if checks.returncode:
         print(f"engine {sha[:12]} CI unavailable; keeping installed engine")
         return "unchanged"
@@ -377,15 +384,25 @@ def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None
     repos = _host_repos(data, host_name) if repos is None else repos
     engine_target = "engine" if host_name == "local" else f"engine:{host_name}"
     extras = factory_extras(data)
-    source_path = str(host.default(data, "factory_source"))
-    if isinstance(run_cmd, host.RemoteRunner) and source_path.startswith("~/"):
-        source_path = str(Path(run_cmd.facts()["home"]) / source_path[2:])
-    src = Path(os.path.expanduser(source_path)) if not isinstance(run_cmd, host.RemoteRunner) else Path(source_path)
-    proc = run_cmd(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=src)
+    source_path = host.factory_source(data, host_name)
+    source_cmd = run_cmd
+    if source_path is None:
+        source_path = str(host.default(data, "factory_source"))
+        source_cmd = run
+    if isinstance(source_cmd, host.RemoteRunner) and source_path.startswith("~/"):
+        source_path = str(Path(source_cmd.facts()["home"]) / source_path[2:])
+    src = (
+        Path(os.path.expanduser(source_path))
+        if not isinstance(source_cmd, host.RemoteRunner)
+        else Path(source_path)
+    )
+    proc = source_cmd(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=src)
     if proc.returncode != 0:
         raise DistrictError(f"{ref}: not a commit in {src}")
     sha = proc.stdout.strip()
-    if ref == "HEAD" and run_cmd(["git", "status", "--porcelain"], cwd=src, check=True).stdout.strip():
+    if ref == "HEAD" and source_cmd(
+        ["git", "status", "--porcelain"], cwd=src, check=True
+    ).stdout.strip():
         raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
     services = [f"{host.unit_name(slug)}.service" for slug in repos]
     if busy := busy_units(services, backend):
@@ -401,7 +418,15 @@ def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None
         base = tmp if isinstance(tmp, host.RemotePath) else Path(tmp)
         tar, tree = base / "engine.tar", base / sha
         tree.mkdir()
-        run_cmd(["git", "archive", "-o", str(tar), sha], cwd=src, check=True)
+        if source_cmd is run_cmd:
+            source_cmd(["git", "archive", "-o", str(tar), sha], cwd=src, check=True)
+        else:
+            with tempfile.TemporaryDirectory(prefix="district-engine-export-") as export_tmp:
+                controller_tar = Path(export_tmp) / "engine.tar"
+                source_cmd(
+                    ["git", "archive", "-o", str(controller_tar), sha], cwd=src, check=True
+                )
+                tar.write_bytes(controller_tar.read_bytes())
         run_cmd(["tar", "-x", "-C", str(tree), "-f", str(tar)], check=True)
         source = f"{tree}[{','.join(extras)}]" if extras else str(tree)
         active_timers = [timer for timer in timers if backend.is_active(timer) == "active"]

@@ -39,7 +39,7 @@ only once.
 | Command | What one invocation does |
 |---|---|
 | `district add <path\|url>` | Onboard a repo, or adopt one that already has `.factory.toml`. `--dry-run` prints the proposal (slug, clone path, fork parent, port, gate checks); `--host NAME`, `--check NAME=CMD`, `--exclusive a,b`, `--no-edit`. |
-| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: units, labels, `factory doctor`, failure cap, package-age policy. Remote commands and config writes use bounded BatchMode SSH. Unit changes drain only that repository's active timer; a busy service is deferred without touching its timer. If `[defaults].factory_ref` is set, each target host installs the exact CI-green commit through its own `uv`; engine metadata is per host. An unreachable host exits 1 for its factories while other hosts continue. Then runs `gh --version` and `factory --version` under each reconciled dispatch/dashboard unit's PATH. `--upgrade` explicitly reinstalls Factory from the target host's `[defaults].factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
+| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: units, labels, `factory doctor`, failure cap, package-age policy. Remote commands and config writes use bounded BatchMode SSH. Unit changes drain only that repository's active timer; a busy service is deferred without touching its timer. If `[defaults].factory_ref` is set, each target host installs the exact CI-green commit through its own `uv`; engine metadata is per host. An unreachable host exits 1 for its factories while other hosts continue. Then runs `gh --version` and `factory --version` under each reconciled dispatch/dashboard unit's PATH. `--upgrade` explicitly reinstalls Factory from the target host's `factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table across local and remote hosts. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. An unreachable host keeps its factories visible as unreachable with the last successful observation time and produces unknown exit 2, not fleet failure exit 1. Exit 1 remains operational attention or a failed controller `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row); exit 0 means every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
 | `district doctor` | Check District's own host prerequisites and every toolchain profile declared by a managed repository. `--json`. |
@@ -82,6 +82,7 @@ then assign it with `district add --host ultron …` or a repo table:
 [hosts.ultron]
 ssh = "factory@ultron.example"
 platform = "macos"
+factory_source = "~/src/factory" # optional override for this host
 xcode_version = "27.1"
 root = "~/factories" # optional
 
@@ -123,10 +124,14 @@ falls back to `main`. A tag, such as `factory_ref = "v0.4.7"`, or a branch,
 such as `"main"`, pins that explicit remote ref instead; tags take precedence
 over branches with the same name.
 
-Every target host resolves the ref from its Factory checkout, requires successful
-GitHub check runs, and installs the immutable revision there through `uv` with
-`factory_extras`. Engine state is recorded under `[defaults.engine]` for the
-controller and `[hosts.NAME.engine]` for each remote host. An unchanged commit
+Every target resolves the ref from its Factory checkout, requires successful
+GitHub check runs, and installs the immutable revision through `uv` with
+`factory_extras`. Optional `[hosts.NAME].factory_source` overrides the default
+source on that host. If a remote host has no override and the default is a
+controller-absolute path, the controller resolves its canonical Git origin and
+the remote installs `git+<origin>@<sha>`; the controller path is never sent
+remotely. Engine state is recorded under `[defaults.engine]` for the controller
+and `[hosts.NAME.engine]` for each remote host. An unchanged commit
 is left alone without checking CI or reinstalling. A busy Factory service
 defers only that host's changed engine install without disabling another host's
 timers. Remove `factory_ref` before rolling back, or the next apply will
