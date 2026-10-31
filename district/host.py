@@ -446,8 +446,9 @@ def set_engine(data: dict, name: str, value: dict) -> None:
     container["engine"] = value
 
 
-def _service_run(argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
-    return run(argv, check=check, quiet=True)
+def _service_run(argv: list[str], *, check: bool = False,
+                 timeout: float | None = None) -> subprocess.CompletedProcess:
+    return run(argv, check=check, quiet=True, timeout=timeout)
 
 
 def service_backend(target: str | dict = "local", *, run=None, **kwargs) -> service.ServiceBackend:

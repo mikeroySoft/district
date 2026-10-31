@@ -11,7 +11,8 @@ from pathlib import Path
 from unittest import mock
 
 from district import apply, host, install_state, report
-from test_district import DOCTOR, DistrictCase, dashboard
+from district.service import LaunchdBackend, ServiceDefinition, SystemdUserBackend
+from tests.test_district import DOCTOR, DistrictCase, dashboard
 
 AT = datetime(2026, 10, 27, 18, 30, tzinfo=timezone.utc)
 SHA = "a" * 40
@@ -74,6 +75,82 @@ class InstallStateTest(DistrictCase):
         })
         self.stub("uv", ("tool list --show-version-specifiers", "district v0.1.3\nfactory v0.8.9\n"))
         self.stub("systemctl", ("show *", SHOW), ("is-active *", "active\n"))
+
+    def test_timer_states_reads_launchd_backend(self) -> None:
+        self.stub("launchctl")
+        calls = []
+
+        def run(argv: list[str], *, check: bool = False,
+                timeout: float | None = None) -> subprocess.CompletedProcess:
+            calls.append(argv)
+            running = argv[-1].endswith("/factory-widgets")
+            state = "state = running\npid = 4242\n" if running else "state = exited\n"
+            return subprocess.CompletedProcess(argv, 0, state, "")
+
+        backend = LaunchdBackend(run, home=self.tmp / "home", uid=501, raw_path="")
+        backend.agent_dir.mkdir(parents=True)
+        for label in ("factory-gadgets", "factory-widgets"):
+            (backend.agent_dir / f"{label}.plist").write_bytes(
+                backend.render(ServiceDefinition(
+                    label=label,
+                    description=label,
+                    argv=("factory", "dispatch"),
+                    root=self.tmp,
+                    interval="10min",
+                ))
+            )
+
+        with mock.patch.object(host, "service_backend", return_value=backend):
+            states = install_state.timer_states({"repo": {}})
+
+        self.assertEqual(states["factory-gadgets.timer"], {
+            "enabled": "enabled", "active": "active",
+            "last_trigger": "unknown", "next_trigger": "unknown",
+            "service_activating": False,
+        })
+        self.assertEqual(states["factory-widgets.timer"], {
+            "enabled": "enabled", "active": "active",
+            "last_trigger": "unknown", "next_trigger": "unknown",
+            "service_activating": True,
+        })
+        self.assertTrue(calls)
+        self.assertEqual(self.calls("systemctl"), [])
+        self.assertEqual(self.calls("launchctl"), [])
+
+    def test_timer_states_preserves_systemd_output(self) -> None:
+        self.stub("launchctl")
+        calls = []
+
+        def run(argv: list[str], *, check: bool = False,
+                timeout: float | None = None) -> subprocess.CompletedProcess:
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, 0, SHOW, "")
+
+        unit_dir = self.tmp / "systemd"
+        unit_dir.mkdir()
+        (unit_dir / "factory-widgets.timer").touch()
+        backend = SystemdUserBackend(run, unit_dir=unit_dir)
+
+        with mock.patch.object(host, "service_backend", return_value=backend):
+            states = install_state.timer_states({"repo": {}})
+
+        self.assertEqual(states, {
+            "district-apply.timer": {
+                "enabled": "enabled", "active": "active",
+                "last_trigger": "Tue 2026-10-27 10:10:00 PDT",
+                "next_trigger": "Tue 2026-10-27 11:10:00 PDT",
+                "service_activating": False,
+            },
+            "factory-widgets.timer": {
+                "enabled": "enabled", "active": "inactive",
+                "last_trigger": "Tue 2026-10-27 10:00:00 PDT",
+                "next_trigger": "Tue 2026-10-27 11:00:00 PDT",
+                "service_activating": True,
+            },
+        })
+        self.assertTrue(calls)
+        self.assertEqual(self.calls("systemctl"), [])
+        self.assertEqual(self.calls("launchctl"), [])
 
     def test_stubbed_local_state_produces_schema_versioned_document(self) -> None:
         with mock.patch.object(install_state, "now", return_value=AT), \

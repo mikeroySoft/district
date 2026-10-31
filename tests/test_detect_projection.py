@@ -2,7 +2,7 @@
 
 import json
 import os
-from test_district import DistrictCase
+from tests.test_district import DistrictCase
 from district import host
 from district.dashboard_read import detect
 

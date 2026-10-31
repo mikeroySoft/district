@@ -119,43 +119,26 @@ def _timer_names(data: dict) -> list[str]:
         names.update(f"{host.unit_name(slug)}.timer" for slug in host.repos(data) if not host.is_remote(data, slug))
     except (KeyError, TypeError, SystemExit):
         pass
-    try:
-        names.update(path.name for path in host.unit_dir().glob("factory-*.timer"))
-    except OSError:
-        pass
     return sorted(names)
-
-
-def _show_blocks(output: str) -> dict[str, dict[str, str]]:
-    result = {}
-    for raw in output.strip().split("\n\n") if output.strip() else []:
-        values = dict(line.split("=", 1) for line in raw.splitlines() if "=" in line)
-        if values.get("Id"):
-            result[values["Id"]] = values
-    return result
 
 
 def timer_states(data: dict | None = None) -> dict[str, dict]:
     data = data if isinstance(data, dict) else _safe_config()
-    timers = _timer_names(data)
-    services = [name.removesuffix(".timer") + ".service" for name in timers]
-    properties = "Id,UnitFileState,ActiveState,LastTriggerUSec,NextElapseUSecRealtime"
+    requested = set(_timer_names(data))
     try:
-        proc = host.run(["systemctl", "--user", "show", *timers, *services, f"--property={properties}"],
-                        timeout=LOCAL_TIMEOUT)
-        blocks = _show_blocks(proc.stdout)
+        states = host.service_backend().scheduled_jobs(requested, timeout=LOCAL_TIMEOUT)
     except (OSError, subprocess.TimeoutExpired, SystemExit):
-        blocks = {}
+        states = {}
     result = {}
-    for name, service in zip(timers, services):
-        timer = blocks.get(name, {})
-        active = blocks.get(service, {}).get("ActiveState")
+    for name in sorted(requested | set(states)):
+        state = states.get(name)
+        service_active = state.service_active_state if state else ""
         result[name] = {
-            "enabled": timer.get("UnitFileState") or UNKNOWN,
-            "active": timer.get("ActiveState") or UNKNOWN,
-            "last_trigger": timer.get("LastTriggerUSec") or UNKNOWN,
-            "next_trigger": timer.get("NextElapseUSecRealtime") or UNKNOWN,
-            "service_activating": active == "activating" if active else UNKNOWN,
+            "enabled": state.unit_file_state if state and state.unit_file_state else UNKNOWN,
+            "active": state.active_state if state and state.active_state else UNKNOWN,
+            "last_trigger": state.last_trigger if state and state.last_trigger else UNKNOWN,
+            "next_trigger": state.next_trigger if state and state.next_trigger else UNKNOWN,
+            "service_activating": service_active == "activating" if service_active else UNKNOWN,
         }
     return result
 
