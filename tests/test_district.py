@@ -2450,6 +2450,65 @@ class DoctorTest(DistrictCase):
         self.assertEqual(code, 0)
         self.assertIn("WARN  district-health.timer: failed: district dashboard --install", out)
 
+    def test_doctor_flags_engine_worker_and_model_drift_across_hosts(self) -> None:
+        def save(ultron_sha: str, ultron_omp: str, ultron_model: str) -> None:
+            host.save({
+                "defaults": {
+                    "engine": {"ref": "main", "sha": "a" * 40},
+                    "workers": {"default": {"command": ["omp", "-p", "--model", "anthropic/opus", "{prompt}"]}},
+                    "review": {"command": ["omp", "-p", "--model", "anthropic/opus"]},
+                },
+                "hosts": {"ultron": {
+                    "ssh": "factory@ultron.example", "platform": "macos",
+                    "engine": {"ref": "main", "sha": ultron_sha},
+                    "defaults": {"workers": {"default": {
+                        "command": ["omp", "-p", "--model", ultron_model, "{prompt}"],
+                    }}},
+                }},
+                "repo": {"mikeroySoft/factory": {
+                    "path": str(self.tmp / "factory"), "hosts": ["local", "ultron"], "triage_host": "local",
+                }},
+            })
+            self.versions = {
+                ("local", "factory"): f"factory 0.4.6 ({'a' * 7})\n",
+                ("ultron", "factory"): f"factory 0.4.6 ({ultron_sha[:7]})\n",
+                ("local", "omp"): "omp 15.1.0\n",
+                ("ultron", "omp"): ultron_omp,
+            }
+
+        def fake_host_run(name, _table, argv, **_kwargs):
+            out = self.versions.get((name, argv[0])) if argv[1:] == ["--version"] else None
+            if out is None:
+                return subprocess.CompletedProcess(argv, 127, "", f"{argv[0]}: not found")
+            return subprocess.CompletedProcess(argv, 0, out, "")
+
+        def parity(rows):
+            return [item for item in rows if item["label"].startswith("parity mikeroySoft/factory")]
+
+        self.doctor_tools()
+        which = lambda name: f"/bin/{name}" if name == "factory" else None  # noqa: E731
+        with mock.patch("district.doctor._host_run", side_effect=fake_host_run), \
+                mock.patch("district.doctor.shutil.which", side_effect=which):
+            save("b" * 40, "omp 15.0.2\n", "anthropic/sonnet")
+            _, drift_out = self.district("doctor", "--json")
+            save("a" * 40, "omp 15.1.0\n", "anthropic/opus")
+            _, match_out = self.district("doctor", "--json")
+
+        drift = {item["label"]: item for item in parity(json.loads(drift_out)["rows"])}
+        for label, values in (
+            ("parity mikeroySoft/factory engine", ("a" * 7, "b" * 7)),
+            ("parity mikeroySoft/factory worker omp", ("omp 15.1.0", "omp 15.0.2")),
+            ("parity mikeroySoft/factory models", ("anthropic/opus", "anthropic/sonnet")),
+        ):
+            with self.subTest(label=label):
+                self.assertEqual(drift[label]["status"], "WARN", drift)
+                for needle in ("local", "ultron", *values):
+                    self.assertIn(needle, drift[label]["detail"])
+        self.assertEqual(parity(json.loads(match_out)["rows"]), [{
+            "status": "PASS", "label": "parity mikeroySoft/factory",
+            "detail": "local, ultron: same engine, worker CLIs and models",
+        }])
+
     def test_doctor_reports_malformed_host_and_missing_factory(self) -> None:
         host.path().parent.mkdir(parents=True)
         host.path().write_text("[broken")
