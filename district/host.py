@@ -5,7 +5,7 @@ tables only); District keeps its own keys beside them: `[defaults]`
 clone_dir / factory_source / factory_ref (`latest-odd`, tag, or branch) /
 factory_extras / min_package_age / max_failed_passes, `[defaults.engine]` ref /
 sha / previous / installed_at (local engine state), `[hosts.*]` SSH / platform /
-root / optional Xcode version / engine (remote engine state), and per repo `path`,
+root / optional factory source / Xcode version / engine (remote engine state), and per repo `path`,
 `host`, `toolchain`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
 """
 
@@ -112,6 +112,14 @@ def save(data: dict) -> None:
 def default(data: dict, key: str):
     return data.get("defaults", {}).get(key, DEFAULTS[key])
 
+def factory_source(data: dict, name: str = "local") -> str | None:
+    if name != "local":
+        table = data.get("hosts", {}).get(name, {})
+        if "factory_source" in table:
+            return str(table["factory_source"])
+    source = str(default(data, "factory_source"))
+    return None if name != "local" and Path(source).is_absolute() else source
+
 
 def repos(data: dict) -> dict[str, dict]:
     return {slug: t for slug, t in data.get("repo", {}).items() if isinstance(t, dict) and "path" in t}
@@ -130,6 +138,11 @@ def hosts(data: dict) -> dict[str, dict]:
             raise DistrictError(f"[hosts.{name}].ssh must be a non-empty SSH target")
         if table.get("platform") not in ("linux", "macos"):
             raise DistrictError(f"[hosts.{name}].platform must be `linux` or `macos`")
+        factory_source = table.get("factory_source")
+        if factory_source is not None and (
+            not isinstance(factory_source, str) or not factory_source.strip()
+        ):
+            raise DistrictError(f"[hosts.{name}].factory_source must be a non-empty string")
         xcode_version = table.get("xcode_version")
         if xcode_version is not None and (
             not isinstance(xcode_version, str) or not xcode_version.strip()
@@ -416,7 +429,13 @@ def remote_config(data: dict, name: str) -> dict:
     result = {}
     defaults = copy.deepcopy(data.get("defaults", {}))
     defaults.pop("engine", None)
-    engine = data["hosts"][name].get("engine")
+    target = data["hosts"][name]
+    source = factory_source(data, name)
+    if source is None:
+        defaults.pop("factory_source", None)
+    elif "factory_source" in target:
+        defaults["factory_source"] = source
+    engine = target.get("engine")
     if engine is not None:
         defaults["engine"] = copy.deepcopy(engine)
     if defaults:

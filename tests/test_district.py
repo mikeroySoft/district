@@ -1379,6 +1379,101 @@ class ApplyTest(DistrictCase):
         self.assertEqual(host.load()["hosts"]["ultron"]["engine"]["sha"], sha)
 
 
+    def test_remote_host_with_unusable_source_fails_naming_host(self) -> None:
+        source = "/Users/mike/missing-factory"
+        host.save({
+            "defaults": {
+                "factory_source": "/home/controller/factory-src",
+                "factory_ref": "main",
+            },
+            "hosts": {
+                "ultron": {
+                    "ssh": "factory@ultron.example",
+                    "platform": "macos",
+                    "factory_source": source,
+                },
+            },
+            "repo": {"acme/widgets": {"path": str(self.repo(toml="")), "host": "ultron"}},
+        })
+        commands = []
+
+        def transport(argv, **kwargs):
+            command = argv[-1]
+            commands.append(command)
+            return subprocess.CompletedProcess(
+                argv,
+                1 if command.startswith("test -d ") else 0,
+                "",
+                "",
+            )
+
+        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = apply.reconcile_engine(
+                host.load(),
+                backend=mock.Mock(),
+                host_name="ultron",
+                run_cmd=runner,
+            )
+
+        self.assertEqual(result, "failed")
+        self.assertIn("ultron", output.getvalue())
+        self.assertIn(source, output.getvalue())
+        self.assertIn("FAIL", output.getvalue())
+        self.assertNotIn("keeping installed engine", output.getvalue())
+        self.assertFalse(any("/home/controller/factory-src" in command for command in commands))
+
+    def test_local_engine_source_unchanged_when_hosts_define_their_own(self) -> None:
+        sha = "b" * 40
+        controller_source = self.tmp / "controller-factory"
+        controller_source.mkdir()
+        host_source = "/Users/mike/host-factory"
+        host.save({
+            "defaults": {
+                "factory_source": str(controller_source),
+                "factory_ref": "main",
+            },
+            "hosts": {
+                "ultron": {
+                    "ssh": "factory@ultron.example",
+                    "platform": "macos",
+                    "factory_source": host_source,
+                },
+            },
+            "repo": {"acme/widgets": {"path": str(self.repo(toml=""))}},
+        })
+        calls = []
+
+        def run_cmd(argv, cwd=None, **kwargs):
+            calls.append((argv, cwd))
+            if argv == ["git", "remote", "get-url", "origin"]:
+                output = "https://github.com/mikeroySoft/factory.git\n"
+            elif argv[:3] == ["git", "ls-remote", "--exit-code"]:
+                output = f"{sha}\trefs/heads/main\n"
+            elif argv[:2] == ["gh", "api"]:
+                output = json.dumps([{
+                    "total_count": 1,
+                    "check_runs": [{"status": "completed", "conclusion": "success"}],
+                }])
+            else:
+                output = ""
+            return subprocess.CompletedProcess(argv, 0, output, "")
+
+        backend = mock.Mock()
+        backend.is_active.return_value = "inactive"
+        backend.status.return_value = mock.Mock(loaded=False)
+
+        result = apply.reconcile_engine(host.load(), backend=backend, run_cmd=run_cmd)
+
+        self.assertEqual(result, "applied")
+        self.assertEqual(
+            [cwd for argv, cwd in calls if argv == ["git", "remote", "get-url", "origin"]],
+            [controller_source],
+        )
+        self.assertFalse(any(host_source in " ".join(argv) for argv, _ in calls))
+
+
     def test_busy_engine_defers_without_draining_fleet(self) -> None:
         sha = "a" * 40
         repos = {}

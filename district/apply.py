@@ -120,7 +120,14 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     if not isinstance(ref, str) or not ref.strip():
         raise DistrictError("[defaults].factory_ref must be a non-empty string")
     extras = factory_extras(data)
-    source = str(host.default(data, "factory_source"))
+    source = host.factory_source(data, host_name)
+    if source is None:
+        controller_source = host.default(data, "factory_source")
+        print(
+            f"engine:{host_name} FAIL factory source: [hosts.{host_name}].factory_source is not set; "
+            f"controller source {controller_source} cannot be used remotely"
+        )
+        return "failed"
     if isinstance(run_cmd, host.RemoteRunner) and source.startswith("~/"):
         source = str(Path(run_cmd.facts()["home"]) / source[2:])
     src = Path(os.path.expanduser(source)) if not isinstance(run_cmd, host.RemoteRunner) else Path(source)
@@ -164,6 +171,9 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
             else:
                 raise OSError("remote ref did not resolve to one commit")
     except OSError as exc:
+        if host_name != "local":
+            print(f"engine:{host_name} FAIL factory source {src}: {exc}")
+            return "failed"
         print(f"engine {ref} unresolved: {exc}; keeping installed engine")
         return "unchanged"
     if installed_engine_commit(data, host_name) == sha:
@@ -377,7 +387,13 @@ def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None
     repos = _host_repos(data, host_name) if repos is None else repos
     engine_target = "engine" if host_name == "local" else f"engine:{host_name}"
     extras = factory_extras(data)
-    source_path = str(host.default(data, "factory_source"))
+    source_path = host.factory_source(data, host_name)
+    if source_path is None:
+        controller_source = host.default(data, "factory_source")
+        raise DistrictError(
+            f"[hosts.{host_name}].factory_source is not set; "
+            f"controller source {controller_source} cannot be used remotely"
+        )
     if isinstance(run_cmd, host.RemoteRunner) and source_path.startswith("~/"):
         source_path = str(Path(run_cmd.facts()["home"]) / source_path[2:])
     src = Path(os.path.expanduser(source_path)) if not isinstance(run_cmd, host.RemoteRunner) else Path(source_path)
