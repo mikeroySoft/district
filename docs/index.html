@@ -138,7 +138,7 @@
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
-      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.4 (October 29, 2026)</a></p>
+      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.5 (October 31, 2026)</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
@@ -296,8 +296,22 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="changelog">
     <div class="kicker">Changelog</div>
     <h2>From fleet registry to operational evidence.</h2>
-    <p class="lede">Selected milestones through October 29, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
+    <p class="lede">Selected milestones through October 31, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
     <ol class="timeline">
+      <li>
+        <div><time datetime="2026-10-31">October 31, 2026</time><span class="status shipped">Release · v0.1.5</span></div>
+        <div>
+          <h3>One controller, more than one machine.</h3>
+          <ul>
+            <li><strong>Remote hosts:</strong> the controller drives factories on other machines over bounded BatchMode SSH and writes each host's filtered Factory config there. Systemd sits behind a service-backend interface, with launchd agents for macOS hosts; apply's unit-change check and <code>district install-state</code> read through the same backend.</li>
+            <li><strong>Fleet view across hosts:</strong> status, report, and Atlas label every factory by host. An unreachable host shows as unreachable with its last-seen time, exit 2 instead of fleet failure, while other hosts continue.</li>
+            <li><strong>Per-host doctor:</strong> toolchain checks run per host, with a macOS/Xcode profile.</li>
+            <li><strong>Engine tracking:</strong> <code>factory_ref = "latest-odd"</code> follows Factory's highest odd-patch tag, installing only CI-green commits.</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> Ultron joins ROCm Tank as a factory host, managed from one District.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/releases/tag/v0.1.5">Release v0.1.5</a> · <a href="https://github.com/mikeroySoft/district/issues/96">Multi-machine fleet #96</a> · <a href="https://github.com/mikeroySoft/district/issues/99">Remote runner #99</a> · <a href="https://github.com/mikeroySoft/district/issues/100">Fleet status #100</a> · <a href="https://github.com/mikeroySoft/district/issues/118">Latest odd tag #118</a></p>
+        </div>
+      </li>
       <li>
         <div><time datetime="2026-10-29">October 29, 2026</time><span class="status shipped">Release · v0.1.4</span></div>
         <div>
@@ -469,7 +483,7 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district status
 <span class="p">$</span> district report                       <span class="c"># on-demand read-only Markdown review on stdout</span>
 <span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span>
-<span class="p">$</span> district update --to v0.1.4 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
+<span class="p">$</span> district update --to v0.1.5 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
     <p style="color:var(--text-muted)">Factories are local unless their repo table names a <code>host</code> defined under <code>[hosts.NAME]</code> (<code>ssh</code>, <code>platform</code>, optional <code>root</code>); <code>local</code> is reserved for this machine. The single controller keeps the registry and operation lock, reaches remote hosts through BatchMode SSH with a bounded connection attempt, and writes each host's filtered Factory config there. Status, report, health, and Atlas retain every factory, label it by host, and show an unreachable host as unknown/unreachable with its last-seen time while other hosts continue.</p>
