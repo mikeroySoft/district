@@ -18,6 +18,7 @@ import plistlib
 import re
 import shlex
 import subprocess
+import shlex
 import sys
 from datetime import datetime, timedelta, timezone
 import tempfile
@@ -282,6 +283,52 @@ class DistrictCase(unittest.TestCase):
     def calls(self, name: str) -> list[str]:
         log = self.bin / f"{name}.log"
         return [c.removeprefix("--user ") for c in log.read_text().splitlines()] if log.exists() else []
+
+    def fake_remote_transport(self, logical_home: str = "/Users/mike"):
+        actual_home = self.tmp / "remote"
+        actual_home.mkdir()
+        commands: list[str] = []
+
+        def transport(argv: list[str], timeout: float | None = None,
+                      input: str | None = None) -> subprocess.CompletedProcess:
+            command = argv[-1]
+            commands.append(command)
+            if "print(json.dumps({'home':str(home)" in command:
+                facts = {
+                    "home": logical_home,
+                    "config_home": f"{logical_home}/.config",
+                    "path": os.environ["PATH"],
+                    "uid": os.getuid(),
+                }
+                return subprocess.CompletedProcess(argv, 0, json.dumps(facts) + "\n", "")
+            parts = shlex.split(command)
+            if parts[:3] == ["gh", "repo", "clone"]:
+                destination = Path(parts[4].replace(logical_home, str(actual_home)))
+                destination.mkdir(parents=True)
+                subprocess.run(["git", "-C", str(destination), "init", "-q"], check=True)
+                subprocess.run([
+                    "git", "-C", str(destination), "remote", "add", "origin",
+                    f"https://github.com/{parts[3]}.git",
+                ], check=True)
+                (destination / "pyproject.toml").write_text(
+                    '[project]\nname = "remote-fixture"\ndependencies = ["pytest"]\n'
+                )
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            env = dict(os.environ, HOME=str(actual_home),
+                       XDG_CONFIG_HOME=str(actual_home / ".config"))
+            proc = subprocess.run(
+                command.replace(logical_home, str(actual_home)),
+                shell=True,
+                executable="/bin/sh",
+                env=env,
+                input=input,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+            return subprocess.CompletedProcess(argv, proc.returncode, proc.stdout, proc.stderr)
+
+        return transport, actual_home, commands
 
     def fake_ssh(self, *targets: str, unreachable: tuple[str, ...] = ()) -> dict[str, Path]:
         homes = {target: self.tmp / f"remote-{index}" for index, target in enumerate(targets)}
@@ -689,6 +736,28 @@ class AddTest(DistrictCase):
         self.assertIn("acme/widgets: on host ultron", out)
         self.assertNotIn("install", self.calls("factory"))
         self.assertFalse(any("bootstrap" in call for call in self.calls("launchctl")))
+
+    def test_add_slug_with_remote_host_clones_on_that_host(self) -> None:
+        target = "factory@ultron.example"
+        host.save({"hosts": {"ultron": {
+            "ssh": target,
+            "platform": "macos",
+            "root": "~/factories",
+        }}})
+        transport, remote_home, commands = self.fake_remote_transport()
+        runner = host.RemoteRunner("ultron", target, transport=transport)
+
+        with mock.patch.object(host, "remote_runner", return_value=runner):
+            add.main(["mikeroySoft-org/benito-app", "--host", "ultron", "--no-edit"])
+
+        clone = "gh repo clone mikeroySoft-org/benito-app /Users/mike/factories/benito-app"
+        self.assertIn(clone, commands)
+        table = host.load()["repo"]["mikeroysoft-org/benito-app"]
+        self.assertEqual(table["path"], "/Users/mike/factories/benito-app")
+        self.assertEqual(table["host"], "ultron")
+        self.assertTrue((remote_home / "factories/benito-app/.factory.toml").exists())
+        self.assertFalse((Path(os.environ["HOME"]) / "factories/benito-app").exists())
+        self.assertFalse((Path.cwd() / "mikeroySoft-org/benito-app").exists())
 
     def test_add_rejects_unknown_host_before_touching_repo(self) -> None:
         repo = self.repo(toml="")
