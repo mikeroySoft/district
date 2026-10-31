@@ -1316,6 +1316,69 @@ class ApplyTest(DistrictCase):
         self.assertEqual(code, 0, out)
         self.assertFalse(any(call.startswith("disable ") for call in self.calls("systemctl")))
 
+    def test_remote_host_without_engine_installs_from_host_source_not_controller_path(self) -> None:
+        sha = "a" * 40
+        target = "factory@ultron.example"
+        repo = self.repo(toml="")
+        host.save({
+            "defaults": {
+                "factory_source": "/home/controller/factory-src",
+                "factory_ref": "main",
+            },
+            "hosts": {
+                "ultron": {
+                    "ssh": target,
+                    "platform": "macos",
+                    "factory_source": "~/factory-src",
+                },
+            },
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
+        })
+        commands = []
+
+        def transport(argv, **kwargs):
+            command = argv[-1]
+            commands.append(command)
+            if "Path.home()" in command:
+                output, returncode = json.dumps({
+                    "home": "/Users/mike",
+                    "config_home": "/Users/mike/.config",
+                    "path": "/usr/bin",
+                    "uid": 501,
+                }) + "\n", 0
+            elif command.startswith("test -d "):
+                output, returncode = "", 0 if command == "test -d /Users/mike/factory-src" else 1
+            elif command.endswith("git remote get-url origin"):
+                output, returncode = "https://github.com/mikeroySoft/factory.git\n", 0
+            elif "git ls-remote --exit-code" in command:
+                output, returncode = f"{sha}\trefs/heads/main\n", 0
+            elif command.startswith("gh api "):
+                output, returncode = json.dumps([{
+                    "total_count": 1,
+                    "check_runs": [{"status": "completed", "conclusion": "success"}],
+                }]), 0
+            else:
+                output, returncode = "", 0
+            return subprocess.CompletedProcess(argv, returncode, output, "")
+
+        runner = host.RemoteRunner("ultron", target, transport=transport)
+        backend = mock.Mock()
+        backend.is_active.return_value = "inactive"
+        backend.status.return_value = mock.Mock(loaded=False)
+
+        result = apply.reconcile_engine(host.load(), backend=backend, host_name="ultron", run_cmd=runner)
+
+        self.assertEqual(result, "applied")
+        self.assertTrue(any(
+            command.startswith(
+                f"uv tool install --reinstall --from git+https://github.com/mikeroySoft/factory.git@{sha}"
+            )
+            for command in commands
+        ))
+        self.assertFalse(any("/home/controller/factory-src" in command for command in commands))
+        self.assertEqual(host.load()["hosts"]["ultron"]["engine"]["sha"], sha)
+
+
     def test_busy_engine_defers_without_draining_fleet(self) -> None:
         sha = "a" * 40
         repos = {}
