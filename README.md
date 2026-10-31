@@ -85,12 +85,21 @@ platform = "macos"
 factory_source = "~/src/factory" # optional override for this host
 xcode_version = "27.1"
 root = "~/factories" # optional
+defaults_unset = ["triage.url"] # inherited dotted keys to omit remotely
+
+[hosts.ultron.defaults.install.dispatch_env]
+GH_CONFIG_DIR = "/Users/mike/.config/factory-gh"
 
 [repo."mikeroySoft-org/benito-app"]
 path = "/Users/mike/factories/benito-app"
 host = "ultron"
 toolchain = "macos-xcode"
 ```
+
+`[hosts.NAME.defaults]` deep-merges over `[defaults]` for that remote host;
+nested tables merge key by key. `defaults_unset` removes inherited dotted keys
+after the merge. List each inherited signing environment key there to disable
+signing on one host. Neither setting changes the controller's local config.
 
 `toolchain = "macos-xcode"` makes `district doctor` check that repository's
 assigned host. Repositories on the same host share one profile check. The profile

@@ -148,6 +148,17 @@ def hosts(data: dict) -> dict[str, dict]:
             not isinstance(xcode_version, str) or not xcode_version.strip()
         ):
             raise DistrictError(f"[hosts.{name}].xcode_version must be a non-empty string")
+        defaults = table.get("defaults")
+        if defaults is not None and not isinstance(defaults, dict):
+            raise DistrictError(f"[hosts.{name}.defaults] must be a table")
+        defaults_unset = table.get("defaults_unset", [])
+        if not isinstance(defaults_unset, list) or any(
+            not isinstance(item, str) or not item or "" in item.split(".")
+            for item in defaults_unset
+        ):
+            raise DistrictError(
+                f"[hosts.{name}].defaults_unset must be an array of dotted key strings"
+            )
     return configured
 
 
@@ -425,19 +436,56 @@ def remote_runner(name: str, table: dict) -> RemoteRunner:
     return RemoteRunner(name, table["ssh"])
 
 
-def remote_config(data: dict, name: str) -> dict:
-    result = {}
+def _merge(target: dict, overrides: dict) -> None:
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(target.get(key), dict):
+            _merge(target[key], value)
+        else:
+            target[key] = copy.deepcopy(value)
+
+
+def _unset(target: dict, path: str) -> None:
+    parents = []
+    current = target
+    parts = path.split(".")
+    for key in parts[:-1]:
+        child = current.get(key)
+        if not isinstance(child, dict):
+            return
+        parents.append((current, key))
+        current = child
+    if parts[-1] not in current:
+        return
+    del current[parts[-1]]
+    for parent, key in reversed(parents):
+        if parent[key]:
+            break
+        del parent[key]
+
+
+def _remote_defaults(data: dict, name: str, target: dict) -> dict:
     defaults = copy.deepcopy(data.get("defaults", {}))
+    overrides = target.get("defaults", {})
+    _merge(defaults, overrides)
     defaults.pop("engine", None)
-    target = data["hosts"][name]
-    source = factory_source(data, name)
-    if source is None:
-        defaults.pop("factory_source", None)
-    elif "factory_source" in target:
-        defaults["factory_source"] = source
+    if "factory_source" not in overrides:
+        source = factory_source(data, name)
+        if source is None:
+            defaults.pop("factory_source", None)
+        elif "factory_source" in target:
+            defaults["factory_source"] = source
     engine = target.get("engine")
     if engine is not None:
         defaults["engine"] = copy.deepcopy(engine)
+    for path in target.get("defaults_unset", []):
+        _unset(defaults, path)
+    return defaults
+
+
+def remote_config(data: dict, name: str) -> dict:
+    result = {}
+    target = data["hosts"][name]
+    defaults = _remote_defaults(data, name, target)
     if defaults:
         result["defaults"] = defaults
     tables = {}
