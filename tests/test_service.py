@@ -29,7 +29,7 @@ class FakeRun:
         self.print_code = 0
         self.print_results: list[tuple[int, str, str]] = []
 
-    def __call__(self, argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
+    def __call__(self, argv: list[str], *, check: bool = False, **kwargs) -> subprocess.CompletedProcess:
         self.calls.append(argv)
         if argv[1:2] == ["print"]:
             if self.print_results:

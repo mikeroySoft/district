@@ -547,29 +547,34 @@ class LaunchdBackend(ServiceBackend):
 
     def start(self, name: str, *, restart: bool = False, check: bool = True,
               timeout: float = 0) -> subprocess.CompletedProcess:
+        deadline = time.monotonic() + timeout
+
+        def budget():
+            return remaining_timeout(deadline) if timeout else None
+
         label = self._label(name)
         path = self._path(label)
         target = f"{self.domain}/{label}"
         try:
-            scheduled = "StartInterval" in plistlib.loads(path.read_bytes())
+            body = path.read_bytes(timeout=budget() or 10) if not isinstance(path, Path) else path.read_bytes()
+            scheduled = "StartInterval" in plistlib.loads(body)
         except (OSError, plistlib.InvalidFileException):
             scheduled = False
-        was_loaded = self.status(name).loaded
+        was_loaded = self.status(name, timeout=budget()).loaded
         if was_loaded and name.endswith(".timer"):
-            return self._run("print", target, check=check)
+            return self._run("print", target, check=check, timeout=budget())
         if not was_loaded:
-            proc = self._run("bootstrap", self.domain, str(path), check=check)
+            proc = self._run("bootstrap", self.domain, str(path), check=check, timeout=budget())
         else:
             args = ["kickstart"]
             if restart:
                 args.append("-k")
             args.append(target)
-            proc = self._run(*args, check=check)
+            proc = self._run(*args, check=check, timeout=budget())
         if proc.returncode or not scheduled:
             return proc
-        deadline = time.monotonic() + timeout
         while True:
-            status = self._run("print", target, check=False)
+            status = self._run("print", target, check=False, timeout=remaining_timeout(deadline))
             if status.returncode:
                 result = subprocess.CompletedProcess(proc.args, status.returncode, proc.stdout, status.stderr)
             else:
@@ -578,17 +583,10 @@ class LaunchdBackend(ServiceBackend):
                 if not running and exit_code:
                     result = subprocess.CompletedProcess(proc.args, int(exit_code.group(1)), proc.stdout, proc.stderr)
                 else:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        if not was_loaded:
-                            self._run("bootout", target, check=False)
-                        raise subprocess.TimeoutExpired(
-                            proc.args, timeout, output=proc.stdout, stderr=status.stderr,
-                        )
-                    time.sleep(min(0.1, remaining))
+                    time.sleep(min(0.1, remaining_timeout(deadline)))
                     continue
             if not was_loaded:
-                self._run("bootout", target, check=False)
+                self._run("bootout", target, check=False, timeout=budget())
             return result
 
     def _unload_when_idle(self, label: str, *, check: bool,

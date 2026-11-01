@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -941,6 +942,49 @@ class OneInstallTest(unittest.TestCase):
                     self.assertEqual(sum(argv[1:] == ["doctor", "--json"] for argv, _ in self.calls),
                                      3 if fleet else 2)
 
+    def test_launchd_dashboard_hangs_preserve_pending_intent_within_budget(self):
+        launchctl = self.root / "launchctl"
+        counter = self.root / "prints"
+        backend_home = Path.home()
+        agents = backend_home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        (agents / "factory-widgets-dashboard.plist").write_bytes(plistlib.dumps({
+            "Label": "factory-widgets-dashboard", "KeepAlive": True,
+            "ProgramArguments": [str(self.cli), "dashboard"]}))
+        for stalled in ("print", "kickstart"):
+            with self.subTest(stalled=stalled):
+                counter.write_text("0")
+                launchctl.write_text(
+                    f"#!{sys.executable}\n"
+                    "import pathlib,sys,time\n"
+                    f"counter = pathlib.Path({str(counter)!r})\n"
+                    "command = sys.argv[1]\n"
+                    "if command == 'print':\n"
+                    "    n = int(counter.read_text()) + 1\n"
+                    "    counter.write_text(str(n))\n"
+                    f"    if {stalled!r} == 'print' and n == 2: time.sleep(1.5)\n"
+                    f"if command == {stalled!r} == 'kickstart': time.sleep(1.5)\n"
+                    "print('state = running\\npid = 42')\n")
+                launchctl.chmod(0o755)
+
+                def transport(argv, **kwargs):
+                    # Execute the real remote watchdog locally, never SSH/launchctl.
+                    return subprocess.run(shlex.split(argv[-1]), capture_output=True, text=True,
+                                          timeout=kwargs.get("timeout"), input=kwargs.get("input"))
+
+                runner = host.RemoteRunner("fake-mac", "unused", transport=transport)
+                backend = service.LaunchdBackend(
+                    runner, home=runner.path(str(backend_home)), uid=501, executable=str(launchctl))
+                self.data["defaults"]["engine"]["dashboards_pending"] = True
+                host.save(self.data)
+                started = time.monotonic()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    apply._finish_dashboards(
+                        self.data, "local", self.run_cmd, self.data["repo"], backend,
+                        deadline=started + 0.5)
+                self.assertLess(time.monotonic() - started, 0.8)
+                self.assertTrue(host.engine(host.load(), "local")["dashboards_pending"])
 
 if __name__ == "__main__":
     unittest.main()
+
