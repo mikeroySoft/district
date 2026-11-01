@@ -53,8 +53,10 @@ only once.
 Before stating an install version or timer state, run `district install-state --json`
 and quote its `observed_at`. Every `district apply`, successful or failed, atomically
 rewrites `${XDG_STATE_HOME:-~/.local/state}/district/install-state.json`; a warning
-in text mode identifies timers apply disabled and then re-enabled. `last_apply.stopped`
-lists corrective stops when `factory install` starts an operator-stopped timer.
+in text mode identifies timers apply disabled and then re-enabled, including
+successful `--reset` of a timer capped by an earlier apply. Unrelated timer
+activations are excluded. `last_apply.stopped` lists corrective stops when
+`factory install` starts an operator-stopped timer.
 
 When repo units change, apply preserves an existing timer's pre-install active/inactive
 state: active timers are drained and restored; inactive timers are stopped again

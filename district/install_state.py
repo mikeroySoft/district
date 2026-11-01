@@ -302,7 +302,7 @@ class ApplyRun:
         data = _safe_config()
         after = timer_states(data)
         disabled = set(self.disabled)
-        reenabled = self.reenabled & self.disabled
+        reenabled = set(self.reenabled)
         if self.observed:
             for name in set(self.timers_before) | set(after):
                 before_active = self.timers_before.get(name, {}).get("active")
