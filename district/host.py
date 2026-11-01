@@ -2,11 +2,12 @@
 
 Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
-clone_dir / factory_source / factory_ref (`latest-odd`, tag, or branch) /
-factory_extras / min_package_age / max_failed_passes, `[defaults.engine]` ref /
-sha / previous / installed_at (local engine state), `[hosts.*]` SSH / platform /
-root / optional factory source / Xcode version / engine (remote engine state), and per repo `path`,
-`host`, `toolchain`, `disabled_at`, `disabled_reason`. A repo is managed iff its table has a `path`.
+clone_dir / factory_repo / factory_ref (`latest-odd`, tag, or branch) /
+factory_extras / engine_idle_timeout / min_package_age / max_failed_passes,
+`[defaults.engine]` ref / sha / previous / installed_at (local engine state),
+`[hosts.*]` SSH / platform / root / Xcode version / engine (remote engine
+state), and per repo `path`, `host`, `toolchain`, `disabled_at`,
+`disabled_reason`. A repo is managed iff its table has a `path`.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import sys
 import tomllib
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 import tomli_w
@@ -30,9 +32,10 @@ from district.service import service_path
 
 BASE_PORT = 8764  # first allocation is 8765, agent-factory's default
 DEFAULTS = {
-    "clone_dir": "~/dev/mikeroysoft",
-    "factory_source": "~/dev/mikeroysoft/factory",
+    "clone_dir": "~/dev",
+    "factory_repo": "https://github.com/mikeroySoft/factory",
     "factory_extras": [],
+    "engine_idle_timeout": "30min",
     "min_package_age": "24h",
     "max_failed_passes": 10,
 }
@@ -101,9 +104,63 @@ def load() -> dict:
     return data
 
 
+def _has_factory_source(data: object) -> bool:
+    if not isinstance(data, dict):
+        return False
+    defaults = data.get("defaults")
+    if isinstance(defaults, dict) and "factory_source" in defaults:
+        return True
+    hosts = data.get("hosts")
+    if not isinstance(hosts, dict):
+        return False
+    return any(
+        isinstance(table, dict) and (
+            "factory_source" in table
+            or (
+                isinstance(table.get("defaults"), dict)
+                and "factory_source" in table["defaults"]
+            )
+        )
+        for table in hosts.values()
+    )
+
+
+def _migrate_factory_source(data: dict) -> None:
+    defaults = data.get("defaults")
+    if isinstance(defaults, dict):
+        defaults.pop("factory_source", None)
+    hosts = data.get("hosts")
+    if not isinstance(hosts, dict):
+        return
+    for table in hosts.values():
+        if not isinstance(table, dict):
+            continue
+        table.pop("factory_source", None)
+        nested = table.get("defaults")
+        if isinstance(nested, dict):
+            nested.pop("factory_source", None)
+
+
+def _backup_name(name: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    return f"{name}.{timestamp}.bak"
+
+
 def save(data: dict) -> None:
     p = path()
+    original = None
+    if p.exists():
+        text = p.read_text()
+        try:
+            stored = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            stored = {}
+        if _has_factory_source(stored):
+            original = text
+    _migrate_factory_source(data)
     p.parent.mkdir(parents=True, exist_ok=True)
+    if original is not None:
+        p.with_name(_backup_name(p.name)).write_text(original)
     tmp = p.with_suffix(".toml.tmp")
     tmp.write_text(tomli_w.dumps(data))
     os.replace(tmp, p)
@@ -112,13 +169,22 @@ def save(data: dict) -> None:
 def default(data: dict, key: str):
     return data.get("defaults", {}).get(key, DEFAULTS[key])
 
-def factory_source(data: dict, name: str = "local") -> str | None:
-    if name != "local":
-        table = data.get("hosts", {}).get(name, {})
-        if "factory_source" in table:
-            return str(table["factory_source"])
-    source = str(default(data, "factory_source"))
-    return None if name != "local" and Path(source).is_absolute() else source
+
+def factory_tool_paths(runner: RemoteRunner | None = None) -> tuple[Path, Path]:
+    if isinstance(runner, RemoteRunner):
+        facts = runner.facts()
+        tool_dir = Path(facts["tool_dir"])
+        tool_bin = Path(facts["tool_bin"])
+    else:
+        home = Path.home()
+        data_home = Path(os.environ.get("XDG_DATA_HOME") or home / ".local" / "share")
+        tool_dir = Path(os.environ.get("UV_TOOL_DIR") or data_home / "uv" / "tools")
+        tool_bin = Path(
+            os.environ.get("UV_TOOL_BIN_DIR")
+            or os.environ.get("XDG_BIN_HOME")
+            or home / ".local" / "bin"
+        )
+    return tool_dir / "factory", tool_bin / "factory"
 
 
 def repos(data: dict) -> dict[str, dict]:
@@ -138,11 +204,6 @@ def hosts(data: dict) -> dict[str, dict]:
             raise DistrictError(f"[hosts.{name}].ssh must be a non-empty SSH target")
         if table.get("platform") not in ("linux", "macos"):
             raise DistrictError(f"[hosts.{name}].platform must be `linux` or `macos`")
-        factory_source = table.get("factory_source")
-        if factory_source is not None and (
-            not isinstance(factory_source, str) or not factory_source.strip()
-        ):
-            raise DistrictError(f"[hosts.{name}].factory_source must be a non-empty string")
         xcode_version = table.get("xcode_version")
         if xcode_version is not None and (
             not isinstance(xcode_version, str) or not xcode_version.strip()
@@ -496,8 +557,15 @@ class RemoteRunner:
         if self._facts is None:
             script = (
                 "import json,os; from pathlib import Path; "
-                "home=Path.home(); config=Path(os.environ.get('XDG_CONFIG_HOME', home/'.config')); "
-                "print(json.dumps({'home':str(home),'config_home':str(config),'path':os.environ.get('PATH',''),"
+                "home=Path.home().resolve(); "
+                "absolute=lambda value,default: str(Path(value or default).expanduser().resolve()); "
+                "config=absolute(os.environ.get('XDG_CONFIG_HOME'),home/'.config'); "
+                "data=absolute(os.environ.get('XDG_DATA_HOME'),home/'.local/share'); "
+                "tool_dir=absolute(os.environ.get('UV_TOOL_DIR'),Path(data)/'uv/tools'); "
+                "tool_bin=absolute(os.environ.get('UV_TOOL_BIN_DIR') or os.environ.get('XDG_BIN_HOME'),"
+                "home/'.local/bin'); "
+                "print(json.dumps({'home':str(home),'config_home':config,'data_home':data,"
+                "'tool_dir':tool_dir,'tool_bin':tool_bin,'path':os.environ.get('PATH',''),"
                 "'uid':os.getuid()}))"
             )
             proc = self(["python3", "-c", script])
@@ -567,13 +635,8 @@ def _remote_defaults(data: dict, name: str, target: dict) -> dict:
     defaults = copy.deepcopy(data.get("defaults", {}))
     overrides = target.get("defaults", {})
     _merge(defaults, overrides)
+    defaults.pop("factory_source", None)
     defaults.pop("engine", None)
-    if "factory_source" not in overrides:
-        source = factory_source(data, name)
-        if source is None:
-            defaults.pop("factory_source", None)
-        elif "factory_source" in target:
-            defaults["factory_source"] = source
     engine = target.get("engine")
     if engine is not None:
         defaults["engine"] = copy.deepcopy(engine)
@@ -600,7 +663,16 @@ def remote_config(data: dict, name: str) -> dict:
 
 
 def sync_remote_config(data: dict, name: str, runner: RemoteRunner) -> None:
-    config = runner.path(PurePosixPath(runner.facts()["config_home"]) / "factory" / "config.toml")
+    config_path = PurePosixPath(runner.facts()["config_home"]) / "factory" / "config.toml"
+    config = runner.path(config_path)
+    try:
+        original = config.read_text()
+        stored = tomllib.loads(original)
+    except (OSError, tomllib.TOMLDecodeError):
+        original = None
+        stored = {}
+    if original is not None and _has_factory_source(stored):
+        runner.path(config_path.with_name(_backup_name(config_path.name))).write_text(original)
     config.write_text(tomli_w.dumps(remote_config(data, name)))
 
 

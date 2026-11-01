@@ -61,7 +61,7 @@ class InstallStateTest(DistrictCase):
         self.repo_path = self.repo()
         host.save({
             "defaults": {
-                "factory_source": str(self.repo_path),
+                "factory_repo": "https://github.com/mikeroySoft/factory",
                 "engine": {"ref": "main", "sha": SHA},
             },
             "repo": {
@@ -155,8 +155,11 @@ class InstallStateTest(DistrictCase):
     def test_stubbed_local_state_produces_schema_versioned_document(self) -> None:
         with mock.patch.object(install_state, "now", return_value=AT), \
              mock.patch.object(install_state.socket, "gethostname", return_value="tank"), \
-             mock.patch.object(install_state, "commit_counts", return_value=(2, 1)):
+             mock.patch.object(install_state, "commit_counts", return_value=(2, 1)) as compare:
             document = install_state.collect(releases=RELEASES)
+        compare.assert_called_once_with(
+            "https://github.com/mikeroySoft/factory", RELEASE_SHA, SHA,
+        )
 
         schema = json.loads(install_state.SCHEMA_PATH.read_text())
         self.assertEqual(document["schema_version"], schema["properties"]["schema_version"]["const"])
@@ -215,6 +218,52 @@ class InstallStateTest(DistrictCase):
         self.assertEqual(document["engine"]["latest_release_sha"], "unknown")
         self.assertEqual(document["engine"]["commits_ahead"], "unknown")
         self.assertEqual(document["engine"]["commits_behind"], "unknown")
+
+    def test_commit_counts_uses_bounded_github_compare(self) -> None:
+        cases = (
+            ("ahead", 2, 0, (2, 0)),
+            ("behind", 0, 3, (0, 3)),
+            ("diverged", 4, 5, (4, 5)),
+            ("identical", 0, 0, (0, 0)),
+        )
+        for status, ahead, behind, expected in cases:
+            response = json.dumps({
+                "status": status, "ahead_by": ahead, "behind_by": behind,
+            })
+            with self.subTest(status=status), mock.patch.object(
+                host, "run",
+                return_value=subprocess.CompletedProcess([], 0, response, ""),
+            ) as run:
+                self.assertEqual(
+                    install_state.commit_counts(
+                        "https://github.com/mikeroySoft/factory", RELEASE_SHA, SHA,
+                    ),
+                    expected,
+                )
+            run.assert_called_once_with(
+                ["gh", "api", f"repos/mikeroySoft/factory/compare/{RELEASE_SHA}...{SHA}"],
+                timeout=install_state.RELEASE_TIMEOUT,
+            )
+
+    def test_commit_counts_reports_unknown_for_failed_or_invalid_compare(self) -> None:
+        invalid = (
+            subprocess.CompletedProcess([], 1, "", "offline"),
+            subprocess.CompletedProcess([], 0, "not json", ""),
+            subprocess.CompletedProcess([], 0, json.dumps({"status": "ahead"}), ""),
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "status": "ahead", "ahead_by": -1, "behind_by": 0,
+            }), ""),
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "status": "identical", "ahead_by": 1, "behind_by": 0,
+            }), ""),
+        )
+        for response in invalid:
+            with self.subTest(response=response), mock.patch.object(
+                host, "run", return_value=response,
+            ):
+                self.assertIsNone(install_state.commit_counts(
+                    "https://github.com/mikeroySoft/factory", RELEASE_SHA, SHA,
+                ))
 
     def test_apply_records_and_warns_when_it_reenables_a_stopped_enabled_timer(self) -> None:
         before = {"factory-widgets.timer": timer("inactive"), "district-apply.timer": timer("active")}

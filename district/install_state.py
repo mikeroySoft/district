@@ -143,16 +143,48 @@ def timer_states(data: dict | None = None) -> dict[str, dict]:
     return result
 
 
-def commit_counts(source: object, release_sha: str, installed_sha: str) -> tuple[int, int] | None:
-    if not isinstance(source, str) or release_sha == UNKNOWN or installed_sha == UNKNOWN:
+def _github_slug(repo: object) -> str | None:
+    if not isinstance(repo, str):
+        return None
+    value = repo.removeprefix("https://github.com/").rstrip("/")
+    if value.endswith(".git"):
+        value = value[:-4]
+    return value if re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value) else None
+
+
+def commit_counts(repo: object, release_sha: str, installed_sha: str) -> tuple[int, int] | None:
+    slug = _github_slug(repo)
+    if (
+        slug is None
+        or not isinstance(release_sha, str) or not SHA.fullmatch(release_sha)
+        or not isinstance(installed_sha, str) or not SHA.fullmatch(installed_sha)
+    ):
         return None
     try:
-        proc = host.run(["git", "rev-list", "--left-right", "--count", f"{release_sha}...{installed_sha}"],
-                        cwd=Path(os.path.expanduser(source)), timeout=LOCAL_TIMEOUT)
-        behind, ahead = (int(value) for value in proc.stdout.split())
+        proc = host.run(
+            ["gh", "api", f"repos/{slug}/compare/{release_sha}...{installed_sha}"],
+            timeout=RELEASE_TIMEOUT,
+        )
+        if proc.returncode:
+            return None
+        response = json.loads(proc.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired):
         return None
-    return (ahead, behind) if proc.returncode == 0 else None
+    if not isinstance(response, dict):
+        return None
+    status = response.get("status")
+    ahead, behind = response.get("ahead_by"), response.get("behind_by")
+    if (
+        status not in {"ahead", "behind", "diverged", "identical"}
+        or isinstance(ahead, bool) or not isinstance(ahead, int) or ahead < 0
+        or isinstance(behind, bool) or not isinstance(behind, int) or behind < 0
+        or status == "ahead" and not (ahead > 0 and behind == 0)
+        or status == "behind" and not (behind > 0 and ahead == 0)
+        or status == "diverged" and not (ahead > 0 and behind > 0)
+        or status == "identical" and (ahead != 0 or behind != 0)
+    ):
+        return None
+    return ahead, behind
 
 
 def config_sha() -> str:
@@ -203,7 +235,7 @@ def collect(*, data: dict | None = None, releases: dict | None = None,
     factory_release = releases.get("factory", {})
     installed_sha = _engine_sha(data)
     latest_sha = factory_release.get("sha", UNKNOWN)
-    counts = commit_counts(data.get("defaults", {}).get("factory_source"), latest_sha, installed_sha)
+    counts = commit_counts(host.default(data, "factory_repo"), latest_sha, installed_sha)
     factory_ref = data.get("defaults", {}).get("factory_ref")
     configured_ref = data.get("defaults", {}).get("engine", {}).get("ref")
     if not isinstance(configured_ref, str) or not configured_ref:
