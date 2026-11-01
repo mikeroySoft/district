@@ -306,6 +306,11 @@ class OneInstallTest(unittest.TestCase):
         self.assertIn(TARGET, str(refused.exception))
         self.assertEqual(self.installs(), [])
         self.backend.pause_timer.assert_not_called()
+        self.assertFalse(host.engine(host.load(), "local").get("install_pending"))
+        self.data["defaults"].pop("factory_ref")
+        self.assertEqual(self.reconcile(), "unchanged")
+        self.assertEqual(self.installs(), [])
+        self.data["defaults"]["factory_ref"] = "main"
         self.assertEqual(self.reconcile(allow_downgrade=True), "applied")
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], TARGET)
 
@@ -684,6 +689,73 @@ class OneInstallTest(unittest.TestCase):
                         resolution = self.events.index(("resolution", "offline"))
                         for name in names:
                             self.assertIn(("enable", f"factory-{name}.timer"), self.events[:resolution])
+
+    def test_no_policy_apply_recovers_interrupted_install_without_active_timers(self):
+        self.data["defaults"].pop("factory_ref")
+        self.active.clear()
+
+        def crash(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                self.cli.unlink()
+                (self.tool / "uv-receipt.toml").unlink()
+                raise SystemExit("simulated crash during uv replacement")
+            return self.run_cmd(argv, **kwargs)
+
+        with self.assertRaises(SystemExit):
+            apply.upgrade(self.data, backend=self.backend, run_cmd=crash)
+        interrupted = host.load()
+        self.data = interrupted
+        self.assertEqual(self.apply(), 0)
+        self.assertEqual(host.engine(host.load(), "local")["sha"], TARGET)
+        self.assertFalse(host.engine(host.load(), "local").get("install_pending"))
+        self.assertEqual(interrupted["defaults"]["engine"]["install_pending"],
+                         {"target": TARGET, "previous": OLD, "ref": "main"})
+        self.assertEqual(len(self.installs()), 1)
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
+
+    def test_no_policy_recovery_verifies_completed_install_without_reinstalling(self):
+        self.data["defaults"].pop("factory_ref")
+        self.active.clear()
+
+        def crash_after_install(argv, **kwargs):
+            if argv == [str(self.cli), "--version"] and self.installs():
+                raise SystemExit("simulated crash before verified state save")
+            return self.run_cmd(argv, **kwargs)
+
+        with self.assertRaises(SystemExit):
+            apply.upgrade(self.data, backend=self.backend, run_cmd=crash_after_install)
+        self.data = host.load()
+        self.assertEqual(self.apply(), 0)
+        self.assertEqual(host.engine(host.load(), "local")["sha"], TARGET)
+        self.assertFalse(host.engine(host.load(), "local").get("install_pending"))
+        self.assertEqual(len(self.installs()), 1)
+
+    def test_inflight_recovery_clears_marker_only_after_verified_install_or_rollback(self):
+        self.data["defaults"].pop("factory_ref")
+        self.active.clear()
+        for rollback_fails in (False, True):
+            with self.subTest(rollback_fails=rollback_fails):
+                self.install_receipt(OLD)
+                self.cli.unlink()
+                self.data["defaults"]["engine"] = {
+                    "sha": OLD, "target": TARGET,
+                    "install_pending": {"target": TARGET, "previous": OLD, "ref": "main"}}
+
+                def failed_install(argv, **kwargs):
+                    if argv[:3] == ["uv", "tool", "install"] and (
+                            rollback_fails or f"@{TARGET}" in argv[argv.index("--from") + 1]):
+                        return subprocess.CompletedProcess(argv, 1, "", "offline")
+                    return self.run_cmd(argv, **kwargs)
+
+                self.assertEqual(self.reconcile(run_cmd=failed_install), "failed")
+                engine = host.engine(host.load(), "local")
+                self.assertEqual(bool(engine.get("install_pending")), rollback_fails)
+                if rollback_fails:
+                    self.assertFalse(self.cli.exists())
+                else:
+                    self.assertEqual(engine["sha"], OLD)
+                    self.assertTrue(self.cli.exists())
 
     def test_unverified_offline_recovery_keeps_timer_intents_and_dashboards_pending(self):
         self.data["defaults"].pop("factory_ref")

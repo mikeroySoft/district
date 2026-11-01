@@ -161,10 +161,14 @@ Unfinished restoration intents remain durable for the next apply.
 Fleet preflight uses the same receipt, canonical CLI, and successful `--version`
 verification as reconciliation; only hosts that actually entered a window may
 install without opening one.
-Saved timer intents and pending dashboard restarts are recovered from the
-verified receipt before resolving a fresh target, including without policy or
-with unavailable remote refs. If repair and rollback cannot verify a usable
-tool, timers stay paused and the recovery state is retained.
+An authorized replacement persists `engine.install_pending` (target, previous
+revision when known, and ref) before invoking uv, even with no active timers.
+Saved install/timer intents and pending dashboard restarts are recovered before
+resolving a fresh target, including without policy or with unavailable remote refs.
+Only a verified install or rollback clears the install marker; merely resolving
+a target, including a refused downgrade, does not authorize recovery.
+If repair and rollback cannot verify a usable tool, timers stay paused and the
+recovery state is retained.
 
 `district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
 when no ref is supplied. It resolves only against the remote repository, never a

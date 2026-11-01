@@ -364,6 +364,8 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
                     previous: str | None, tool: Path, cli: Path) -> str:
     extras = factory_extras(data)
     install_url = "ssh://" + origin.replace(":", "/", 1) if origin.startswith("git@") else origin
+    _save_engine(data, name, runner, install_pending={
+        "target": sha, "ref": ref, **({"previous": previous} if previous else {})})
 
     def install(revision):
         source = f"git+{install_url}@{revision}" + (f"[{','.join(extras)}]" if extras else "")
@@ -382,11 +384,11 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
             except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as rollback:
                 print(f"engine rollback FAIL {sha} -> {previous}: {rollback}")
             else:
-                _save_engine(data, name, runner, sha=previous, dashboards_pending=True)
+                _save_engine(data, name, runner, sha=previous, dashboards_pending=True, install_pending={})
                 print(f"engine rolled back {sha} -> {previous}")
         return "failed"
     _save_engine(data, name, runner, ref=ref, sha=sha, installed_at=iso(now()), dashboards_pending=True,
-                 **({"previous": previous} if previous else {}))
+                 install_pending={}, **({"previous": previous} if previous else {}))
     print(f"installed factory engine {sha[:12]} ({ref})")
     return "applied"
 
@@ -394,7 +396,8 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
 def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record) -> str | None:
     """Finish the durable transaction before consulting a new remote policy."""
     engine = host.engine(data, name) or {}
-    if not engine.get("paused_timers") and not engine.get("dashboards_pending"):
+    pending = engine.get("install_pending") or {}
+    if not pending and not engine.get("paused_timers") and not engine.get("dashboards_pending"):
         return None
     deadline = time.monotonic() + RESTORE_TIMEOUT
     tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
@@ -402,23 +405,24 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
     try:
         receipt = _receipt_sha(tool, runner, timeout=remaining_timeout(deadline))
         try:
-            _verify_engine(receipt, tool, cli, runner, deadline=deadline)
+            _verify_engine(pending.get("target") or receipt, tool, cli, runner, deadline=deadline)
         except (OSError, subprocess.TimeoutExpired):
-            target = engine.get("target") or receipt or stored
+            target = pending.get("target") or engine.get("target") or receipt or stored
             if not isinstance(target, str) or not SHA.fullmatch(target):
                 raise OSError("no recorded revision available for recovery")
-            previous = stored if stored != target else engine.get("previous")
+            previous = (pending.get("previous") if pending else
+                        stored if stored != target else engine.get("previous"))
             with _engine_window(data, name, runner, backend, repos, record) as ready:
                 if not ready:
                     return "deferred"
                 result = _replace_engine(data, name, runner, host.default(data, "factory_repo"),
-                                         engine.get("target_ref", engine.get("ref", "main")),
+                                         pending.get("ref") or engine.get("target_ref", engine.get("ref", "main")),
                                          target, previous, tool, cli)
             _finish_dashboards(data, name, runner, repos, backend)
             return result
-        if receipt != stored:
-            _save_engine(data, name, runner, sha=receipt,
-                         ref=engine.get("target_ref", engine.get("ref", "unknown")),
+        if receipt != stored or pending:
+            _save_engine(data, name, runner, sha=receipt, install_pending={},
+                         ref=pending.get("ref") or engine.get("target_ref", engine.get("ref", "unknown")),
                          installed_at=iso(now()), dashboards_pending=True, deadline=deadline)
         if engine.get("paused_timers"):
             _restore_engine_timers(data, name, runner, backend, record, deadline=deadline)
