@@ -16,6 +16,7 @@ from typing import Callable, Mapping
 
 Runner = Callable[..., subprocess.CompletedProcess]
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
+LAUNCHD_CLEANUP_TIMEOUT = 3
 
 
 @dataclass(frozen=True)
@@ -563,31 +564,37 @@ class LaunchdBackend(ServiceBackend):
         was_loaded = self.status(name, timeout=budget()).loaded
         if was_loaded and name.endswith(".timer"):
             return self._run("print", target, check=check, timeout=budget())
-        if not was_loaded:
-            proc = self._run("bootstrap", self.domain, str(path), check=check, timeout=budget())
-        else:
-            args = ["kickstart"]
-            if restart:
-                args.append("-k")
-            args.append(target)
-            proc = self._run(*args, check=check, timeout=budget())
-        if proc.returncode or not scheduled:
-            return proc
-        while True:
-            status = self._run("print", target, check=False, timeout=remaining_timeout(deadline))
-            if status.returncode:
-                result = subprocess.CompletedProcess(proc.args, status.returncode, proc.stdout, status.stderr)
-            else:
-                running = re.search(r"^\s*state\s*=\s*running\s*$", status.stdout, re.MULTILINE)
-                exit_code = re.search(r"^\s*last exit code\s*=\s*(-?\d+)\s*$", status.stdout, re.MULTILINE)
-                if not running and exit_code:
-                    result = subprocess.CompletedProcess(proc.args, int(exit_code.group(1)), proc.stdout, proc.stderr)
-                else:
-                    time.sleep(min(0.1, remaining_timeout(deadline)))
-                    continue
+        try:
             if not was_loaded:
-                self._run("bootout", target, check=False, timeout=budget())
-            return result
+                proc = self._run("bootstrap", self.domain, str(path), check=check, timeout=budget())
+            else:
+                args = ["kickstart"]
+                if restart:
+                    args.append("-k")
+                args.append(target)
+                proc = self._run(*args, check=check, timeout=budget())
+            if proc.returncode or not scheduled:
+                return proc
+            while True:
+                status = self._run("print", target, check=False, timeout=remaining_timeout(deadline))
+                if status.returncode:
+                    result = subprocess.CompletedProcess(proc.args, status.returncode, proc.stdout, status.stderr)
+                else:
+                    running = re.search(r"^\s*state\s*=\s*running\s*$", status.stdout, re.MULTILINE)
+                    exit_code = re.search(r"^\s*last exit code\s*=\s*(-?\d+)\s*$", status.stdout, re.MULTILINE)
+                    if not running and exit_code:
+                        result = subprocess.CompletedProcess(proc.args, int(exit_code.group(1)), proc.stdout, proc.stderr)
+                    else:
+                        time.sleep(min(0.1, remaining_timeout(deadline)))
+                        continue
+                return result
+        finally:
+            if not was_loaded:
+                try:
+                    self._run("bootout", target, check=False, timeout=LAUNCHD_CLEANUP_TIMEOUT)
+                except Exception:
+                    # Cleanup must not replace the pass's result or exception.
+                    pass
 
     def _unload_when_idle(self, label: str, *, check: bool,
                           timeout: float) -> subprocess.CompletedProcess:

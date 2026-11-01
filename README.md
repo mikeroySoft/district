@@ -161,6 +161,9 @@ command. Timer/dashboard restoration has a separate 30-second budget after
 expiry; a failed timer restore does not prevent bounded attempts on the others.
 Launchd restart uses that same remaining budget for plist reads and every
 launchctl command. Unfinished restoration intents remain durable for the next apply.
+A hand-run/reset launchd job that was initially unloaded is booted out on every
+exit, including timeout, with a separate three-second cleanup limit. Cleanup
+failure does not replace the pass result; jobs already loaded at entry stay loaded.
 Fleet preflight uses the same receipt, canonical CLI, and successful `--version`
 verification as reconciliation; only hosts that actually entered a window may
 install without opening one.
