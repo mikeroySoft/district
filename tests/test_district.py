@@ -1668,8 +1668,9 @@ class ApplyTest(DistrictCase):
         self.assertEqual(code, 1, out)
         self.assertIn("acme/widgets lists several hosts; --upgrade installs per host", out)
 
-    def fleet_apply(self, context):
-        """`district apply` on a local+ultron repo with claims supported; `context` replaces _host_context."""
+    def fleet_apply(self, context, reconcile=None):
+        """`district apply` on a local+ultron repo with claims supported; `context` replaces _host_context
+        and `reconcile`, if given, is reconcile_fleet_engine's side effect."""
         repo = self.repo(toml="")
         host.save({
             "defaults": {"factory_ref": "main"},
@@ -1684,7 +1685,8 @@ class ApplyTest(DistrictCase):
 
         with mock.patch.object(host, "claims_supported", return_value=True), \
                 mock.patch.object(apply, "_host_context", side_effect=context) as built, \
-                mock.patch.object(apply, "reconcile_fleet_engine", return_value="unchanged") as reconciled, \
+                mock.patch.object(apply, "reconcile_fleet_engine", return_value="unchanged",
+                                  side_effect=reconcile) as reconciled, \
                 mock.patch.object(apply, "_apply_host", side_effect=apply_host):
             code, out = self.district("apply")
         return code, out, built, reconciled, applied
@@ -1701,6 +1703,21 @@ class ApplyTest(DistrictCase):
         self.assertIn("engine fleet (local, ultron) held: district: ultron: config.toml is not writable", out)
         reconciled.assert_not_called()
 
+    def test_apply_reports_fleet_engine_remote_failure_as_a_held_row(self) -> None:
+        """#134 round 4: a host dropping inside the fleet engine step is an `engine fleet … held`
+        row with exit 1, and every host still gets its repos applied."""
+        def drop(*_args):
+            raise host.RemoteHostError("ultron", "ssh: connect to host ultron.example port 22: Connection refused")
+
+        code, out, _, reconciled, applied = self.fleet_apply(
+            lambda data, name: (f"run-{name}", f"backend-{name}"), reconcile=drop)
+
+        self.assertEqual(code, 1, out)
+        reconciled.assert_called_once()
+        self.assertIn("engine fleet (local, ultron) held: host ultron unreachable: ssh: connect to host ultron.example", out)
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(sorted(name for name, _, _ in applied), ["local", "ultron"])
+
     def test_apply_builds_each_fleet_host_context_once(self) -> None:
         code, out, built, reconciled, applied = self.fleet_apply(lambda data, name: (f"run-{name}", f"backend-{name}"))
 
@@ -1712,14 +1729,17 @@ class ApplyTest(DistrictCase):
     OLD, NEW = "0" * 40, "a" * 40
 
     def run_fleet(self, ultron_spec: tuple, benito_spec: tuple):
-        """reconcile_fleet_engine over fake ultron/benito; a spec is (resolves, install_rc[, ci_rc[, busy]])."""
+        """reconcile_fleet_engine over fake ultron/benito; a spec is (resolves, install_rc[, ci_rc[, busy[, drop]]]),
+        where ssh to that host exits 255 on any command containing `drop`."""
         old, new = self.OLD, self.NEW
 
         def runner(name: str, resolves: str, install_rc: int, log: list[str],
-                   ci_rc: int = 0, busy: bool = False) -> host.RemoteRunner:
+                   ci_rc: int = 0, busy: bool = False, drop: str | None = None) -> host.RemoteRunner:
             def transport(argv, **_kwargs):
                 command = argv[-1]
                 log.append(command)
+                if drop and drop in command:
+                    return subprocess.CompletedProcess(argv, 255, "", f"ssh: connect to host {name}.example port 22: Connection refused")
                 if "Path.home()" in command:
                     out = json.dumps({"home": "/Users/m", "config_home": "/Users/m/.config", "path": "/usr/bin", "uid": 501})
                     return subprocess.CompletedProcess(argv, 0, out + "\n", "")
@@ -1807,6 +1827,40 @@ class ApplyTest(DistrictCase):
             self.assertEqual(installs, {"ultron": [], "benito": []})
             self.assertEqual(engines, {"ultron": old, "benito": old})
             self.assertIn("held by benito (CI unavailable)", out)
+
+    def test_fleet_host_dropping_mid_install_rolls_back_moved_hosts(self) -> None:
+        """#134 round 4: ssh to benito exits 255 during its install, after ultron moved. The fleet
+        names benito as the blocker and puts ultron back instead of escaping with a traceback."""
+        old, new = self.OLD, self.NEW
+        with mock.patch.object(host, "sync_remote_config"):
+            result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, False, f"@{new}"))
+        self.assertEqual(result, "failed", out)
+        self.assertEqual(installs, {"ultron": ["a", "0"], "benito": ["a"]})
+        self.assertEqual(engines, {"ultron": old, "benito": old})
+        self.assertIn("held by benito (failed: host benito unreachable: ssh: connect to host benito.example", out)
+        self.assertIn("rolled back ultron", out)
+
+    def test_fleet_host_dropping_during_rollback_is_reported_stuck(self) -> None:
+        old, new = self.OLD, self.NEW
+        with mock.patch.object(host, "sync_remote_config"):
+            result, installs, engines, out = self.run_fleet((new, 0, 0, False, f"@{old}"), (new, 1))
+        self.assertEqual(result, "failed", out)
+        self.assertEqual(engines, {"ultron": new, "benito": old})
+        self.assertIn("held by benito (failed)", out)
+        self.assertIn("FAIL could not roll back ultron", out)
+        self.assertIn("host ultron unreachable", out)
+
+    def test_fleet_host_dropping_before_any_install_holds_every_host(self) -> None:
+        old, new = self.OLD, self.NEW
+        for drop in ("git ls-remote", "gh api "):
+            with self.subTest(drop=drop), mock.patch.object(host, "sync_remote_config"):
+                result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, False, drop))
+                self.assertEqual(result, "failed", out)
+                self.assertEqual(installs, {"ultron": [], "benito": []})
+                self.assertEqual(engines, {"ultron": old, "benito": old})
+                self.assertIn("benito", out)
+                self.assertIn("host benito unreachable", out)
+                self.assertIn("every host keeps its engine", out)
 
     def test_remote_host_with_unusable_source_fails_naming_host(self) -> None:
         source = "/Users/mike/missing-factory"
@@ -2206,6 +2260,10 @@ class StatusTest(DistrictCase):
         with mock.patch.object(doctor, "parity_by_slug", return_value={"acme/widgets": [drift]}):
             _code, out = self.district("status", "--json")
             _code, text = self.district("status")
+        same = {"status": "PASS", "label": "parity acme/widgets", "detail": "local, ultron: same engine, worker CLIs and models"}
+        with mock.patch.object(doctor, "parity_by_slug", return_value={"acme/widgets": [same]}):
+            _code, passing = self.district("status")
+        self.assertIn("PASS  parity acme/widgets: local, ultron: same engine, worker CLIs and models", passing)
 
         report = json.loads(out)
         self.assertEqual(report["acme/widgets"]["parity"], [drift])
@@ -2950,6 +3008,31 @@ class DoctorTest(DistrictCase):
             "status": "PASS", "label": "parity mikeroySoft/factory",
             "detail": "local, ultron: same engine, worker CLIs and models",
         }])
+
+    def test_doctor_engine_parity_compares_whole_version_without_a_sha(self) -> None:
+        """#134 round 4: with no sha anywhere, `factory 0.4.6` and `factory 0.4.7` are different engines."""
+        host.save({
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+            "repo": {"mikeroySoft/factory": {
+                "path": str(self.tmp / "factory"), "hosts": ["local", "ultron"], "triage_host": "local",
+            }},
+        })
+        versions = {("local", "factory"): "factory 0.4.6\n", ("ultron", "factory"): "factory 0.4.7\n"}
+
+        def fake_host_run(name, _table, argv, **_kwargs):
+            out = versions.get((name, argv[-2])) if argv[-1] == "--version" else None
+            if out is None:
+                return subprocess.CompletedProcess(argv, 127, "", f"{argv[-2]}: not found")
+            return subprocess.CompletedProcess(argv, 0, out, "")
+
+        with mock.patch("district.doctor._host_run", side_effect=fake_host_run):
+            rows = doctor.parity_by_slug(host.load())["mikeroySoft/factory"]
+
+        engine = [item for item in rows if item["label"] == "parity mikeroySoft/factory engine"]
+        self.assertEqual(len(engine), 1, rows)
+        self.assertEqual(engine[0]["status"], "WARN")
+        self.assertIn("local: factory 0.4.6", engine[0]["detail"])
+        self.assertIn("ultron: factory 0.4.7", engine[0]["detail"])
 
     def test_doctor_reports_malformed_host_and_missing_factory(self) -> None:
         host.path().parent.mkdir(parents=True)
