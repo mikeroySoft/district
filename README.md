@@ -192,6 +192,8 @@ drop-ins, Factory launchd plists, the host config, and the uv receipt before
 removing unreferenced legacy `factory-*` directories. Systemd `%h` and `%%` are
 expanded; unresolved specifiers or unreadable fragments make the scan incomplete
 and prevent deletion. Referenced directories and symlinks are kept and reported.
+Local and remote cleanup normalize TOML date, time, and datetime settings to ISO
+strings; unsupported scalar types raise before cleanup removes anything.
 A legacy `factory_source` setting is removed through District's config writer
 after a timestamped, byte-for-byte backup, including on remote hosts; other
 files are untouched.

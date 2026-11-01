@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date, datetime, time
 from pathlib import Path
 
 from . import host
@@ -287,6 +288,12 @@ def _run_local(payload: dict) -> dict:
     return namespace["clean"](payload)  # type: ignore[operator]
 
 
+def _json_default(value: object) -> str:
+    if isinstance(value, (date, time, datetime)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def cleanup(data: dict, *, run_cmd=None) -> None:
     """Remove legacy directories only after a complete reference scan, including unit drop-ins."""
     if run_cmd is None:
@@ -301,10 +308,11 @@ def cleanup(data: dict, *, run_cmd=None) -> None:
         "tool": str(tool),
         "data": data,
     }
+    serialized = json.dumps(payload, default=_json_default)
     if remote:
         proc = run_cmd(
             ["python3", "-c", _CLEANUP_SCRIPT],
-            input=json.dumps(payload),
+            input=serialized,
             timeout=CLEANUP_TIMEOUT,
             quiet=True,
         )
@@ -316,7 +324,7 @@ def cleanup(data: dict, *, run_cmd=None) -> None:
         except (TypeError, ValueError) as exc:
             raise host.DistrictError(f"{run_cmd.name}: legacy engine cleanup returned invalid output") from exc
     else:
-        result = _run_local(payload)
+        result = _run_local(json.loads(serialized))
 
     if result["scan_errors"]:
         print("legacy engine cleanup skipped: reference scan incomplete: " + "; ".join(result["scan_errors"]))

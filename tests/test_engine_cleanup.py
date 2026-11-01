@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import plistlib
 import subprocess
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -224,6 +226,48 @@ class EngineCleanupTest(unittest.TestCase):
 
         self.assertFalse(unused.exists())
         self.assertIn(str(unused), self.output.getvalue())
+
+    def test_toml_temporal_settings_cleanup_locally_and_remotely(self) -> None:
+        for remote in (False, True):
+            with self.subTest(remote=remote):
+                referenced = self.leftover(f"temporal-reference-{remote}")
+                unused = self.leftover(f"temporal-unused-{remote}")
+                data = tomllib.loads(
+                    "[extensions]\nupdated = 2026-11-01T12:00:00Z\n"
+                    "local_updated = 2026-11-01T12:00:00\n"
+                    "day = 2026-11-01\nclock = 12:34:56.123\n")
+                data["extensions"]["archived_path"] = str(referenced)
+                expected = {
+                    "updated": "2026-11-01T12:00:00+00:00",
+                    "local_updated": "2026-11-01T12:00:00",
+                    "day": "2026-11-01", "clock": "12:34:56.123000",
+                    "archived_path": str(referenced),
+                }
+                received = []
+                runner = self.remote_runner() if remote else None
+                if runner:
+                    transport = runner.transport
+
+                    def capture(argv, **kwargs):
+                        received.append(json.loads(kwargs["input"])["data"]["extensions"])
+                        return transport(argv, **kwargs)
+
+                    runner.transport = capture
+                engine_cleanup.cleanup(data, run_cmd=runner)
+                self.assertTrue(referenced.exists())
+                self.assertFalse(unused.exists())
+                self.assertEqual(data["extensions"]["updated"].isoformat(), expected["updated"])
+                if remote:
+                    self.assertEqual(received, [expected])
+
+    def test_unknown_cleanup_scalar_is_rejected_without_removing_anything(self) -> None:
+        for remote in (False, True):
+            with self.subTest(remote=remote):
+                unused = self.leftover(f"unknown-scalar-{remote}")
+                runner = self.remote_runner() if remote else None
+                with self.assertRaises(TypeError):
+                    engine_cleanup.cleanup({"extensions": {"unknown": object()}}, run_cmd=runner)
+                self.assertTrue(unused.exists())
 
 
 if __name__ == "__main__":
