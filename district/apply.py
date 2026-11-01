@@ -271,9 +271,10 @@ def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> lis
 
 def _restore_engine_timers(data: dict, name: str, runner, backend, record) -> None:
     paused = (host.engine(data, name) or {}).get("paused_timers", [])
-    if paused:
-        tool, cli = host.factory_tool_paths(runner)
-        _verify_engine(_receipt_sha(tool, runner), tool, cli, runner)
+    if not paused:
+        return
+    tool, cli = host.factory_tool_paths(runner)
+    _verify_engine(_receipt_sha(tool, runner), tool, cli, runner)
     remaining = list(paused)
     for timer in paused:
         try:

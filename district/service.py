@@ -619,10 +619,11 @@ class LaunchdBackend(ServiceBackend):
     def status(self, name: str, *, timeout: float | None = None) -> ServiceStatus:
         deadline = time.monotonic() + timeout if timeout is not None else None
         label = self._label(name)
-        path = self._path(label)
+        body = None
         try:
-            body = _definition_bodies(self.agent_dir, path.name, deadline=deadline).get(path.name, "")
-            document = plistlib.loads(body.encode())
+            filename = f"{label}.plist"
+            body = _definition_bodies(self.agent_dir, filename, deadline=deadline).get(filename)
+            document = plistlib.loads((body or "").encode())
         except (OSError, plistlib.InvalidFileException):
             document = {}
         environment = document.get("EnvironmentVariables")
@@ -634,7 +635,7 @@ class LaunchdBackend(ServiceBackend):
             return ServiceStatus(
                 "not-found",
                 "inactive",
-                "disabled" if path.exists() else "not-found",
+                "disabled" if body is not None else "not-found",
                 environment=environment,
             )
         running = re.search(r"^\s*state\s*=\s*running\s*$", proc.stdout, re.MULTILINE) is not None

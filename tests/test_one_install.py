@@ -7,8 +7,11 @@ import io
 import json
 import os
 import plistlib
+import shlex
 import subprocess
+import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -478,6 +481,145 @@ class OneInstallTest(unittest.TestCase):
         self.assertIn(OLD, self.output.getvalue())
         self.assertIn(TARGET, self.output.getvalue())
 
+    def test_zero_remote_window_does_not_sync_recovery_when_no_timers_were_paused(self):
+        self.data["defaults"]["engine_idle_timeout"] = "0s"
+        self.data["hosts"] = {"remote": {"ssh": "fake", "platform": "linux", "engine": {"sha": OLD}}}
+        def transport(*args, **kwargs):
+            self.fail("expired window issued a remote command despite having no timer intents")
+        runner = host.RemoteRunner("remote", "fake", transport=transport)
+        with apply._engine_window(self.data, "remote", runner, self.backend, self.data["repo"], None) as ready:
+            self.assertFalse(ready)
+
+    def test_stale_controller_and_remote_apply_migrate_bytes_and_clean_historical_engine(self):
+        for explicit in (False, True):
+            with self.subTest(explicit=explicit):
+                remote = self.root / f"remote-{explicit}"
+                remote_home = remote / "home"
+                remote_config = remote / "config/factory/config.toml"
+                remote_tool = remote / "tools/factory"
+                remote_cli = remote / "bin/factory"
+                legacy = remote_home / ".local/share/district" / ("factory-" + "d" * 40)
+                legacy.mkdir(parents=True)
+                remote_config.parent.mkdir(parents=True)
+                remote_original = b'# remote original\r\n[defaults]\r\nfactory_source = "/old/remote"\r\n'
+                remote_config.write_bytes(remote_original)
+                original = (
+                    f'# controller original\n[defaults]\nfactory_repo = "{REPO}"\nfactory_ref = "main"\n'
+                    f'factory_source = "{self.checkout}"\n'
+                    '[hosts.remote]\nssh = "fake@remote"\nplatform = "linux"\n'
+                    f'factory_source = "{self.checkout}"\n'
+                    f'[hosts.remote.engine]\nsha = "{OLD}"\nref = "main"\n'
+                    f'[hosts.remote.defaults]\nfactory_source = "{self.checkout}"\n'
+                    f'[repo."acme/widgets"]\npath = "{remote}/widgets"\nhost = "remote"\n'
+                ).replace("\n", "\r\n").encode()
+                host.path().parent.mkdir(parents=True, exist_ok=True)
+                host.path().write_bytes(original)  # Do not call host.save before apply.
+                agents = remote_home / "Library/LaunchAgents"
+                agents.mkdir(parents=True)
+                reference = agents / "com.example.factory-archived.plist"
+                reference.write_bytes(plistlib.dumps({
+                    "Label": "factory-archived", "ProgramArguments": [str(legacy / ".venv/bin/python")]}))
+                remote_env = {
+                    "HOME": str(remote_home), "PATH": os.defpath,
+                    "XDG_CONFIG_HOME": str(remote / "config"), "XDG_DATA_HOME": str(remote / "data"),
+                    "XDG_STATE_HOME": str(remote / "state"), "XDG_CACHE_HOME": str(remote / "cache"),
+                    "UV_TOOL_DIR": str(remote / "tools"), "UV_TOOL_BIN_DIR": str(remote / "bin"),
+                }
+                commands = []
+                installed = []
+
+                def receipt(sha):
+                    (remote_tool / "bin").mkdir(parents=True, exist_ok=True)
+                    (remote_tool / "bin/factory").touch()
+                    remote_cli.parent.mkdir(parents=True, exist_ok=True)
+                    remote_cli.unlink(missing_ok=True)
+                    remote_cli.symlink_to(remote_tool / "bin/factory")
+                    (remote_tool / "uv-receipt.toml").write_text(
+                        f'[tool]\nrequirements = [{{name="factory", rev="{sha}"}}]\n')
+
+                def transport(argv, **kwargs):
+                    parts = shlex.split(argv[-1])
+                    if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                        parts = shlex.split(parts[-1])
+                    if parts[:1] == ["cd"]:
+                        self.assertNotEqual(Path(parts[1]), self.checkout)
+                        self.assertEqual(parts[2], "&&")
+                        parts = parts[3:]
+                    if parts[:1] == ["env"]:
+                        parts = parts[1:]
+                        while parts and "=" in parts[0]:
+                            parts = parts[1:]
+                    self.assertFalse(any(str(self.checkout) in part for part in parts),
+                                     "remote commands must never consult the stale checkout")
+                    commands.append(parts)
+                    if parts[:2] == ["python3", "-c"]:
+                        return subprocess.run([sys.executable, *parts[1:]], env=remote_env,
+                                              capture_output=True, text=True, check=False,
+                                              input=kwargs.get("input"), timeout=kwargs.get("timeout"))
+                    if parts[:2] == ["git", "ls-remote"]:
+                        self.assertIn(REPO, parts)
+                        return subprocess.CompletedProcess(parts, 0, f"{self.tip}\trefs/heads/main\n", "")
+                    if parts[:2] == ["gh", "api"]:
+                        return self.run_cmd(parts, **kwargs)
+                    if parts[:3] == ["uv", "tool", "install"]:
+                        installed.append(parts)
+                        receipt(OLD if f"@{OLD}" in " ".join(parts) else TARGET)
+                        return subprocess.CompletedProcess(parts, 0, "", "")
+                    if parts[:1] == ["ps"]:
+                        return subprocess.CompletedProcess(parts, 0, "", "")
+                    if parts[0] in (str(remote_cli), "factory"):
+                        if parts[1:] in (["install", "--print"], ["install"]):
+                            body = f"[Service]\nExecStart={remote_tool}/bin/python -m factory dispatch\n"
+                            if parts[1:] == ["install", "--print"]:
+                                return subprocess.CompletedProcess(parts, 0, "# factory-widgets.service\n" + body, "")
+                            units = remote / "config/systemd/user"
+                            units.mkdir(parents=True, exist_ok=True)
+                            (units / "factory-widgets.service").write_text(body)
+                        if parts[1:2] == ["install"]:
+                            return subprocess.CompletedProcess(parts, 0, "", "")
+                        return self.run_cmd(["factory", *parts[1:]], **kwargs)
+                    self.fail(f"unexpected remote command (checkout reads/archive forbidden): {parts}")
+
+                receipt(OLD)
+                self.tip, self.compare_status = TARGET, "ahead"
+                runner = host.RemoteRunner("remote", "fake@remote", transport=transport)
+                def controller(argv, **kwargs):
+                    self.assertNotIn(argv[0], ("git", "gh"), "target resolution must run remotely")
+                    self.assertNotEqual(kwargs.get("cwd"), self.checkout)
+                    return self.run_cmd(argv, **kwargs)
+
+                original_open = Path.open
+                def open_without_checkout(path, *args, **kwargs):
+                    self.assertFalse(path.is_relative_to(self.checkout), "stale checkout must never be read")
+                    return original_open(path, *args, **kwargs)
+
+                with mock.patch.object(host, "remote_runner", return_value=runner), mock.patch.object(
+                        apply, "run", side_effect=controller), mock.patch.object(
+                        host, "run", side_effect=controller), mock.patch.object(
+                        install_state, "load_releases", return_value=install_state.unknown_releases()), mock.patch.object(
+                        install_state, "tool_versions", return_value={"district": "test", "factory": "test"}), mock.patch.object(
+                        Path, "open", new=open_without_checkout):
+                    self.assertEqual(apply.main(["--upgrade"] if explicit else []), 0)
+                    for config, before in ((host.path(), original), (remote_config, remote_original)):
+                        backups = list(config.parent.glob("config.toml.*.bak"))
+                        self.assertIn(before, [backup.read_bytes() for backup in backups])
+                        self.assertNotIn("factory_source", config.read_text())
+                    self.assertEqual(host.load()["hosts"]["remote"]["engine"]["target"], TARGET)
+                    self.assertEqual(tomllib.loads(remote_config.read_text())["defaults"]["engine"]["sha"], TARGET)
+                    self.assertEqual(len(installed), 1)
+                    self.assertTrue(legacy.exists(), "remote historical folder is still referenced")
+                    self.tip, self.compare_status = OLD, "behind"
+                    self.assertEqual(apply.main(["--upgrade"]), 1)
+                    self.assertIn(TARGET, self.output.getvalue())
+                    self.assertIn(OLD, self.output.getvalue())
+                    self.assertEqual(len(installed), 1, "ancestor must not install without override")
+                    self.tip, self.compare_status = TARGET, "ahead"
+                    reference.unlink()
+                    self.assertEqual(apply.main(["--upgrade"]), 0)
+                    self.assertFalse(legacy.exists(), "unreferenced historical folder must be removed remotely")
+                    self.assertEqual(len(installed), 1)
+                self.assertFalse(any(parts[:2] in (["git", "archive"], ["git", "rev-parse"]) for parts in commands))
+
     def test_saved_recovery_precedes_resolution_and_runs_without_policy_locally_and_in_fleet(self):
         for fleet in (False, True):
             for no_policy in (False, True):
@@ -608,7 +750,7 @@ class OneInstallTest(unittest.TestCase):
                     with apply._engine_window(self.data, "local", processes, self.backend, self.data["repo"], None) as ready:
                         self.assertFalse(ready)
                 self.assertEqual(observed[-1], exhausted_at)
-                self.assertEqual(host.engine(self.data, "local").get("paused_timers"), [])
+                self.assertEqual(host.engine(self.data, "local").get("paused_timers", []), [])
 
     def test_zero_idle_budget_issues_no_discovery_probe_or_pause(self):
         self.data["defaults"]["engine_idle_timeout"] = "0s"

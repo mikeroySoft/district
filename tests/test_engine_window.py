@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from district import service
+from district import host, service
 
 
 class EngineWindowTest(unittest.TestCase):
@@ -92,6 +92,22 @@ class EngineWindowTest(unittest.TestCase):
             self.assertEqual(set(states), {"factory-a.timer"})
             self.assertEqual(states["factory-a.timer"].service_active_state, "active")
             self.assertEqual(len(calls), 1)
+
+    def test_remote_missing_launchd_job_does_not_probe_again_after_deadline(self):
+        clock = [0.0]
+        calls = []
+        def run(argv, **kwargs):
+            self.assertGreater(kwargs.get("timeout", 0), 0, "remote probe must remain bounded")
+            calls.append(argv)
+            if argv[0] == "python3":
+                return subprocess.CompletedProcess(argv, 0, "{}", "")
+            clock[0] = 1
+            return subprocess.CompletedProcess(argv, 3, "", "job not loaded")
+        backend = service.LaunchdBackend(
+            run, home=host.RemotePath(run, "/isolated/home"), uid=501, raw_path=os.defpath)
+        with mock.patch.object(service.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(backend.is_active("factory-widgets.timer", timeout=1), "inactive")
+        self.assertEqual(len(calls), 2)
 
     def test_systemd_zero_pause_budget_never_starts_unbounded_disable(self):
         run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))

@@ -260,6 +260,14 @@ class DistrictCase(unittest.TestCase):
         self.stub("gh", ("repo view *", json.dumps({"isFork": False, "parent": None})))
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         self.stub("uv")
+        tool, factory = host.factory_tool_paths()
+        (tool / "bin").mkdir(parents=True)
+        (tool / "bin/factory").write_text(factory.read_text())
+        (tool / "bin/factory").chmod(0o755)
+        factory.unlink()
+        factory.symlink_to(tool / "bin/factory")
+        (tool / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{name="factory", rev="' + "0" * 40 + '"}]\n')
 
     def stub(self, name: str, *cases: tuple[str, str] | tuple[str, str, int]) -> None:
         exe = self.bin / name
@@ -281,6 +289,8 @@ class DistrictCase(unittest.TestCase):
             wrapper = tool_bin / "factory"
             wrapper.write_text(f'#!/bin/sh\nexec "{self.bin / "factory"}" "$@"\n')
             wrapper.chmod(0o755)
+            (tool_bin.parent / "uv-receipt.toml").write_text(
+                '[tool]\nrequirements = [{name="factory", rev="' + "0" * 40 + '"}]\n')
             cli_dir = home / ".local/bin"
             cli_dir.mkdir(parents=True)
             (cli_dir / "factory").symlink_to(wrapper)
@@ -1654,7 +1664,7 @@ class ApplyTest(DistrictCase):
 
         def run_fleet(ultron: tuple, benito: tuple):
             host.save({
-                "defaults": {"factory_ref": "main", "engine_idle_timeout": "0s"},
+                "defaults": {"factory_ref": "main", "engine_idle_timeout": "30min"},
                 "hosts": {
                     name: {"ssh": f"factory@{name}.example",
                            "engine": {"ref": "main", "sha": old}}
@@ -1662,9 +1672,15 @@ class ApplyTest(DistrictCase):
                 },
                 "repo": {"acme/widgets": {"path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron"}},
             })
+            clock = [0.0]
             def backend(busy: bool):
                 unit = mock.Mock()
-                unit.is_active.side_effect = lambda name, **kwargs: "activating" if busy and name.endswith(".service") else "inactive"
+                def active(name, **kwargs):
+                    if busy and name.endswith(".service"):
+                        clock[0] = 1800
+                        return "activating"
+                    return "inactive"
+                unit.is_active.side_effect = active
                 unit.status.return_value = mock.Mock(loaded=False)
                 unit.factory_units.return_value = set()
                 unit.resume_timer.return_value = subprocess.CompletedProcess([], 0, "", "")
@@ -1679,7 +1695,7 @@ class ApplyTest(DistrictCase):
                 for name, spec in (("ultron", ultron), ("benito", benito))
             }
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
+            with contextlib.redirect_stdout(out), mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
                 result = apply.reconcile_fleet_engine(data, None, contexts)
             installs = {name: [c.split("@")[-1].split()[0][:1] for c in log if c.startswith("uv tool install")]
                         for name, log in logs.items()}

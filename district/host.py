@@ -149,17 +149,17 @@ def save(data: dict) -> None:
     p = path()
     original = None
     if p.exists():
-        text = p.read_text()
+        contents = p.read_bytes()
         try:
-            stored = tomllib.loads(text)
+            stored = tomllib.loads(contents.decode())
         except tomllib.TOMLDecodeError:
             stored = {}
         if _has_factory_source(stored):
-            original = text
+            original = contents
     _migrate_factory_source(data)
     p.parent.mkdir(parents=True, exist_ok=True)
     if original is not None:
-        p.with_name(_backup_name(p.name)).write_text(original)
+        p.with_name(_backup_name(p.name)).write_bytes(original)
     tmp = p.with_suffix(".toml.tmp")
     tmp.write_text(tomli_w.dumps(data))
     os.replace(tmp, p)
@@ -655,13 +655,13 @@ def sync_remote_config(data: dict, name: str, runner: RemoteRunner) -> None:
     config_path = PurePosixPath(runner.facts()["config_home"]) / "factory" / "config.toml"
     config = runner.path(config_path)
     try:
-        original = config.read_text()
-        stored = tomllib.loads(original)
+        original = config.read_bytes()
+        stored = tomllib.loads(original.decode())
     except (OSError, tomllib.TOMLDecodeError):
         original = None
         stored = {}
     if original is not None and _has_factory_source(stored):
-        runner.path(config_path.with_name(_backup_name(config_path.name))).write_text(original)
+        runner.path(config_path.with_name(_backup_name(config_path.name))).write_bytes(original)
     config.write_text(tomli_w.dumps(remote_config(data, name)))
 
 

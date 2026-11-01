@@ -168,14 +168,17 @@ unless `--allow-downgrade` is present. Without `factory_ref`, ordinary apply
 leaves a verified installed engine unchanged.
 
 `install-state` obtains ahead/behind counts from GitHub compare, or reports
-`unknown` when that bounded lookup is unavailable.
+`unknown` when that bounded lookup is unavailable. Installed identity and counts
+are also unknown when the uv receipt and recorded revision do not agree.
 
 After successful engine reconciliation and unit rendering, apply scans all
-managed systemd units, Factory launchd plists, the host config, and the uv
-receipt before removing unreferenced legacy `factory-*` directories. Referenced
-directories and symlinks are kept and reported. A legacy `factory_source`
-setting is removed through District's config writer after a timestamped backup;
-other files are untouched.
+managed systemd units and their service/timer drop-ins, Factory launchd plists,
+the host config, and the uv receipt before removing unreferenced legacy
+`factory-*` directories. An unreadable fragment makes the scan incomplete and
+prevents deletion. Referenced directories and symlinks are kept and reported.
+A legacy `factory_source` setting is removed through District's config writer
+after a timestamped, byte-for-byte backup, including on remote hosts; other
+files are untouched.
 
 ### One repo on several hosts
 
