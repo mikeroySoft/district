@@ -22,7 +22,6 @@ import subprocess
 import sys
 import tomllib
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -588,16 +587,6 @@ class RemoteRunner:
         proc = self(["python3", "-c", script, name, path])
         return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else None
 
-    @contextmanager
-    def temporary_directory(self):
-        proc = self(["mktemp", "-d", "-t", "district-engine-XXXXXX"], check=True)
-        directory = proc.stdout.strip()
-        if not directory:
-            raise DistrictError(f"{self.name}: mktemp returned no directory")
-        try:
-            yield self.path(directory)
-        finally:
-            self(["rm", "-rf", "--", directory])
 
 
 def remote_runner(name: str, table: dict) -> RemoteRunner:

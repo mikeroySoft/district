@@ -175,7 +175,7 @@ def commit_counts(repo: object, release_sha: str, installed_sha: str) -> tuple[i
     status = response.get("status")
     ahead, behind = response.get("ahead_by"), response.get("behind_by")
     if (
-        status not in {"ahead", "behind", "diverged", "identical"}
+        not isinstance(status, str) or status not in {"ahead", "behind", "diverged", "identical"}
         or isinstance(ahead, bool) or not isinstance(ahead, int) or ahead < 0
         or isinstance(behind, bool) or not isinstance(behind, int) or behind < 0
         or status == "ahead" and not (ahead > 0 and behind == 0)

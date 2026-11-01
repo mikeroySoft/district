@@ -51,6 +51,7 @@ class OneInstallTest(unittest.TestCase):
         self.active = {"factory-widgets.timer"}
         self.busy = 0
         self.process_busy = 0
+        self.compare_status = "ahead"
         self.tip = TARGET
         self.bad_rev = False
         self.bad_version = False
@@ -59,10 +60,14 @@ class OneInstallTest(unittest.TestCase):
         self.backend = mock.Mock()
         self.backend.is_active.side_effect = self.is_active
         self.backend.enable.side_effect = self.enable
+        self.backend.start.return_value = subprocess.CompletedProcess([], 0, "", "")
         self.backend.status.return_value = service.ServiceStatus("not-found", "inactive", "disabled", 0)
         self.backend.definitions_changed.return_value = True
         self.backend.configuration.return_value = {"platform": "linux", "unit_dir": str(host.unit_dir())}
         self.backend.scheduled_jobs.return_value = {}
+        self.backend.factory_units.return_value = set()
+        self.backend.pause_timer.side_effect = lambda name, **kwargs: self.enable(name, False, **kwargs)
+        self.backend.resume_timer.side_effect = self.enable
         self.enterContext(mock.patch.object(apply, "run", side_effect=self.run_cmd))
         self.enterContext(mock.patch.object(host, "run", side_effect=self.run_cmd))
         self.enterContext(mock.patch.object(host, "service_backend", return_value=self.backend))
@@ -83,7 +88,7 @@ class OneInstallTest(unittest.TestCase):
             f'[tool]\nrequirements = [{{name = "factory", git = "{REPO}?rev={sha}"}}]\n'
             f'entrypoints = [{{name = "factory", install-path = "{self.cli}", from = "factory"}}]\n')
 
-    def is_active(self, name):
+    def is_active(self, name, **kwargs):
         self.events.append(("state", name))
         if name.endswith(".service") and "dashboard" not in name and self.busy:
             self.busy -= 1
@@ -99,10 +104,10 @@ class OneInstallTest(unittest.TestCase):
         if self.render_plist:
             name = "factory-widgets.plist"
             body = plistlib.dumps({"Label": "factory-widgets", "ProgramArguments": [
-                self.render_executable, "-m", "factory", "dispatch"]}).decode()
+                self.render_executable, "-P", "-m", "factory", "dispatch"]}).decode()
         else:
             name = "factory-widgets.service"
-            body = f"[Service]\nExecStart={self.render_executable} -m factory dispatch\n"
+            body = f"[Service]\nExecStart={self.render_executable} -P -m factory dispatch\n"
         return name, body
 
     def run_cmd(self, argv, **kwargs):
@@ -119,7 +124,9 @@ class OneInstallTest(unittest.TestCase):
                 out = json.dumps({"total_count": 1, "check_runs": [
                     {"status": "completed", "conclusion": conclusion}]})
             elif "/compare/" in endpoint:
-                out = json.dumps({"status": "ahead", "ahead_by": 1, "behind_by": 0})
+                out = json.dumps({"status": self.compare_status, "ahead_by": 1, "behind_by": 0})
+            elif "/commits/" in endpoint:
+                out = json.dumps({"sha": endpoint.rsplit("/", 1)[1]})
             elif "/commits" in endpoint:
                 out = json.dumps([{"sha": TIP}, {"sha": TARGET}, {"sha": OLD}])
             else:
@@ -141,6 +148,7 @@ class OneInstallTest(unittest.TestCase):
                 directory = (Path.home() / "Library/LaunchAgents") if name.endswith(".plist") else host.unit_dir()
                 directory.mkdir(parents=True, exist_ok=True)
                 (directory / name).write_text(body)
+                self.enable("factory-widgets.timer")
             elif argv[1:] == ["doctor", "--json"]:
                 out = json.dumps({"rows": []})
             elif argv[1:] == ["dashboard", "--json"]:
@@ -278,6 +286,171 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], TARGET)
         self.assertFalse(any(kwargs.get("cwd") == self.checkout for _, kwargs in self.calls))
         self.assertFalse(any(argv[:2] in (["git", "archive"], ["git", "rev-parse"]) for argv, _ in self.calls))
+
+    def test_idle_timeout_restores_timers_without_installing(self):
+        self.data["defaults"]["engine_idle_timeout"] = "0s"
+        self.busy = 5
+        record = install_state.ApplyRun("", "", OLD)
+        self.assertEqual(self.reconcile(record=record), "deferred")
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertIn("factory-widgets.service", record.deferred["engine"]["reason"])
+
+    def test_downgrade_refusal_names_both_shas_and_override_installs(self):
+        self.compare_status = "behind"
+        with self.assertRaises(host.DistrictError) as refused:
+            self.reconcile()
+        self.assertIn(OLD, str(refused.exception))
+        self.assertIn(TARGET, str(refused.exception))
+        self.assertEqual(self.installs(), [])
+        self.backend.pause_timer.assert_not_called()
+        self.assertEqual(self.reconcile(allow_downgrade=True), "applied")
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], TARGET)
+
+    def test_crash_after_install_recovers_paused_timer_and_state_without_uv(self):
+        self.data["defaults"]["engine"]["paused_timers"] = ["factory-widgets.timer"]
+        self.active.clear()
+        self.install_receipt(TARGET)
+        self.assertEqual(self.reconcile(), "unchanged")
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], TARGET)
+        self.assertEqual(host.load()["defaults"]["engine"]["paused_timers"], [])
+
+    def test_recorded_sha_without_matching_receipt_is_reinstalled(self):
+        self.data["defaults"]["engine"]["sha"] = TARGET
+        self.assertEqual(self.reconcile(), "applied")
+        self.assertEqual(len(self.installs()), 1)
+        self.assertIn(TARGET, (self.tool / "uv-receipt.toml").read_text())
+
+    def test_unexpected_install_exception_still_restores_timers(self):
+        def fail_install(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                raise RuntimeError("installer crashed")
+            return self.run_cmd(argv, **kwargs)
+        with mock.patch.object(apply, "run", side_effect=fail_install):
+            with self.assertRaisesRegex(RuntimeError, "installer crashed"):
+                self.reconcile()
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
+
+    def test_explicit_commit_upgrade_uses_remote_commit_and_records_target(self):
+        self.assertEqual(apply.upgrade(self.data, TARGET, backend=self.backend), "applied")
+        self.assertEqual(host.load()["defaults"]["engine"]["target"], TARGET)
+        self.assertFalse(any(argv[:2] == ["git", "rev-parse"] for argv, _ in self.calls))
+
+    def test_red_pinned_tag_is_not_replaced_by_an_older_green_commit(self):
+        def red_tag(argv, **kwargs):
+            if argv[:2] == ["git", "ls-remote"]:
+                return subprocess.CompletedProcess(argv, 0, f"{TIP}\trefs/tags/v0.4.7\n", "")
+            return self.run_cmd(argv, **kwargs)
+        with mock.patch.object(apply, "run", side_effect=red_tag):
+            self.assertEqual(apply.upgrade(self.data, "v0.4.7", backend=self.backend), "failed")
+        self.assertEqual(self.installs(), [])
+        self.backend.pause_timer.assert_not_called()
+        self.assertFalse(any("/commits?" in " ".join(argv) for argv, _ in self.calls))
+
+    def test_unknown_explicit_upgrade_touches_no_timer(self):
+        def missing_ref(argv, **kwargs):
+            if argv[:2] == ["git", "ls-remote"]:
+                return subprocess.CompletedProcess(argv, 2, "", "missing remote ref")
+            return self.run_cmd(argv, **kwargs)
+        with mock.patch.object(apply, "run", side_effect=missing_ref):
+            self.assertEqual(apply.upgrade(self.data, "missing", backend=self.backend), "failed")
+        self.assertEqual(self.installs(), [])
+        self.backend.pause_timer.assert_not_called()
+
+    def test_install_failure_and_timeout_roll_back_before_restoring(self):
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout):
+                self.calls.clear()
+                def fail_target(argv, **kwargs):
+                    if argv[:3] == ["uv", "tool", "install"] and f"git+{REPO}@{TARGET}" in argv:
+                        self.calls.append((list(argv), kwargs))
+                        if timeout:
+                            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+                        return subprocess.CompletedProcess(argv, 1, "", "install failed")
+                    return self.run_cmd(argv, **kwargs)
+                with mock.patch.object(apply, "run", side_effect=fail_target):
+                    self.assertEqual(self.reconcile(), "failed")
+                self.assertEqual(len(self.installs()), 2)
+                self.assertEqual(self.active, {"factory-widgets.timer"})
+                self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
+
+    def test_busy_service_with_inactive_timer_still_defers_without_install(self):
+        self.active.clear()
+        self.busy = 3
+        self.data["defaults"]["engine_idle_timeout"] = "0s"
+        self.assertEqual(self.reconcile(), "deferred")
+        self.assertEqual(self.installs(), [])
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
+
+    def test_restore_error_keeps_recovery_state_and_restores_other_timers(self):
+        timers = ["factory-widgets.timer", "factory-other.timer"]
+        self.data["defaults"]["engine"]["paused_timers"] = timers
+        self.active.clear()
+        def resume(timer):
+            if timer == timers[0]:
+                raise OSError("unavailable")
+            return self.enable(timer)
+        self.backend.resume_timer.side_effect = resume
+        with self.assertRaises(host.DistrictError):
+            self.reconcile()
+        self.assertEqual(self.backend.resume_timer.call_count, 2)
+        self.assertEqual(host.load()["defaults"]["engine"]["paused_timers"], [timers[0]])
+        self.assertEqual(self.active, {timers[1]})
+        self.assertEqual(self.installs(), [])
+
+    def test_timer_only_render_cannot_converge(self):
+        self.rendered = lambda: ("factory-widgets.timer", "[Timer]\nOnUnitActiveSec=10min\n")
+        self.assertEqual(self.apply(), 1)
+
+    def test_crash_with_unverified_target_rolls_back_to_recorded_previous_sha(self):
+        self.data["defaults"]["engine"]["paused_timers"] = ["factory-widgets.timer"]
+        self.active.clear()
+        self.install_receipt(TARGET)
+        def broken_target(argv, **kwargs):
+            if argv == [str(self.cli), "--version"] and TARGET in (self.tool / "uv-receipt.toml").read_text():
+                return subprocess.CompletedProcess(argv, 1, "", "broken target")
+            return self.run_cmd(argv, **kwargs)
+        with mock.patch.object(apply, "run", side_effect=broken_target):
+            self.assertEqual(self.reconcile(), "failed")
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual([argv[argv.index("--from") + 1] for argv in self.installs()],
+                         [f"git+{REPO}@{TARGET}", f"git+{REPO}@{OLD}"])
+
+    def test_second_apply_has_no_uv_or_timer_mutation(self):
+        self.assertEqual(self.apply(), 0)
+        self.data = host.load()
+        self.calls.clear()
+        self.events.clear()
+        self.backend.definitions_changed.return_value = False
+        self.assertEqual(self.apply(), 0)
+        self.assertEqual(self.installs(), [])
+        self.assertEqual([event for event in self.events if event[0] in ("pause", "enable")], [])
+
+    def test_crash_after_timer_restore_finishes_dashboard_restart_without_uv(self):
+        self.data["defaults"]["engine"].update(sha=TARGET, dashboards_pending=True)
+        self.install_receipt(TARGET)
+        self.backend.status.return_value = service.ServiceStatus("loaded", "active", "enabled", 42)
+        self.assertEqual(self.reconcile(), "unchanged")
+        self.assertEqual(self.installs(), [])
+        self.backend.start.assert_called_once_with("factory-widgets-dashboard.service", restart=True, check=False)
+        self.assertFalse(host.load()["defaults"]["engine"]["dashboards_pending"])
+
+    def test_unchanged_fleet_does_not_restart_dashboards_or_pause_timers(self):
+        self.install_receipt(TARGET)
+        self.data["defaults"]["engine"]["sha"] = TARGET
+        self.data["hosts"] = {"remote": {"engine": {"sha": TARGET}}}
+        self.backend.status.return_value = service.ServiceStatus("loaded", "active", "enabled", 42)
+        context = (self.run_cmd, self.backend, self.data["repo"])
+        self.assertEqual(apply.reconcile_fleet_engine(self.data, None, {"local": context, "remote": context}), "unchanged")
+        self.assertEqual(self.installs(), [])
+        self.backend.start.assert_not_called()
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import re
@@ -95,7 +96,7 @@ class ServiceBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def is_active(self, name: str) -> str:
+    def is_active(self, name: str, *, timeout: float | None = None) -> str:
         raise NotImplementedError
 
     @abstractmethod
@@ -115,6 +116,29 @@ class ServiceBackend(ABC):
     @abstractmethod
     def manager_status(self) -> str:
         raise NotImplementedError
+
+    def factory_units(self) -> set[str]:
+        """Every Factory service/timer, including auxiliary and unregistered units."""
+        raise NotImplementedError
+
+    def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
+        return self.enable(name, False, timeout=timeout)
+
+    def resume_timer(self, name: str) -> subprocess.CompletedProcess:
+        return self.enable(name, check=False)
+
+
+def _definition_bodies(directory, pattern: str) -> dict[str, str]:
+    if isinstance(directory, Path):
+        return {path.name: path.read_text() for path in directory.glob(pattern)}
+    script = (
+        "import json,pathlib,sys; "
+        "print(json.dumps({p.name:p.read_text() for p in pathlib.Path(sys.argv[1]).glob(sys.argv[2])}))"
+    )
+    proc = directory.runner(["python3", "-c", script, str(directory), pattern], timeout=10)
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or f"cannot scan {directory}")
+    return json.loads(proc.stdout)
 
 
 def _home_local_bin(home: Path) -> Path:
@@ -230,6 +254,16 @@ class SystemdUserBackend(ServiceBackend):
             (self.unit_dir / name).read_text() != body for name, body in wanted.items()
         )
 
+    def factory_units(self) -> set[str]:
+        units = set(_definition_bodies(self.unit_dir, "factory-*.service"))
+        units.update(_definition_bodies(self.unit_dir, "factory-*.timer"))
+        proc = self._run("list-units", "--all", "--plain", "--no-legend",
+                         "factory-*.service", "factory-*.timer", check=False, timeout=10)
+        if proc.returncode:
+            raise OSError(proc.stderr.strip() or "cannot list Factory units")
+        units.update(line.split()[0] for line in proc.stdout.splitlines() if line.split())
+        return {name for name in units if name.endswith((".service", ".timer"))}
+
 
     def _run(self, *args: str, check: bool = True,
              timeout: float | None = None) -> subprocess.CompletedProcess:
@@ -294,10 +328,10 @@ class SystemdUserBackend(ServiceBackend):
 
     def start(self, name: str, *, restart: bool = False, check: bool = True,
               timeout: float = 0) -> subprocess.CompletedProcess:
-        return self._run("restart" if restart else "start", name, check=check)
+        return self._run("restart" if restart else "start", name, check=check, timeout=timeout or None)
 
     def stop(self, name: str, *, check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
-        return self._run("stop", name, check=check)
+        return self._run("stop", name, check=check, timeout=timeout or None)
 
     def enable(self, name: str, enabled: bool = True, *, now: bool = True,
                check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
@@ -305,10 +339,10 @@ class SystemdUserBackend(ServiceBackend):
         if now:
             args.append("--now")
         args.append(name)
-        return self._run(*args, check=check)
+        return self._run(*args, check=check, timeout=timeout or None)
 
-    def is_active(self, name: str) -> str:
-        return self._run("is-active", name, check=False).stdout.strip()
+    def is_active(self, name: str, *, timeout: float | None = None) -> str:
+        return self._run("is-active", name, check=False, timeout=timeout).stdout.strip()
 
     def _property(self, name: str, prop: str) -> str:
         value = self._run("show", name, f"--property={prop}", "--value", "--no-pager").stdout.strip()
@@ -408,6 +442,23 @@ class LaunchdBackend(ServiceBackend):
         return existing != set(wanted) or any(
             (self.agent_dir / name).read_text() != body for name, body in wanted.items()
         )
+
+    def factory_units(self) -> set[str]:
+        units = set()
+        for name, body in _definition_bodies(self.agent_dir, "*factory*.plist").items():
+            document = plistlib.loads(body.encode())
+            label = document.get("Label", name.removesuffix(".plist"))
+            units.add(f"{label}.service")
+            if "StartInterval" in document or "StartCalendarInterval" in document:
+                units.add(f"{label}.timer")
+        return units
+
+    def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
+        # Disable scheduling without bootout, which would kill the in-flight pass.
+        return self._run("disable", f"{self.domain}/{self._label(name)}", timeout=timeout)
+
+    def resume_timer(self, name: str) -> subprocess.CompletedProcess:
+        return self._run("enable", f"{self.domain}/{self._label(name)}", check=False)
 
 
     @property
@@ -574,7 +625,9 @@ class LaunchdBackend(ServiceBackend):
         pid_match = re.search(r"^\s*pid\s*=\s*(\d+)\s*$", proc.stdout, re.MULTILINE)
         scheduled = "StartInterval" in document
         if name.endswith(".timer"):
-            active = "active"
+            disabled = self._run("print-disabled", self.domain, check=False, timeout=timeout)
+            held = re.search(r'["\']?' + re.escape(label) + r'["\']?\s*=>\s*true', disabled.stdout)
+            active = "inactive" if held else "active"
         elif running:
             active = "activating" if scheduled else "active"
         else:
@@ -613,8 +666,8 @@ class LaunchdBackend(ServiceBackend):
             )
         return result
 
-    def is_active(self, name: str) -> str:
-        return self.status(name).active_state
+    def is_active(self, name: str, *, timeout: float | None = None) -> str:
+        return self.status(name, timeout=timeout).active_state
 
     def manager_status(self) -> str:
         proc = self._run("print", self.domain, check=False)
