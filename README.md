@@ -139,6 +139,10 @@ filtered config receives the same target under `[defaults.engine]`.
 Resolution and ancestry timeouts fail the named engine step without installing;
 repository checks on that host and the remaining hosts still run.
 
+Every apply checks that the CLI exists, resolves into the canonical tool, and
+has a valid uv receipt before rendering, even without `factory_ref`. Missing
+or legacy-symlink CLIs fail the affected repo rows with the CLI path.
+
 Every host has exactly one Factory installation: the `factory` uv tool, with no
 version in its path. Every managed unit and launchd job uses that tool's Python,
 and District invokes its CLI to render units. When the target changes, District

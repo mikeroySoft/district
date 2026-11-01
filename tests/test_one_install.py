@@ -477,6 +477,30 @@ class OneInstallTest(unittest.TestCase):
         self.assertIn(OLD, self.output.getvalue())
         self.assertIn(TARGET, self.output.getvalue())
 
+    def test_no_policy_apply_rejects_legacy_cli_symlink_missing_cli_and_receipt(self):
+        self.data["defaults"].pop("factory_ref")
+        legacy = self.root / "data/district/factory-old/.venv/bin/factory"
+        legacy.parent.mkdir(parents=True)
+        legacy.touch()
+        self.render_executable = str(self.cli)
+        for invalid in ("legacy-symlink", "missing-cli", "missing-receipt"):
+            with self.subTest(invalid=invalid):
+                self.install_receipt(OLD)
+                self.calls.clear()
+                self.output.truncate(0)
+                self.output.seek(0)
+                if invalid == "missing-receipt":
+                    (self.tool / "uv-receipt.toml").unlink()
+                else:
+                    self.cli.unlink()
+                    if invalid == "legacy-symlink":
+                        self.cli.symlink_to(legacy)
+                self.assertEqual(self.apply(), 1)
+                self.assertIn("acme/widgets", self.output.getvalue())
+                self.assertIn(str(self.cli), self.output.getvalue())
+                self.assertFalse(any(argv[0] in ("factory", str(self.cli)) for argv, _ in self.calls))
+                self.assertEqual(self.installs(), [])
+
     def test_deferred_first_upgrade_then_no_policy_reports_unknown_installed_state(self):
         self.data["defaults"].pop("factory_ref")
         self.data["defaults"].pop("engine")

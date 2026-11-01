@@ -919,12 +919,20 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     )
     if engine_result == "failed":
         code = 1
-        tool, cli = host.factory_tool_paths(run_cmd)
-        if not _tool_cli(tool, cli, run_cmd):
-            reason = f"engine unavailable at {cli}; repository checks skipped"
-            for slug in targets:
-                print(f"{slug} FAIL {reason}")
-            return [], 1, (0, [reason])
+    tool, cli = host.factory_tool_paths(run_cmd)
+    try:
+        usable = _tool_cli(tool, cli, run_cmd) and _receipt_sha(tool, run_cmd) is not None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        usable = False
+        print(f"engine validation at {cli}: {exc}")
+    if not usable:
+        reason = f"engine unavailable at {cli}: must resolve into {tool} with a valid uv receipt; repository checks skipped"
+        for slug, table in targets.items():
+            row = {"slug": slug, "version": None, "doctor": "?", "drift": [], "failures": None,
+                   "fail": [reason], "disabled": table.get("disabled_at"), "timer": "unknown"}
+            rows.append(row)
+            print(line(row, status))
+        return rows, 1, (0, [])
 
     record.observe(data)
     for slug, table in targets.items():
