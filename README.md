@@ -128,6 +128,8 @@ Set optional `factory_ref` under `[defaults]` to reconcile Factory automatically
 `factory_repo` defaults to `https://github.com/mikeroySoft/factory`; no checkout
 is required. The chosen SHA (`target`), `target_ref`, and `resolved_at` are
 recorded beside the installed `sha` in `[defaults.engine]` locally.
+A resolved target alone does not establish installed identity; a deferred first
+upgrade reports missing installed SHA/ref as `unknown`.
 `latest-odd` selects the highest odd-patch semver tag, including prereleases;
 a tag or branch such as `"v0.4.7"` or `"main"` selects that remote ref. A
 selected tag commit must itself be green. For a branch, District walks up to 50

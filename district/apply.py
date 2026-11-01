@@ -989,7 +989,8 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
         cleanup(data, run_cmd=run_cmd)
     current_engine = host.engine(data, host_name)
     if current_engine and not args.upgrade and "factory_ref" not in data.get("defaults", {}):
-        print(f"engine {current_engine['sha'][:7]} ({current_engine['ref']})")
+        installed = installed_engine_commit(data, host_name)
+        print(f"engine {installed[:7] if installed else 'unknown'} ({current_engine.get('ref', 'unknown')})")
     for row in rows:
         print(line(row, status))
     converged = [row for row in rows if "deferred" not in row]

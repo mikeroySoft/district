@@ -477,6 +477,17 @@ class OneInstallTest(unittest.TestCase):
         self.assertIn(OLD, self.output.getvalue())
         self.assertIn(TARGET, self.output.getvalue())
 
+    def test_deferred_first_upgrade_then_no_policy_reports_unknown_installed_state(self):
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"].pop("engine")
+        self.data["defaults"]["engine_idle_timeout"] = "0s"
+        self.assertEqual(apply.upgrade(self.data, backend=self.backend), "deferred")
+        self.assertEqual(self.data["defaults"]["engine"]["target"], TARGET)
+        self.assertNotIn("sha", self.data["defaults"]["engine"])
+        self.assertEqual(self.apply(), 0)
+        self.assertIn("engine unknown (unknown)", self.output.getvalue())
+        self.assertEqual(self.installs(), [])
+
     def test_idle_window_bounds_every_operation_by_one_deadline(self):
         for exhausted_at in ("discovery", "timer", "pause", "service", "process"):
             with self.subTest(exhausted_at=exhausted_at):
