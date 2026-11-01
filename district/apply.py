@@ -212,10 +212,10 @@ def _tool_cli(tool: Path, cli: Path, run_cmd, *, timeout: float = SMOKE_TIMEOUT)
     if isinstance(run_cmd, host.RemoteRunner):
         script = (
             "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
-            "raise SystemExit(not (p.exists() and p.resolve().is_relative_to(pathlib.Path(sys.argv[2]))))"
+            "raise SystemExit(not (p.exists() and p.resolve().is_relative_to(pathlib.Path(sys.argv[2]).resolve())))"
         )
         return run_cmd(["python3", "-c", script, str(cli), str(tool)], timeout=timeout).returncode == 0
-    return cli.exists() and cli.resolve().is_relative_to(tool)
+    return cli.exists() and cli.resolve().is_relative_to(tool.resolve())
 
 
 def _verify_engine(sha: str | None, tool: Path, cli: Path, run_cmd, *, deadline: float | None = None) -> None:

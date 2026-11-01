@@ -146,6 +146,8 @@ checks; the pending restart remains saved for the next apply.
 Every apply checks that the CLI exists, resolves into the canonical tool, and
 has a valid uv receipt before rendering, even without `factory_ref`. Missing
 or legacy-symlink CLIs fail the affected repo rows with the CLI path.
+Ownership compares resolved CLI and tool paths, accepting symlinked UV/XDG
+directories while still rejecting CLIs redirected to legacy checkouts.
 
 Every host has exactly one Factory installation: the `factory` uv tool, with no
 version in its path. Every managed unit and launchd job uses that tool's Python,

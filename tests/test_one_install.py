@@ -205,6 +205,42 @@ class OneInstallTest(unittest.TestCase):
                 self.assertEqual(self.installs(), [])
                 self.assertTrue(host.engine(host.load(), "local")["dashboards_pending"])
 
+    def test_apply_recognizes_and_upgrades_tool_under_symlinked_uv_or_xdg_directory(self):
+        self.backend.definitions_changed.return_value = False
+        for setting in ("UV_TOOL_DIR", "XDG_DATA_HOME"):
+            real = self.root / f"real-{setting}"
+            real.mkdir()
+            alias = self.root / f"link-{setting}"
+            alias.symlink_to(real, target_is_directory=True)
+            env = {setting: str(alias)}
+            if setting == "XDG_DATA_HOME":
+                env["UV_TOOL_DIR"] = ""
+            with mock.patch.dict(os.environ, env):
+                self.tool, self.cli = host.factory_tool_paths()
+                self.render_executable = str(self.tool / "bin" / "python")
+                for upgrade in (False, True):
+                    with self.subTest(setting=setting, upgrade=upgrade):
+                        installed = OLD if upgrade else TARGET
+                        self.install_receipt(installed)
+                        self.data["defaults"]["engine"] = {"sha": installed, "ref": "main"}
+                        self.calls.clear()
+                        self.events.clear()
+                        self.output.truncate(0)
+                        self.output.seek(0)
+                        self.assertEqual(self.apply(upgrade="HEAD" if upgrade else None), 0, self.output.getvalue())
+                        output = self.output.getvalue()
+                        self.assertIn("acme/widgets  0.4.7", output)
+                        self.assertNotIn("FAIL", output)
+                        self.assertTrue(any(argv[1:] == ["doctor", "--json"] for argv, _ in self.calls))
+                        self.assertEqual(len(self.installs()), int(upgrade))
+                        self.assertEqual(self.active, {"factory-widgets.timer"})
+                        self.assertEqual([event for event in self.events if event[0] in ("pause", "enable")],
+                                         [("pause", "factory-widgets.timer"), ("enable", "factory-widgets.timer")]
+                                         if upgrade else [])
+                        engine = host.engine(host.load(), "local")
+                        self.assertEqual(engine["sha"], TARGET)
+                        self.assertFalse(engine.get("paused_timers"))
+
     def test_one_tool_and_rendered_units_reject_versioned_venvs(self):
         self.assertEqual(self.apply(), 0)
         self.assertEqual(self.installs(), [["uv", "tool", "install", "--force", "--from",
