@@ -1672,6 +1672,29 @@ class ApplyTest(DistrictCase):
                 else:
                     self.assertEqual(receipt["deferred"], [])
 
+    def test_engine_swap_defers_for_python_flags_before_factory_module(self) -> None:
+        python = Path.home() / ".local/share/uv/tools/factory/bin/python"
+        for args, busy in (
+            ("-u -m factory gate --base origin/main", True),
+            ("-X dev -m factory dispatch --ticket 489", True),
+            ("-W ignore -m factory gate", True),
+            ("-Xdev -Wignore -m factory dispatch", True),
+            ("-u -m factory dashboard --json", False),
+            ("-c print(1) -m factory gate", False),
+            ("unrelated.py -m factory gate", False),
+        ):
+            with self.subTest(args=args):
+                receipt, _, commands, _ = self.timer_state_apply(
+                    {"factory-widgets.timer": "inactive"}, engine=True,
+                    processes=f"218269 {python} {args}\n", install_starts_timer=False)
+                self.assertEqual(
+                    any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
+                self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
+                if busy:
+                    self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
+                else:
+                    self.assertEqual(receipt["deferred"], [])
+
     def test_remote_host_without_engine_installs_from_host_source_not_controller_path(self) -> None:
         sha = "a" * 40
         target = "factory@ultron.example"
