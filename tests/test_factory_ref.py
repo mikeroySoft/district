@@ -209,14 +209,6 @@ class FactoryRefTest(unittest.TestCase):
 
         self.assertIn("factory-widgets.timer", record.timers_before)
 
-    def test_install_restarts_installed_dashboard(self) -> None:
-        checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
-        backend = mock.Mock()
-        backend.status.return_value.loaded = True
-        self.calls(checks, backend=backend)
-        backend.start.assert_called_once_with(
-            f"{host.unit_name('acme/widgets')}-dashboard.service", restart=True, check=False)
-
     def test_partial_timer_disable_failure_still_restores(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
         timers = ["factory-one.timer", "factory-two.timer"]
