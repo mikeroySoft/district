@@ -144,6 +144,7 @@ to become idle, installs with `uv tool install
 --force`, and verifies both the receipt revision and CLI. A failed install or
 verification reinstalls and verifies the previous revision. The `finally` path
 restores exactly the timers District paused; dashboards restart on the new code.
+If both installs fail, affected repos fail without trying another `factory` on `PATH`.
 
 `district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
 when no ref is supplied. It resolves only against the remote repository, never a

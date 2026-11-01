@@ -905,6 +905,12 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     )
     if engine_result == "failed":
         code = 1
+        tool, cli = host.factory_tool_paths(run_cmd)
+        if not _tool_cli(tool, cli, run_cmd):
+            reason = f"engine unavailable at {cli}; repository checks skipped"
+            for slug in targets:
+                print(f"{slug} FAIL {reason}")
+            return [], 1, (0, [reason])
 
     record.observe(data)
     for slug, table in targets.items():

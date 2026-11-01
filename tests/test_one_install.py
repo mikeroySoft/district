@@ -461,6 +461,23 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
         self.assertEqual(self.active, {"factory-widgets.timer"})
 
+    def test_failed_install_and_rollback_with_missing_cli_fail_without_path_fallback(self):
+        def broken_install(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                self.calls.append((list(argv), kwargs))
+                self.cli.unlink(missing_ok=True)
+                return subprocess.CompletedProcess(argv, 1, "", "install and rollback unavailable")
+            if argv[0] in ("factory", str(self.cli)):
+                raise FileNotFoundError(str(self.cli))
+            return self.run_cmd(argv, **kwargs)
+        with mock.patch.object(apply, "run", side_effect=broken_install):
+            self.assertEqual(self.apply(upgrade="HEAD"), 1)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(len(self.installs()), 2)
+        self.assertIn("acme/widgets", self.output.getvalue())
+        self.assertIn(OLD, self.output.getvalue())
+        self.assertIn(TARGET, self.output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
