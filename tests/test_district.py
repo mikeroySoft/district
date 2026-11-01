@@ -1679,8 +1679,17 @@ class ApplyTest(DistrictCase):
             ("-X dev -m factory dispatch --ticket 489", True),
             ("-W ignore -m factory gate", True),
             ("-Xdev -Wignore -m factory dispatch", True),
+            ("-S -O -m factory gate", True),
+            ("-uS -m factory dispatch", True),
+            ("--check-hash-based-pycs always -m factory gate", True),
             ("-u -m factory dashboard --json", False),
             ("-c print(1) -m factory gate", False),
+            ("-cprint(1) -m factory gate", False),
+            ("-m unrelated -m factory gate", False),
+            ("-W -m factory gate", False),
+            ("-X -m factory gate", False),
+            ("- -m factory gate", False),
+            ("-- -m factory gate", False),
             ("unrelated.py -m factory gate", False),
         ):
             with self.subTest(args=args):

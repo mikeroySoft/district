@@ -448,13 +448,29 @@ def busy_units(services: list[str], backend=None) -> list[str]:
             if backend.is_active(service) in ("active", "activating", "deactivating")]
 
 
+def _python_entrypoint(argv: list[str]) -> list[str]:
+    """Stop at Python's module/script boundary, not text in script arguments."""
+    args = iter(argv)
+    for arg in args:
+        if arg.startswith("-c") or arg in {"-", "--"}:
+            return []
+        if arg == "-m":
+            return [arg, *args]
+        if arg in {"-W", "-X", "--check-hash-based-pycs"}:
+            next(args, None)
+        elif not arg.startswith("-"):
+            return [arg, *args]
+    return []
+
+
 def _python_factory_args(argv: list[str], tool_bin: Path, launchers: set[str]) -> list[str]:
     if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(argv[0]).name):
         return []
-    if len(argv) > 1 and argv[1] in launchers:
-        return argv[2:]
-    if Path(argv[0]).parent == tool_bin and argv[1:3] == ["-m", "factory"]:
-        return argv[3:]
+    args = _python_entrypoint(argv[1:])
+    if args and args[0] in launchers:
+        return args[1:]
+    if Path(argv[0]).parent == tool_bin and args[:2] == ["-m", "factory"]:
+        return args[2:]
     return []
 
 
