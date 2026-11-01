@@ -234,18 +234,27 @@ def _verify_engine(sha: str | None, tool: Path, cli: Path, run_cmd, *, deadline:
 def _engine_current(sha: str, tool: Path, cli: Path, runner) -> bool:
     try:
         _verify_engine(sha, tool, cli, runner)
-    except (OSError, subprocess.TimeoutExpired):
+    except OSError:
         return False
     return True
 
 
 def _save_engine(data: dict, name: str, runner, *, deadline: float | None = None, **values) -> None:
-    engine = dict(host.engine(data, name) or {})
+    previous = host.engine(data, name) or {}
+    engine = dict(previous)
     engine.update(values)
     host.set_engine(data, name, engine)
     host.save(data)
     if isinstance(runner, host.RemoteRunner):
-        host.sync_remote_config(data, name, runner, deadline=deadline)
+        try:
+            host.sync_remote_config(data, name, runner, deadline=deadline)
+        except (subprocess.TimeoutExpired, host.RemoteHostError, DistrictError):
+            # Neither a newly recorded intent nor an unfinished prior one is lost.
+            for key in ("paused_timers", "dashboards_pending", "install_pending"):
+                if previous.get(key) and not engine.get(key):
+                    engine[key] = previous[key]
+            host.save(data)
+            raise
 
 
 def _downgrade_guard(slug: str, previous: str | None, target: str, run_cmd,
@@ -400,9 +409,9 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
     if not pending and not engine.get("paused_timers") and not engine.get("dashboards_pending"):
         return None
     deadline = time.monotonic() + RESTORE_TIMEOUT
-    tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
     stored = installed_engine_commit(data, name)
     try:
+        tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
         receipt = _receipt_sha(tool, runner, timeout=remaining_timeout(deadline))
         try:
             _verify_engine(pending.get("target") or receipt, tool, cli, runner, deadline=deadline)
@@ -465,21 +474,25 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     except (OSError, ValueError, TypeError) as exc:
         print(f"{engine_target} {ref} unresolved: {exc}; keeping installed engine")
         return "failed" if explicit_ref or host_name != "local" or pin is not None else "unchanged"
-    _save_engine(data, host_name, run_cmd, target=sha, target_ref=resolved_ref, resolved_at=iso(now()))
-    tool, cli = host.factory_tool_paths(run_cmd)
-    receipt = _receipt_sha(tool, run_cmd)
-    stored_sha = installed_engine_commit(data, host_name)
-    previous = receipt or stored_sha
-    if _engine_current(sha, tool, cli, run_cmd):
-        if stored_sha != sha:
-            _save_engine(data, host_name, run_cmd, sha=sha, ref=resolved_ref,
-                         installed_at=iso(now()), dashboards_pending=True)
-        if not window_open:
-            _finish_dashboards(data, host_name, run_cmd, repos, backend)
-        if record:
-            record.clear_deferred(engine_target)
-        print(f"engine {sha[:7]} ({resolved_ref})")
-        return "unchanged"
+    try:
+        _save_engine(data, host_name, run_cmd, target=sha, target_ref=resolved_ref, resolved_at=iso(now()))
+        tool, cli = host.factory_tool_paths(run_cmd)
+        receipt = _receipt_sha(tool, run_cmd)
+        stored_sha = installed_engine_commit(data, host_name)
+        previous = receipt or stored_sha
+        if _engine_current(sha, tool, cli, run_cmd):
+            if stored_sha != sha:
+                _save_engine(data, host_name, run_cmd, sha=sha, ref=resolved_ref,
+                             installed_at=iso(now()), dashboards_pending=True)
+            if not window_open:
+                _finish_dashboards(data, host_name, run_cmd, repos, backend)
+            if record:
+                record.clear_deferred(engine_target)
+            print(f"engine {sha[:7]} ({resolved_ref})")
+            return "unchanged"
+    except subprocess.TimeoutExpired as exc:
+        print(f"{engine_target} failed preparing {sha}: {exc}; retaining recovery state")
+        return "failed"
     if receipt == sha:
         previous = stored_sha if stored_sha != sha else (host.engine(data, host_name) or {}).get("previous")
     try:
@@ -547,19 +560,23 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         return "failed"
     pin = next(iter(resolved.values()))
     for name, (runner, _, _) in contexts.items():
-        _save_engine(data, name, runner, target=pin[1], target_ref=pin[0], resolved_at=iso(now()))
+        try:
+            _save_engine(data, name, runner, target=pin[1], target_ref=pin[0], resolved_at=iso(now()))
+        except subprocess.TimeoutExpired as exc:
+            print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
+            return "failed"
     moved, attempted = [], []
     result = "unchanged"
     opened = set()
     with ExitStack() as windows:
         for name, (runner, backend, repos) in contexts.items():
-            tool, cli = host.factory_tool_paths(runner)
-            if (_engine_current(pin[1], tool, cli, runner)
-                    and not (host.engine(data, name) or {}).get("paused_timers")):
-                continue
             try:
+                tool, cli = host.factory_tool_paths(runner)
+                if (_engine_current(pin[1], tool, cli, runner)
+                        and not (host.engine(data, name) or {}).get("paused_timers")):
+                    continue
                 ready = windows.enter_context(_engine_window(data, name, runner, backend, repos, record))
-            except (OSError, host.RemoteHostError, DistrictError) as exc:
+            except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
                 print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
                 return "failed"
             if not ready:
@@ -573,7 +590,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                                           run_cmd=runner, pin=pin, verify_ci=False, window_open=name in opened,
                                           allow_downgrade=allow_downgrade)
                 why = result
-            except (OSError, host.RemoteHostError, DistrictError) as exc:
+            except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
                 result, why = "failed", f"failed: {exc}"
             if result == "applied":
                 moved.append(name)
@@ -593,7 +610,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                     restored = bool(previous[back]) and _replace_engine(
                         data, back, back_cmd, origin, "previous", previous[back], pin[1], tool, cli,
                     ) == "applied"
-                except (OSError, host.RemoteHostError, DistrictError) as exc:
+                except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
                     print(f"engine:{back} rollback FAIL: {exc}")
                     restored = False
                 if not restored:
@@ -608,7 +625,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         runner, backend, repos = contexts[name]
         try:
             _finish_dashboards(data, name, runner, repos, backend)
-        except (OSError, host.RemoteHostError, DistrictError) as exc:
+        except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
             print(f"engine:{name} dashboard restart FAIL: {exc}")
             result = "failed"
     return "failed" if result == "failed" else ("applied" if moved else "unchanged")
@@ -1018,7 +1035,10 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env, errors=render_errors)
     _, factory_cli = host.factory_tool_paths(run_cmd)
     for slug, table in targets.items():
-        if slug in render_errors:
+        if engine_result == "failed":
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            row["fail"].append("engine step failed; install skipped")
+        elif slug in render_errors:
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
             row["fail"].extend(render_errors[slug])
         elif table.get("disabled_at"):
@@ -1135,11 +1155,18 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         code = 0
         contexts = {}
         fleet_result = None
+        context_failures = {}
         if engine_hosts:
-            try:
-                for name in engine_hosts:
+            for name in engine_hosts:
+                try:
                     run_cmd, backend = _host_context(data, name)
                     contexts[name] = (run_cmd, backend, _host_repos(data, name))
+                except (host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
+                    context_failures[name] = exc
+            try:
+                if context_failures:
+                    failures = "; ".join(f"{name}: {exc}" for name, exc in context_failures.items())
+                    raise DistrictError(f"host setup failed: {failures}")
                 options = {}
                 if args.upgrade:
                     options["ref"] = args.upgrade
@@ -1148,13 +1175,14 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                 fleet_result = reconcile_fleet_engine(data, record, contexts, **options)
                 if fleet_result == "failed":
                     code = 1
-            except (host.RemoteHostError, DistrictError) as exc:
-                contexts = {}
+            except (host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
                 fleet_result = "failed"
                 print(f"engine fleet ({', '.join(engine_hosts)}) held: {exc}; every host keeps its engine")
                 code = 1
         for host_name, targets in groups.items():
             try:
+                if host_name in context_failures:
+                    raise context_failures[host_name]
                 host_rows, host_code, host_smoke = _apply_host(
                     data, host_name, targets, args, record, status,
                     engine_result=fleet_result if host_name in engine_hosts else None,
@@ -1163,6 +1191,11 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             except host.RemoteHostError as exc:
                 for slug in targets:
                     print(f"{slug}: {exc}")
+                code = 1
+                continue
+            except subprocess.TimeoutExpired as exc:
+                for slug in targets:
+                    print(f"{slug}: host {host_name} operation failed: {exc}")
                 code = 1
                 continue
             except DistrictError as exc:

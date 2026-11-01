@@ -1588,18 +1588,6 @@ class ApplyTest(DistrictCase):
             code, out = self.district("apply")
         return code, out, built, reconciled, applied
 
-    def test_apply_reports_fleet_host_whose_config_sync_fails(self) -> None:
-        def context(data, name):
-            if name == "ultron":
-                raise host.DistrictError("ultron: config.toml is not writable")
-            return f"run-{name}", f"backend-{name}"
-
-        code, out, _, reconciled, applied = self.fleet_apply(context)
-
-        self.assertEqual(code, 1, out)
-        self.assertIn("engine fleet (local, ultron) held: district: ultron: config.toml is not writable", out)
-        reconciled.assert_not_called()
-
     def test_apply_reports_fleet_engine_remote_failure_as_a_held_row(self) -> None:
         """#134 round 4: a host dropping inside the fleet engine step is an `engine fleet … held`
         row with exit 1, and every host still gets its repos applied."""

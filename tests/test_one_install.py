@@ -985,6 +985,143 @@ class OneInstallTest(unittest.TestCase):
                 self.assertLess(time.monotonic() - started, 0.8)
                 self.assertTrue(host.engine(host.load(), "local")["dashboards_pending"])
 
+    def timeout_remote(self, boundary):
+        fired = []
+        synced = []
+        commands = []
+        receipts = []
+
+        def transport(argv, **kwargs):
+            parts = shlex.split(argv[-1])
+            if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                parts = shlex.split(parts[-1])
+            if parts[0] == "cd":
+                parts = parts[3:]
+            if parts[0] == "env":
+                parts = parts[1:]
+                while "=" in parts[0]:
+                    parts = parts[1:]
+            commands.append(parts)
+            if parts[:2] == ["python3", "-c"]:
+                sync = "os.replace" in parts[2] and parts[-1].endswith("config.toml")
+                if synced and synced[-1].get("target") == TARGET and parts[-1].endswith("uv-receipt.toml"):
+                    receipts.append(parts)
+                engine = tomllib.loads(kwargs["input"]).get("defaults", {}).get("engine", {}) if sync else {}
+                if sync:
+                    synced.append(engine)
+                expire = (
+                    boundary == "initial-sync" and sync
+                    or boundary == "target-save" and sync and engine.get("target") == TARGET
+                    or boundary == "receipt" and synced and synced[-1].get("target") == TARGET
+                    and parts[-1].endswith("uv-receipt.toml")
+                    or boundary == "verification" and len(receipts) == 2
+                    or boundary == "dashboard-save" and sync and engine.get("dashboards_pending") is False
+                )
+                if expire and not fired:
+                    self.assertGreater(kwargs.get("timeout", 0), 0)
+                    fired.append(parts)
+                    raise subprocess.TimeoutExpired(parts, kwargs["timeout"])
+                return subprocess.run([sys.executable, *parts[1:]], capture_output=True, text=True,
+                                      input=kwargs.get("input"), timeout=kwargs.get("timeout"))
+            return self.run_cmd(parts, **kwargs)
+
+        runner = host.RemoteRunner("remote", "unused", transport=transport)
+        runner._facts = {"home": str(Path.home()), "path": os.environ["PATH"], "uid": 501,
+                         "config_home": str(self.root / "remote-config"),
+                         "data_home": str(self.root / "remote-data"),
+                         "tool_dir": str(self.tool.parent), "tool_bin": str(self.cli.parent)}
+        return runner, fired, commands
+
+    def test_initial_remote_sync_timeout_fails_named_host_and_checks_next_host(self):
+        for policy in (False, True):
+            with self.subTest(policy=policy):
+                self.data["defaults"]["engine"] = {"sha": TARGET, "ref": "main"}
+                if not policy:
+                    self.data["defaults"].pop("factory_ref", None)
+                else:
+                    self.data["defaults"]["factory_ref"] = "main"
+                self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                                "engine": {"sha": TARGET, "dashboards_pending": True}}}
+                self.data["repo"] = {"acme/widgets": {"path": str(self.repo), "host": "remote"},
+                                     "acme/other": {"path": str(self.repo)}}
+                self.install_receipt(TARGET)
+                self.calls.clear()
+                self.output.truncate(0)
+                self.output.seek(0)
+                self.backend.definitions_changed.return_value = False
+                runner, fired, commands = self.timeout_remote("initial-sync")
+                with mock.patch.object(host, "remote_runner", return_value=runner):
+                    self.assertEqual(self.apply(), 1)
+                self.assertEqual(len(fired), 1)
+                self.assertIn("acme/widgets: host remote", self.output.getvalue())
+                self.assertIn("timed out", self.output.getvalue())
+                self.assertIn("acme/other  0.4.7", self.output.getvalue())
+                self.assertFalse(any(argv[1:] == ["doctor", "--json"] for argv in commands))
+                self.assertFalse(any(argv[1:] == ["install"] for argv in commands))
+                self.assertTrue(host.engine(host.load(), "remote")["dashboards_pending"])
+                self.assertEqual(self.installs(), [])
+
+    def test_target_sync_and_receipt_timeouts_fail_engine_without_install_and_check_other_repos(self):
+        for boundary in ("target-save", "receipt", "verification"):
+            with self.subTest(boundary=boundary):
+                self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                                "engine": {"sha": OLD, "ref": "main"}}}
+                self.data["repo"] = {
+                    slug: {"path": str(self.repo), "host": "remote"} for slug in ("acme/widgets", "acme/other")}
+                self.install_receipt(OLD)
+                self.calls.clear()
+                self.output.truncate(0)
+                self.output.seek(0)
+                self.backend.definitions_changed.return_value = True
+                runner, fired, commands = self.timeout_remote(boundary)
+                with mock.patch.object(host, "remote_runner", return_value=runner):
+                    self.assertEqual(self.apply(), 1)
+                self.assertEqual(len(fired), 1)
+                self.assertIn("engine:remote", self.output.getvalue())
+                self.assertIn("timed out", self.output.getvalue())
+                self.assertIn("acme/other  0.4.7", self.output.getvalue())
+                self.assertEqual(sum(argv[1:] == ["doctor", "--json"] for argv in commands), 2)
+                self.assertFalse(any(argv[1:] == ["install"] for argv in commands))
+                self.assertEqual(self.installs(), [])
+                self.assertEqual(host.engine(host.load(), "remote")["sha"], OLD)
+
+    def test_fleet_target_and_dashboard_timeouts_fail_named_engine_and_continue_hosts(self):
+        for boundary in ("target-save", "dashboard-command", "dashboard-save"):
+            with self.subTest(boundary=boundary):
+                self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
+                self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                                "engine": {"sha": OLD, "ref": "main"}}}
+                self.data["repo"] = {"acme/widgets": {"path": str(self.repo), "host": "remote"},
+                                     "acme/other": {"path": str(self.repo)}}
+                self.active.clear()
+                self.install_receipt(OLD)
+                self.calls.clear()
+                self.output.truncate(0)
+                self.output.seek(0)
+                self.backend.definitions_changed.return_value = True
+                self.backend.status.return_value = service.ServiceStatus("loaded", "active", "enabled", 42)
+                runner, fired, commands = self.timeout_remote(boundary)
+
+                def dashboard(name, **kwargs):
+                    if boundary == "dashboard-command" and name == "factory-widgets-dashboard.service":
+                        fired.append(name)
+                        raise subprocess.TimeoutExpired(name, kwargs["timeout"])
+                    return subprocess.CompletedProcess([], 0, "", "")
+
+                self.backend.start.side_effect = dashboard
+                with mock.patch.object(host, "remote_runner", return_value=runner):
+                    self.assertEqual(self.apply(), 1)
+                self.assertTrue(fired)
+                self.assertIn("remote", self.output.getvalue())
+                self.assertIn("timed out", self.output.getvalue())
+                self.assertIn("acme/other  0.4.7", self.output.getvalue())
+                if boundary == "target-save":
+                    self.assertEqual(self.installs(), [])
+                    self.assertFalse(any(argv[1:] == ["install"] for argv in commands))
+                else:
+                    self.assertTrue(host.engine(host.load(), "remote")["dashboards_pending"])
+                    self.assertFalse(host.engine(host.load(), "local")["dashboards_pending"])
+
 if __name__ == "__main__":
     unittest.main()
 

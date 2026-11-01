@@ -136,8 +136,10 @@ selected tag commit must itself be green. For a branch, District walks up to 50
 remote commits back to the newest commit whose GitHub checks are complete and
 green. Remote hosts record that target under `[hosts.NAME.engine]`; their
 filtered config receives the same target under `[defaults.engine]`.
-Resolution and ancestry timeouts fail the named engine step without installing;
-repository checks on that host and the remaining hosts still run.
+Resolution, ancestry, target persistence, receipt, and dashboard completion timeouts
+fail the named engine step without further installs; repository checks on a usable
+engine and the remaining hosts still run. Initial config-sync timeout fails that
+host without retrying setup or installing; other selected hosts continue.
 
 Every apply checks that the CLI exists, resolves into the canonical tool, and
 has a valid uv receipt before rendering, even without `factory_ref`. Missing
