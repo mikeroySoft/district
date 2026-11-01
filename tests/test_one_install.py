@@ -478,6 +478,47 @@ class OneInstallTest(unittest.TestCase):
         self.assertIn(OLD, self.output.getvalue())
         self.assertIn(TARGET, self.output.getvalue())
 
+    def test_resolution_timeouts_fail_engine_but_finish_single_and_fleet_rows(self):
+        for fleet in (False, True):
+            for boundary in ("refs", "checks", "history", "compare"):
+                with self.subTest(fleet=fleet, boundary=boundary):
+                    self.calls.clear()
+                    self.events.clear()
+                    self.output.truncate(0)
+                    self.output.seek(0)
+                    self.tip = TIP if boundary == "history" else TARGET
+                    self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
+                    self.data["hosts"] = {"remote": {"ssh": "fake", "platform": "linux"}}
+                    self.data["repo"]["acme/widgets"]["hosts"] = ["local", "remote"] if fleet else ["local"]
+                    if fleet:
+                        self.data["repo"]["acme/widgets"]["triage_host"] = "local"
+                    else:
+                        self.data["repo"]["acme/widgets"].pop("triage_host", None)
+                    self.data["repo"]["acme/other"] = {"path": str(self.repo)}
+
+                    def timeout(argv, **kwargs):
+                        endpoint = " ".join(argv)
+                        if ((boundary == "refs" and argv[:2] == ["git", "ls-remote"])
+                                or (boundary == "checks" and "check-runs" in endpoint)
+                                or (boundary == "history" and "/commits?" in endpoint)
+                                or (boundary == "compare" and "/compare/" in endpoint)):
+                            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+                        return self.run_cmd(argv, **kwargs)
+
+                    runner = mock.Mock(side_effect=timeout)
+                    runner.facts.return_value = {"home": str(Path.home()), "path": os.environ["PATH"]}
+                    with mock.patch.object(apply, "run", side_effect=timeout), mock.patch.object(
+                            host, "claims_supported", return_value=True), mock.patch.object(
+                            apply, "_host_context", return_value=(runner, self.backend)):
+                        self.assertEqual(self.apply(), 1)
+                    self.assertEqual(self.installs(), [])
+                    self.backend.pause_timer.assert_not_called()
+                    self.assertIn("engine", self.output.getvalue())
+                    self.assertIn("timed out", self.output.getvalue())
+                    self.assertIn("acme/other  0.4.7", self.output.getvalue())
+                    self.assertEqual(sum(argv[1:] == ["doctor", "--json"] for argv, _ in self.calls),
+                                     3 if fleet else 2)
+
 
 if __name__ == "__main__":
     unittest.main()

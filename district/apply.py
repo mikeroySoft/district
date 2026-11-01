@@ -385,6 +385,9 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     origin = host.default(data, "factory_repo")
     try:
         origin, slug, resolved_ref, sha = _resolve_engine(ref, run_cmd, origin, pin, verify_ci=verify_ci)
+    except subprocess.TimeoutExpired as exc:
+        print(f"{engine_target} {ref} unresolved: {exc}; keeping installed engine")
+        return "failed"
     except (OSError, ValueError, TypeError) as exc:
         print(f"{engine_target} {ref} unresolved: {exc}; keeping installed engine")
         return "failed" if explicit_ref or host_name != "local" or pin is not None else "unchanged"
@@ -417,7 +420,11 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
         return "unchanged"
     if receipt == sha:
         previous = stored_sha if stored_sha != sha else (host.engine(data, host_name) or {}).get("previous")
-    _downgrade_guard(slug, previous, sha, run_cmd, allow_downgrade)
+    try:
+        _downgrade_guard(slug, previous, sha, run_cmd, allow_downgrade)
+    except subprocess.TimeoutExpired as exc:
+        print(f"{engine_target} failed ancestry {previous} -> {sha}: {exc}; keeping installed engine")
+        return "failed"
     try:
         if window_open:
             result = _replace_engine(data, host_name, run_cmd, origin, resolved_ref, sha, previous, tool, cli)
@@ -457,7 +464,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
             stored = installed_engine_commit(data, name)
             previous[name] = stored if receipt == sha and stored != sha else receipt or stored
             _downgrade_guard(slug, previous[name], sha, runner, allow_downgrade)
-        except (OSError, ValueError, host.RemoteHostError, DistrictError) as exc:
+        except (OSError, ValueError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
             print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
             return "failed"
         resolved[name] = (resolved_ref, sha)

@@ -134,6 +134,8 @@ selected tag commit must itself be green. For a branch, District walks up to 50
 remote commits back to the newest commit whose GitHub checks are complete and
 green. Remote hosts record that target under `[hosts.NAME.engine]`; their
 filtered config receives the same target under `[defaults.engine]`.
+Resolution and ancestry timeouts fail the named engine step without installing;
+repository checks on that host and the remaining hosts still run.
 
 Every host has exactly one Factory installation: the `factory` uv tool, with no
 version in its path. Every managed unit and launchd job uses that tool's Python,
