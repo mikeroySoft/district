@@ -303,6 +303,19 @@ class InstallStateTest(DistrictCase):
         self.assertEqual(document["last_apply"]["reenabled"], ["factory-widgets.timer"])
         self.assertIn("WARNING: last apply re-enabled factory-widgets.timer", output)
 
+
+    def test_reenabled_only_includes_timers_apply_disabled(self) -> None:
+        before = {name: timer("inactive") for name in ("factory-widgets.timer", "district-apply.timer")}
+        after = {name: timer("active") for name in before}
+        record = install_state.ApplyRun.start()
+        record.disabled.add("factory-widgets.timer")
+        with mock.patch.object(install_state, "timer_states", side_effect=[before, after]), \
+             mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
+            record.observe(host.load())
+            record.finish(0)
+
+        document = json.loads(install_state.state_path().read_text())
+        self.assertEqual(document["last_apply"]["reenabled"], ["factory-widgets.timer"])
     def test_failed_observations_preserve_explicit_timer_operations(self) -> None:
         record = install_state.ApplyRun.start()
         with mock.patch.object(host, "run", side_effect=OSError("systemctl unavailable")), \
