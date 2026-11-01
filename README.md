@@ -147,6 +147,9 @@ to become idle, installs with `uv tool install
 verification reinstalls and verifies the previous revision. The `finally` path
 restores exactly the timers District paused; dashboards restart on the new code.
 If both installs fail, affected repos fail without trying another `factory` on `PATH`.
+The idle budget is one deadline including discovery, probes, and timer pauses;
+zero or exhausted time defers before another command. Timer recovery runs even
+after expiry.
 
 `district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
 when no ref is supplied. It resolves only against the remote repository, never a

@@ -26,6 +26,7 @@ from pathlib import Path
 from district import host, install_state
 from district.engine_cleanup import cleanup
 from district.host import DistrictError, run
+from district.service import remaining_timeout
 
 POLICY_ENV = ("NPM_CONFIG_MIN_RELEASE_AGE", "UV_EXCLUDE_NEWER")
 # doctor rows about committed files: drift the repo owner decides on
@@ -251,16 +252,16 @@ def _downgrade_guard(slug: str, previous: str | None, target: str, run_cmd,
         raise DistrictError(f"cannot establish ancestry {previous} -> {target}; compare unavailable")
 
 
-def _engine_units(repos: dict, backend) -> tuple[list[str], list[str]]:
-    units = set(backend.factory_units())
+def _engine_units(repos: dict, backend, *, timeout: float) -> tuple[list[str], list[str]]:
+    units = set(backend.factory_units(timeout=timeout))
     units.update(f"{host.unit_name(slug)}{suffix}" for slug in repos for suffix in (".service", ".timer"))
     services = sorted(name for name in units if name.endswith(".service") and not name.endswith("-dashboard.service"))
     timers = sorted(name for name in units if name.endswith(".timer"))
     return services, timers
 
 
-def _factory_processes(tool: Path, cli: Path, run_cmd) -> list[str]:
-    proc = run_cmd(["ps", "-eo", "pid=,args="], timeout=SMOKE_TIMEOUT)
+def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> list[str]:
+    proc = run_cmd(["ps", "-eo", "pid=,args="], timeout=timeout)
     if proc.returncode:
         raise OSError(proc.stderr.strip() or "cannot inspect Factory processes")
     return [line.strip() for line in proc.stdout.splitlines()
@@ -290,24 +291,30 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record) -> No
 @contextmanager
 def _engine_window(data: dict, name: str, runner, backend, repos: dict, record):
     target = "engine" if name == "local" else f"engine:{name}"
-    services, timers = _engine_units(repos, backend)
-    active = [timer for timer in timers if backend.is_active(timer) == "active"]
     timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
     deadline = time.monotonic() + timeout
-    tool, cli = host.factory_tool_paths(runner)
     try:
         ready = False
         try:
+            services, timers = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
+            active = [timer for timer in timers
+                      if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
+            tool, cli = host.factory_tool_paths(runner)
             if record:
                 record.observe(data)
             for timer in active:
+                remaining_timeout(deadline)
                 paused = list((host.engine(data, name) or {}).get("paused_timers", []))
                 _save_engine(data, name, runner, paused_timers=paused if timer in paused else paused + [timer])
+                remaining = remaining_timeout(deadline)
                 if record:
                     record.disabled.add(timer)
-                backend.pause_timer(timer, timeout=max(0, deadline - time.monotonic()))
+                backend.pause_timer(timer, timeout=remaining)
             while True:
-                busy = busy_units(services, backend, timeout=SMOKE_TIMEOUT) + _factory_processes(tool, cli, runner)
+                busy = [unit for unit in services if backend.is_active(
+                    unit, timeout=remaining_timeout(deadline)) in ("active", "activating", "deactivating")]
+                busy += _factory_processes(tool, cli, runner, timeout=remaining_timeout(deadline))
+                remaining_timeout(deadline)
                 if not busy:
                     ready = True
                     break

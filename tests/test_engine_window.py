@@ -59,6 +59,47 @@ class EngineWindowTest(unittest.TestCase):
                 "factory-widgets-eval.service", "factory-widgets-eval.timer", "factory-unregistered.service",
             })
 
+    def test_launchd_compound_timer_probe_stops_when_budget_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock = [0.0]
+            calls = []
+
+            def run(argv, **kwargs):
+                calls.append(argv[1])
+                self.assertEqual(kwargs["timeout"], 1)
+                clock[0] = 1
+                return subprocess.CompletedProcess(argv, 0, "state = running\npid = 42\n", "")
+
+            backend = service.LaunchdBackend(run, home=Path(directory), uid=501, raw_path=os.defpath)
+            with mock.patch.object(service.time, "monotonic", side_effect=lambda: clock[0]):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    backend.is_active("factory-widgets.timer", timeout=1)
+            self.assertEqual(calls, ["print"])
+
+    def test_scheduled_jobs_keep_completed_probe_when_budget_expires(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock = [0.0]
+            calls = []
+
+            def run(argv, **kwargs):
+                calls.append(argv)
+                clock[0] = 1
+                return subprocess.CompletedProcess(argv, 0, "state = running\npid = 42\n", "")
+
+            backend = service.LaunchdBackend(run, home=Path(directory), uid=501, raw_path=os.defpath)
+            with mock.patch.object(service.time, "monotonic", side_effect=lambda: clock[0]):
+                states = backend.scheduled_jobs({"factory-a.timer", "factory-b.timer"}, timeout=1)
+            self.assertEqual(set(states), {"factory-a.timer"})
+            self.assertEqual(states["factory-a.timer"].service_active_state, "active")
+            self.assertEqual(len(calls), 1)
+
+    def test_systemd_zero_pause_budget_never_starts_unbounded_disable(self):
+        run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        backend = service.SystemdUserBackend(run, unit_dir=Path("/unused"))
+        with self.assertRaises(subprocess.TimeoutExpired):
+            backend.pause_timer("factory-widgets.timer", timeout=0)
+        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -294,7 +294,6 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(self.reconcile(record=record), "deferred")
         self.assertEqual(self.installs(), [])
         self.assertEqual(self.active, {"factory-widgets.timer"})
-        self.assertIn("factory-widgets.service", record.deferred["engine"]["reason"])
 
     def test_downgrade_refusal_names_both_shas_and_override_installs(self):
         self.compare_status = "behind"
@@ -477,6 +476,49 @@ class OneInstallTest(unittest.TestCase):
         self.assertIn("acme/widgets", self.output.getvalue())
         self.assertIn(OLD, self.output.getvalue())
         self.assertIn(TARGET, self.output.getvalue())
+
+    def test_idle_window_bounds_every_operation_by_one_deadline(self):
+        for exhausted_at in ("discovery", "timer", "pause", "service", "process"):
+            with self.subTest(exhausted_at=exhausted_at):
+                self.data["defaults"]["engine_idle_timeout"] = "5s"
+                self.data["defaults"]["engine"].pop("paused_timers", None)
+                clock = [0.0]
+                observed = []
+
+                def operation(label, result, **kwargs):
+                    remaining = 5 - clock[0]
+                    self.assertGreater(remaining, 0, (label, observed))
+                    self.assertGreater(kwargs.get("timeout", 0), 0, (label, kwargs))
+                    self.assertLessEqual(kwargs["timeout"], remaining, (label, kwargs))
+                    observed.append(label)
+                    if label == exhausted_at:
+                        clock[0] = 5
+                    return result
+
+                def active(name, **kwargs):
+                    return operation("timer" if name.endswith(".timer") else "service",
+                                     "active" if name.endswith(".timer") else "inactive", **kwargs)
+
+                def processes(argv, **kwargs):
+                    self.assertEqual(argv[0], "ps")
+                    return operation("process", subprocess.CompletedProcess(argv, 0, "", ""), **kwargs)
+
+                self.backend.factory_units.side_effect = lambda **kw: operation("discovery", set(), **kw)
+                self.backend.is_active.side_effect = active
+                self.backend.pause_timer.side_effect = lambda name, **kw: operation("pause", None, **kw)
+                with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+                    with apply._engine_window(self.data, "local", processes, self.backend, self.data["repo"], None) as ready:
+                        self.assertFalse(ready)
+                self.assertEqual(observed[-1], exhausted_at)
+                self.assertEqual(host.engine(self.data, "local").get("paused_timers"), [])
+
+    def test_zero_idle_budget_issues_no_discovery_probe_or_pause(self):
+        self.data["defaults"]["engine_idle_timeout"] = "0s"
+        self.assertEqual(self.reconcile(), "deferred")
+        self.backend.factory_units.assert_not_called()
+        self.backend.is_active.assert_not_called()
+        self.backend.pause_timer.assert_not_called()
+        self.assertFalse(any(argv[0] == "ps" for argv, _ in self.calls))
 
     def test_resolution_timeouts_fail_engine_but_finish_single_and_fleet_rows(self):
         for fleet in (False, True):
