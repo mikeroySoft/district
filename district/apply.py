@@ -295,9 +295,13 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, de
         return
     if deadline is None:
         deadline = time.monotonic() + RESTORE_TIMEOUT
-    tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
-    _verify_engine(_receipt_sha(tool, runner, timeout=remaining_timeout(deadline)),
-                   tool, cli, runner, deadline=deadline)
+    try:
+        tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+        _verify_engine(_receipt_sha(tool, runner, timeout=remaining_timeout(deadline)),
+                       tool, cli, runner, deadline=deadline)
+    except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+        print(f"engine:{name} FAIL verification; keeping timers paused: {', '.join(paused)}: {exc}")
+        raise
     remaining = list(paused)
     for timer in paused:
         try:
@@ -436,8 +440,11 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
         if engine.get("paused_timers"):
             _restore_engine_timers(data, name, runner, backend, record, deadline=deadline)
         _finish_dashboards(data, name, runner, repos, backend, deadline=deadline)
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as exc:
         print(f"engine:{name} recovery failed: {exc}; retaining recovery state")
+        paused = (host.engine(data, name) or {}).get("paused_timers", [])
+        if paused:
+            print(f"engine:{name} FAIL keeping timers paused: {', '.join(paused)}")
         return "failed"
     return None
 
@@ -1175,7 +1182,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                 fleet_result = reconcile_fleet_engine(data, record, contexts, **options)
                 if fleet_result == "failed":
                     code = 1
-            except (host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
+            except (OSError, host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
                 fleet_result = "failed"
                 print(f"engine fleet ({', '.join(engine_hosts)}) held: {exc}; every host keeps its engine")
                 code = 1

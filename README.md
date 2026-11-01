@@ -178,8 +178,10 @@ Saved install/timer intents and pending dashboard restarts are recovered before
 resolving a fresh target, including without policy or with unavailable remote refs.
 Only a verified install or rollback clears the install marker; merely resolving
 a target, including a refused downgrade, does not authorize recovery.
-If repair and rollback cannot verify a usable tool, timers stay paused and the
-recovery state is retained.
+Before resuming any timer, restoration must verify the receipt, CLI ownership and
+`--version`. Verification failure leaves timers paused with durable recovery intent,
+prints a named failure listing those timers, and makes apply exit 1. The next apply
+retries restoration once the engine verifies, including after repair or rollback.
 
 `district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
 when no ref is supplied. It resolves only against the remote repository, never a

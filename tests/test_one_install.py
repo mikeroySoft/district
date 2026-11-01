@@ -241,6 +241,116 @@ class OneInstallTest(unittest.TestCase):
                         self.assertEqual(engine["sha"], TARGET)
                         self.assertFalse(engine.get("paused_timers"))
 
+    def test_restore_verification_failure_names_paused_timers_and_retries_on_next_apply(self):
+        for fleet in (False, True):
+            for failure in ("unreadable-receipt", "mismatched-receipt", "cli-ownership", "version", "timeout"):
+                with self.subTest(fleet=fleet, failure=failure):
+                    self.data["repo"] = {"acme/widgets": {"path": str(self.repo)}}
+                    self.data.pop("hosts", None)
+                    if fleet:
+                        self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                                        "engine": {"sha": OLD, "ref": "main"}}}
+                        self.data["repo"]["other/widgets"] = {"path": str(self.repo), "host": "remote"}
+                    receipt = self.tool / "uv-receipt.toml"
+                    if receipt.is_dir():
+                        receipt.rmdir()
+                    self.install_receipt(OLD)
+                    self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
+                    self.active = {"factory-widgets.timer"}
+                    self.calls.clear()
+                    self.backend.resume_timer.reset_mock()
+                    self.backend.definitions_changed.return_value = False
+                    self.output.truncate(0)
+                    self.output.seek(0)
+                    versions = []
+                    original_read = Path.read_text
+                    changed = []
+
+                    def read(path, *args, **kwargs):
+                        body = original_read(path, *args, **kwargs)
+                        if path == receipt and versions and not changed:
+                            changed.append(True)
+                            if failure == "mismatched-receipt":
+                                receipt.write_text(body.replace(TARGET, OLD))
+                            elif failure == "unreadable-receipt":
+                                receipt.unlink()
+                                receipt.mkdir()
+                            elif failure == "cli-ownership":
+                                legacy = self.root / "legacy-factory"
+                                legacy.touch()
+                                self.cli.unlink()
+                                self.cli.symlink_to(legacy)
+                        return body
+
+                    def runner(argv, **kwargs):
+                        if argv == [str(self.cli), "--version"] and self.installs():
+                            versions.append(argv)
+                            if len(versions) == 2:
+                                if failure == "version":
+                                    return subprocess.CompletedProcess(argv, 1, "", "broken CLI")
+                                if failure == "timeout":
+                                    self.assertGreater(kwargs["timeout"], 0)
+                                    raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+                        return self.run_cmd(argv, **kwargs)
+
+                    remote, _, _ = self.timeout_remote(None)
+                    with mock.patch.object(apply, "run", side_effect=runner), \
+                            mock.patch.object(host, "remote_runner", return_value=remote), \
+                            mock.patch.object(Path, "read_text", read):
+                        self.assertEqual(self.apply(), 1, self.output.getvalue())
+                    engine = host.engine(host.load(), "local")
+                    self.assertEqual(engine["paused_timers"], ["factory-widgets.timer"])
+                    self.assertNotIn("factory-widgets.timer", self.active)
+                    self.backend.resume_timer.assert_not_called()
+                    self.assertRegex(self.output.getvalue(), r"engine:local.*FAIL.*factory-widgets.timer")
+                    if receipt.is_dir():
+                        receipt.rmdir()
+                    self.install_receipt(TARGET)
+                    self.data = host.load()
+                    installs = len(self.installs())
+                    with mock.patch.object(host, "remote_runner", return_value=remote):
+                        self.assertEqual(self.apply(), 0, self.output.getvalue())
+                    self.assertEqual(len(self.installs()), installs)
+                    self.assertIn("factory-widgets.timer", self.active)
+                    self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+
+    def test_recovery_without_readable_receipt_or_recorded_revision_names_paused_timers(self):
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"] = {"paused_timers": ["factory-widgets.timer"]}
+        self.active.clear()
+        (self.tool / "uv-receipt.toml").unlink()
+        self.assertEqual(self.apply(), 1)
+        self.assertRegex(self.output.getvalue(), r"engine:local.*FAIL.*factory-widgets.timer")
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], ["factory-widgets.timer"])
+        self.backend.resume_timer.assert_not_called()
+        self.data = host.load()
+        self.install_receipt(TARGET)
+        self.assertEqual(self.apply(), 0)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+        self.assertEqual(self.installs(), [])
+
+    def test_failed_offline_recovery_names_timers_until_engine_can_be_repaired(self):
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"].update(target=TARGET, paused_timers=["factory-widgets.timer"])
+        self.active.clear()
+        self.cli.unlink()
+
+        def offline(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                return subprocess.CompletedProcess(argv, 1, "", "offline")
+            return self.run_cmd(argv, **kwargs)
+
+        with mock.patch.object(apply, "run", side_effect=offline):
+            self.assertEqual(self.apply(), 1)
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], ["factory-widgets.timer"])
+        self.backend.resume_timer.assert_not_called()
+        self.assertRegex(self.output.getvalue(), r"engine:local.*FAIL.*factory-widgets.timer")
+        self.data = host.load()
+        self.assertEqual(self.apply(), 0)
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+
     def test_one_tool_and_rendered_units_reject_versioned_venvs(self):
         self.assertEqual(self.apply(), 0)
         self.assertEqual(self.installs(), [["uv", "tool", "install", "--force", "--from",
