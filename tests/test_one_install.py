@@ -471,11 +471,73 @@ class OneInstallTest(unittest.TestCase):
             return self.run_cmd(argv, **kwargs)
         with mock.patch.object(apply, "run", side_effect=broken_install):
             self.assertEqual(self.apply(upgrade="HEAD"), 1)
-        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(self.active, set(), "a broken tool must not resume dispatch")
+        self.assertEqual(host.load()["defaults"]["engine"]["paused_timers"], ["factory-widgets.timer"])
         self.assertEqual(len(self.installs()), 2)
         self.assertIn("acme/widgets", self.output.getvalue())
         self.assertIn(OLD, self.output.getvalue())
         self.assertIn(TARGET, self.output.getvalue())
+
+    def test_saved_recovery_precedes_resolution_and_runs_without_policy_locally_and_in_fleet(self):
+        for fleet in (False, True):
+            for no_policy in (False, True):
+                with self.subTest(fleet=fleet, no_policy=no_policy):
+                    self.calls.clear()
+                    self.events.clear()
+                    self.backend.start.reset_mock()
+                    self.active.clear()
+                    self.install_receipt(TARGET)
+                    self.backend.status.return_value = service.ServiceStatus("loaded", "active", "enabled", 42)
+                    names = ("local", "remote") if fleet else ("local",)
+                    self.data["hosts"] = {"remote": {"ssh": "fake", "platform": "linux"}}
+                    self.data["defaults"]["factory_ref"] = "main"
+                    if no_policy:
+                        self.data["defaults"].pop("factory_ref")
+                    for name in names:
+                        engine = {"sha": TARGET if no_policy else OLD, "ref": "main",
+                                  "target": TARGET, "target_ref": "main", "dashboards_pending": True,
+                                  "paused_timers": [] if no_policy else [f"factory-{name}.timer"]}
+                        host.set_engine(self.data, name, engine)
+
+                    def offline(argv, **kwargs):
+                        if argv[0] in ("git", "gh"):
+                            self.events.append(("resolution", "offline"))
+                            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+                        return self.run_cmd(argv, **kwargs)
+
+                    contexts = {name: (offline, self.backend, self.data["repo"]) for name in names}
+                    if fleet:
+                        result = apply.reconcile_fleet_engine(self.data, None, contexts)
+                    else:
+                        result = self.reconcile(run_cmd=offline)
+                    self.assertEqual(result, "unchanged" if no_policy else "failed")
+                    for name in names:
+                        engine = host.engine(self.data, name)
+                        self.assertEqual(engine["paused_timers"], [])
+                        self.assertFalse(engine["dashboards_pending"])
+                        self.assertEqual(engine["sha"], TARGET)
+                    self.assertEqual(self.installs(), [])
+                    self.assertEqual(self.backend.start.call_count, len(names))
+                    if not no_policy:
+                        resolution = self.events.index(("resolution", "offline"))
+                        for name in names:
+                            self.assertIn(("enable", f"factory-{name}.timer"), self.events[:resolution])
+
+    def test_unverified_offline_recovery_keeps_timer_intents_and_dashboards_pending(self):
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"].update(
+            target=TARGET, paused_timers=["factory-widgets.timer"], dashboards_pending=True)
+        self.active.clear()
+        self.cli.unlink()
+        def offline(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                return subprocess.CompletedProcess(argv, 1, "", "offline")
+            return self.run_cmd(argv, **kwargs)
+        self.assertEqual(self.reconcile(run_cmd=offline), "failed")
+        self.assertEqual(self.active, set())
+        self.assertEqual(host.engine(self.data, "local")["paused_timers"], ["factory-widgets.timer"])
+        self.assertTrue(host.engine(self.data, "local")["dashboards_pending"])
+        self.backend.start.assert_not_called()
 
     def test_no_policy_apply_rejects_legacy_cli_symlink_missing_cli_and_receipt(self):
         self.data["defaults"].pop("factory_ref")
@@ -535,7 +597,8 @@ class OneInstallTest(unittest.TestCase):
                                      "active" if name.endswith(".timer") else "inactive", **kwargs)
 
                 def processes(argv, **kwargs):
-                    self.assertEqual(argv[0], "ps")
+                    if argv[0] != "ps":
+                        return self.run_cmd(argv, **kwargs)
                     return operation("process", subprocess.CompletedProcess(argv, 0, "", ""), **kwargs)
 
                 self.backend.factory_units.side_effect = lambda **kw: operation("discovery", set(), **kw)

@@ -217,9 +217,9 @@ def _tool_cli(tool: Path, cli: Path, run_cmd) -> bool:
     return cli.exists() and cli.resolve().is_relative_to(tool)
 
 
-def _verify_engine(sha: str, tool: Path, cli: Path, run_cmd) -> None:
+def _verify_engine(sha: str | None, tool: Path, cli: Path, run_cmd) -> None:
     actual = _receipt_sha(tool, run_cmd)
-    if actual != sha:
+    if actual is None or actual != sha:
         raise OSError(f"receipt rev {actual or 'unknown'} != {sha}")
     if not _tool_cli(tool, cli, run_cmd):
         raise OSError(f"{cli} does not resolve into {tool}")
@@ -271,6 +271,9 @@ def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> lis
 
 def _restore_engine_timers(data: dict, name: str, runner, backend, record) -> None:
     paused = (host.engine(data, name) or {}).get("paused_timers", [])
+    if paused:
+        tool, cli = host.factory_tool_paths(runner)
+        _verify_engine(_receipt_sha(tool, runner), tool, cli, runner)
     remaining = list(paused)
     for timer in paused:
         try:
@@ -331,6 +334,8 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record):
 
 def _finish_dashboards(data: dict, name: str, runner, repos: dict, backend) -> None:
     if (host.engine(data, name) or {}).get("dashboards_pending"):
+        tool, cli = host.factory_tool_paths(runner)
+        _verify_engine(_receipt_sha(tool, runner), tool, cli, runner)
         restart_dashboards(repos, backend)
         _save_engine(data, name, runner, dashboards_pending=False)
 
@@ -367,6 +372,43 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
     return "applied"
 
 
+def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record) -> str | None:
+    """Finish the durable transaction before consulting a new remote policy."""
+    engine = host.engine(data, name) or {}
+    if not engine.get("paused_timers") and not engine.get("dashboards_pending"):
+        return None
+    tool, cli = host.factory_tool_paths(runner)
+    receipt = _receipt_sha(tool, runner)
+    stored = installed_engine_commit(data, name)
+    try:
+        try:
+            _verify_engine(receipt, tool, cli, runner)
+        except (OSError, subprocess.TimeoutExpired):
+            target = engine.get("target") or receipt or stored
+            if not isinstance(target, str) or not SHA.fullmatch(target):
+                raise OSError("no recorded revision available for recovery")
+            previous = stored if stored != target else engine.get("previous")
+            with _engine_window(data, name, runner, backend, repos, record) as ready:
+                if not ready:
+                    return "deferred"
+                result = _replace_engine(data, name, runner, host.default(data, "factory_repo"),
+                                         engine.get("target_ref", engine.get("ref", "main")),
+                                         target, previous, tool, cli)
+            _finish_dashboards(data, name, runner, repos, backend)
+            return result
+        if receipt != stored:
+            _save_engine(data, name, runner, sha=receipt,
+                         ref=engine.get("target_ref", engine.get("ref", "unknown")),
+                         installed_at=iso(now()), dashboards_pending=True)
+        if engine.get("paused_timers"):
+            _restore_engine_timers(data, name, runner, backend, record)
+        _finish_dashboards(data, name, runner, repos, backend)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"engine:{name} recovery failed: {exc}; retaining recovery state")
+        return "failed"
+    return None
+
+
 def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *, backend=None,
                      host_name: str = "local", repos: dict[str, dict] | None = None,
                      run_cmd=None, pin: tuple[str, str] | None = None, verify_ci: bool = True,
@@ -376,12 +418,13 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     backend = backend or host.service_backend()
     repos = _host_repos(data, host_name) if repos is None else repos
     engine_target = "engine" if host_name == "local" else f"engine:{host_name}"
-    recovering = bool((host.engine(data, host_name) or {}).get("paused_timers"))
+    if not window_open:
+        recovery = _recover_engine(data, host_name, run_cmd, backend, repos, record)
+        if recovery is not None:
+            return recovery
     explicit_ref = ref is not None
     if ref is None:
-        ref = data.get("defaults", {}).get("factory_ref")
-    if ref is None and recovering:
-        ref = (host.engine(data, host_name) or {}).get("target_ref", "main")
+        ref = pin[0] if pin is not None else data.get("defaults", {}).get("factory_ref")
     if ref is None and pin is None:
         if record:
             record.clear_deferred(engine_target)
@@ -403,22 +446,16 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     receipt = _receipt_sha(tool, run_cmd)
     stored_sha = installed_engine_commit(data, host_name)
     previous = receipt or stored_sha
-    if recovering and not window_open and receipt == stored_sha and receipt != sha:
-        _verify_engine(receipt, tool, cli, run_cmd)
-        _restore_engine_timers(data, host_name, run_cmd, backend, record)
-        recovering = False
     current = receipt == sha and _tool_cli(tool, cli, run_cmd)
-    if current and (recovering or stored_sha != sha or (host.engine(data, host_name) or {}).get("dashboards_pending")):
+    if current and (stored_sha != sha or (host.engine(data, host_name) or {}).get("dashboards_pending")):
         try:
             _verify_engine(sha, tool, cli, run_cmd)
         except OSError:
             current = False
     if current:
-        if stored_sha != sha or recovering:
+        if stored_sha != sha:
             _save_engine(data, host_name, run_cmd, sha=sha, ref=resolved_ref,
                          installed_at=iso(now()), dashboards_pending=True)
-        if recovering and not window_open:
-            _restore_engine_timers(data, host_name, run_cmd, backend, record)
         if not window_open:
             _finish_dashboards(data, host_name, run_cmd, repos, backend)
         if record:
@@ -455,6 +492,17 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                            contexts: dict[str, tuple], *, allow_downgrade: bool = False,
                            ref: str | None = None) -> str:
     """Hold every changed host's upgrade window before moving any shared-repo engine."""
+    recovery_result = None
+    for name, (runner, backend, repos) in contexts.items():
+        try:
+            recovered = _recover_engine(data, name, runner, backend, repos, record)
+        except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+            print(f"engine:{name} recovery failed: {exc}; retaining recovery state")
+            recovered = "failed"
+        if recovered in ("failed", "deferred"):
+            recovery_result = recovered
+    if recovery_result:
+        return recovery_result
     ref = ref if ref is not None else data.get("defaults", {}).get("factory_ref")
     if ref == "HEAD":
         ref = data.get("defaults", {}).get("factory_ref", "main")

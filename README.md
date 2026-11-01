@@ -156,6 +156,10 @@ If both installs fail, affected repos fail without trying another `factory` on `
 The idle budget is one deadline including discovery, probes, and timer pauses;
 zero or exhausted time defers before another command. Timer recovery runs even
 after expiry.
+Saved timer intents and pending dashboard restarts are recovered from the
+verified receipt before resolving a fresh target, including without policy or
+with unavailable remote refs. If repair and rollback cannot verify a usable
+tool, timers stay paused and the recovery state is retained.
 
 `district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
 when no ref is supplied. It resolves only against the remote repository, never a
