@@ -1,4 +1,4 @@
-"""Fast local install and timer state, with one cached release lookup."""
+"""Fast local state, reconciling recorded engine identity with the canonical uv receipt."""
 from __future__ import annotations
 
 import argparse
@@ -204,8 +204,20 @@ def _safe_config() -> dict:
 
 
 def _engine_sha(data: dict) -> str:
+    """Return the engine revision recorded after a verified install."""
     value = data.get("defaults", {}).get("engine", {}).get("sha")
     return value if isinstance(value, str) and SHA.fullmatch(value) else UNKNOWN
+
+
+def _installed_engine_sha(data: dict) -> str:
+    """Trust an installed revision only when recorded state and the uv receipt agree."""
+    recorded = _engine_sha(data)
+    if recorded == UNKNOWN:
+        return UNKNOWN
+    # Local import avoids apply -> install_state -> apply during module initialization.
+    from district.apply import _receipt_sha
+    tool, _ = host.factory_tool_paths()
+    return recorded if _receipt_sha(tool, host.run) == recorded else UNKNOWN
 
 
 def unknown_last_apply() -> dict:
@@ -233,9 +245,10 @@ def collect(*, data: dict | None = None, releases: dict | None = None,
     versions = versions if isinstance(versions, dict) else tool_versions()
     district_release = releases.get("district", {})
     factory_release = releases.get("factory", {})
-    installed_sha = _engine_sha(data)
+    installed_sha = _installed_engine_sha(data)
     latest_sha = factory_release.get("sha", UNKNOWN)
-    counts = commit_counts(host.default(data, "factory_repo"), latest_sha, installed_sha)
+    counts = (commit_counts(host.default(data, "factory_repo"), latest_sha, installed_sha)
+              if installed_sha != UNKNOWN else None)
     factory_ref = data.get("defaults", {}).get("factory_ref")
     configured_ref = data.get("defaults", {}).get("engine", {}).get("ref")
     if not isinstance(configured_ref, str) or not configured_ref:

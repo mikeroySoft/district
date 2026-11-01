@@ -73,8 +73,17 @@ class InstallStateTest(DistrictCase):
                 },
             },
         })
+
+        self._write_receipt(SHA)
         self.stub("uv", ("tool list --show-version-specifiers", "district v0.1.3\nfactory v0.8.9\n"))
         self.stub("systemctl", ("show *", SHOW), ("is-active *", "active\n"))
+
+    def _write_receipt(self, sha: str) -> None:
+        tool, _ = host.factory_tool_paths()
+        tool.mkdir(parents=True, exist_ok=True)
+        (tool / "uv-receipt.toml").write_text(
+            f'[[tool.requirements]]\nname = "factory"\nrev = "{sha}"\n'
+        )
 
     def test_timer_states_reads_launchd_backend(self) -> None:
         self.stub("launchctl")
@@ -187,6 +196,51 @@ class InstallStateTest(DistrictCase):
         }])
         self.assertTrue(str(install_state.state_path()).startswith(os.environ["XDG_STATE_HOME"]))
         self.assertEqual(self.calls("uv"), ["tool list --show-version-specifiers"])
+
+
+    def test_interrupted_replacement_reports_installed_identity_unknown(self) -> None:
+        self._write_receipt("d" * 40)
+        with mock.patch.object(install_state, "commit_counts") as compare:
+            engine = install_state.collect(
+                releases=RELEASES, timers={}, last_apply={},
+                versions={"district": "0.1.3", "factory": "0.8.9"},
+            )["engine"]
+
+        compare.assert_not_called()
+        self.assertEqual(engine["installed_sha"], "unknown")
+        self.assertEqual(engine["commits_ahead"], "unknown")
+        self.assertEqual(engine["commits_behind"], "unknown")
+
+    def test_missing_or_unknown_receipt_or_config_reports_identity_unknown(self) -> None:
+        receipt = host.factory_tool_paths()[0] / "uv-receipt.toml"
+        cases = (
+            ("missing receipt", SHA, None),
+            ("unknown receipt", SHA, "unknown"),
+            ("missing config sha", None, SHA),
+            ("unknown config sha", "unknown", SHA),
+        )
+        for name, recorded, installed in cases:
+            with self.subTest(name=name):
+                data = host.load()
+                if recorded is None:
+                    data["defaults"]["engine"].pop("sha")
+                else:
+                    data["defaults"]["engine"]["sha"] = recorded
+                if installed is None:
+                    receipt.unlink(missing_ok=True)
+                else:
+                    self._write_receipt(installed)
+
+                with mock.patch.object(install_state, "commit_counts") as compare:
+                    engine = install_state.collect(
+                        data=data, releases=RELEASES, timers={}, last_apply={},
+                        versions={"district": "0.1.3", "factory": "0.8.9"},
+                    )["engine"]
+
+                compare.assert_not_called()
+                self.assertEqual(engine["installed_sha"], "unknown")
+                self.assertEqual(engine["commits_ahead"], "unknown")
+                self.assertEqual(engine["commits_behind"], "unknown")
 
     def test_engine_policy_reflects_factory_ref_mode(self) -> None:
         versions = {"district": "0.1.4", "factory": "0.4.9"}
