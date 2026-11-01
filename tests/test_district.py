@@ -1434,6 +1434,27 @@ class ApplyTest(DistrictCase):
         self.assertIn("start factory-widgets.service", self.calls("systemctl"))
         self.assertIn("install", self.calls("factory"))
 
+    def test_reset_reports_a_timer_disabled_by_a_prior_apply(self) -> None:
+        self.register(disabled_at="2026-11-01T20:00:00+00:00",
+                      disabled_reason="10 consecutive failed passes (cap 10)")
+        host.unit_dir().mkdir(parents=True)
+        (host.unit_dir() / "factory-widgets.timer").write_text("[Timer]\nOnUnitActiveSec=10min\n")
+        self.render_installed_units()
+        marker = self.bin / "factory-widgets.timer.disabled"
+        marker.touch()
+
+        code, output = self.district("apply", "--reset", "widgets")
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(marker.exists())
+        self.assertNotIn("disabled_at", host.load()["repo"]["acme/widgets"])
+        receipt = install_state.read_record()["last_apply"]
+        self.assertEqual(receipt["disabled"], [])
+        self.assertEqual(receipt["reenabled"], ["factory-widgets.timer"])
+        code, output = self.district("install-state")
+        self.assertEqual(code, 0, output)
+        self.assertIn("WARNING: last apply re-enabled factory-widgets.timer", output)
+
     def test_units_unchanged_on_launchd_backend(self) -> None:
         backend = host.service_backend(
             {"platform": "macos"}, run=mock.Mock(), home=self.tmp / "home", uid=501,
