@@ -162,9 +162,15 @@ Set either `host` or `hosts`, not both. With more than one host,
 `triage_host` is required and must be one of them; it is the only host that
 triages, and `district status` reads the repo's state from it. Each host's
 Factory config carries `[repo."SLUG".fleet]` with that host's `host_name` and
-the `triage_host`. `district add --host NAME` on a repo already registered on
-another host appends `NAME` to `hosts`, keeping the first host as
-`triage_host`.
+the `triage_host`. On the controller that config is this registry, so
+`district add` and `district apply` keep `fleet` up to date there (as
+`host_name = "local"`); other `fleet` keys such as `claim_ttl` are kept and
+synced to every host. `district add --host NAME` on a repo already registered
+on another host appends `NAME` to `hosts`, keeping the first host as
+`triage_host`; a bare `district add` leaves the repo's hosts alone.
+`district rm` removes the units on every listed host and refuses, removing
+nothing, while any of them is running a pass unless you pass `--wait`.
+`district doctor` checks a repo's `toolchain` on every host that runs it.
 
 Several hosts on one repo need Factory's host claims
 ([factory#526](https://github.com/mikeroySoft/factory/issues/526)) so two hosts

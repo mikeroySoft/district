@@ -220,7 +220,37 @@ def factory_host(data: dict, slug: str) -> str | dict:
 
 
 def is_remote(data: dict, slug: str) -> bool:
-    return factory_host(data, slug) != "local"
+    """True when the controller runs none of `slug`'s factories (every listed host is remote)."""
+    factory_host(data, slug)
+    return "local" not in repo_hosts(repos(data)[slug], slug)
+
+
+FLEET_KEYS = ("host_name", "triage_host")  # District-owned keys of a factory `[fleet]` table
+
+
+def fleet_table(table: dict, name: str, slug: str = "repo") -> dict:
+    """`[repo.SLUG.fleet]` for host `name`: the table's own fleet keys (e.g. claim_ttl) plus, when
+    several hosts run the repo, this host's name and the triage host."""
+    fleet = {key: value for key, value in table.get("fleet", {}).items() if key not in FLEET_KEYS}
+    if len(repo_hosts(table, slug)) > 1:
+        fleet.update(host_name=name, triage_host=table["triage_host"])
+    return fleet
+
+
+def sync_local_fleet(data: dict) -> bool:
+    """The controller's own factory config is this registry, so keep `[repo.SLUG.fleet]` here for
+    repos that run on local and other hosts. Returns True when `data` changed."""
+    changed = False
+    for slug, table in repos(data).items():
+        fleet = fleet_table(table, "local", slug) if "local" in repo_hosts(table, slug) else \
+            {key: value for key, value in table.get("fleet", {}).items() if key not in FLEET_KEYS}
+        if fleet != table.get("fleet", {}):
+            if fleet:
+                table["fleet"] = fleet
+            else:
+                del table["fleet"]
+            changed = True
+    return changed
 
 
 def repo_table(data: dict, slug: str) -> dict:
@@ -536,9 +566,11 @@ def remote_config(data: dict, name: str) -> dict:
     for slug, table in repos(data).items():
         listed = repo_hosts(table, slug)
         if name in listed:
-            tables[slug] = {key: copy.deepcopy(value) for key, value in table.items() if key not in HOST_KEYS}
-            if len(listed) > 1:
-                tables[slug]["fleet"] = {"host_name": name, "triage_host": table["triage_host"]}
+            tables[slug] = {key: copy.deepcopy(value) for key, value in table.items()
+                            if key not in HOST_KEYS and key != "fleet"}
+            fleet = fleet_table(table, name, slug)
+            if fleet:
+                tables[slug]["fleet"] = fleet
     if tables:
         result["repo"] = tables
     return result

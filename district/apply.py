@@ -838,6 +838,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                     f"{', '.join(fleet)} lists several hosts; --upgrade installs per host, so set "
                     "[defaults].factory_ref and run `district apply` to move every host to one engine sha"
                 )
+        host.sync_local_fleet(data)
         status, warnings = policy(data)
         host.save(data)
         groups: dict[str, dict[str, dict]] = {}

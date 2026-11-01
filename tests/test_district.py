@@ -467,6 +467,22 @@ class HostTest(DistrictCase):
         self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/solo"], {"path": "/srv/solo"})
         self.assertNotIn("acme/solo", host.remote_config(data, "benito")["repo"])
 
+    def test_local_registry_carries_fleet_for_repo_on_local_and_other_hosts(self) -> None:
+        table = {"path": "/srv/widgets", "hosts": ["local", "ultron"], "triage_host": "ultron",
+                 "fleet": {"claim_ttl": "1h"}}
+        data = {"hosts": {"ultron": {"ssh": "factory@ultron.example"}}, "repo": {"acme/widgets": table}}
+
+        self.assertTrue(host.sync_local_fleet(data))
+        self.assertFalse(host.sync_local_fleet(data))
+        self.assertEqual(table["fleet"], {"claim_ttl": "1h", "host_name": "local", "triage_host": "ultron"})
+        self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/widgets"]["fleet"],
+                         {"claim_ttl": "1h", "host_name": "ultron", "triage_host": "ultron"})
+
+        table["hosts"] = ["ultron"]
+        self.assertTrue(host.sync_local_fleet(data))
+        self.assertEqual(table["fleet"], {"claim_ttl": "1h"})
+        self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/widgets"]["fleet"], {"claim_ttl": "1h"})
+
     def test_remote_config_host_override_can_unset_inherited_key(self) -> None:
         data = {
             "defaults": {
@@ -630,6 +646,20 @@ class AddTest(DistrictCase):
         self.assertEqual(code, 0, out)
         table = host.load()["repo"]["acme/widgets"]
         self.assertEqual((table["hosts"], table["triage_host"], "host" in table), (["local", "ultron"], "local", False))
+        self.assertEqual(table["fleet"], {"host_name": "local", "triage_host": "local"})
+
+    def test_bare_add_leaves_repo_on_its_remote_host(self) -> None:
+        repo = self.repo(toml="")
+        host.save({
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron", "dashboard": {"port": 8765}}},
+        })
+
+        code, out = self.district("add", str(repo))
+
+        self.assertNotIn(host.CLAIMS_ISSUE, out)
+        table = host.load()["repo"]["acme/widgets"]
+        self.assertEqual((table.get("host"), "hosts" in table), ("ultron", False), out)
 
     def test_basename_collision_refused(self) -> None:
         host.save({"repo": {"someone/widgets": {"path": "/elsewhere", "dashboard": {"port": 8765}}}})
@@ -1996,6 +2026,19 @@ class ApplyTest(DistrictCase):
 
 
 class StatusTest(DistrictCase):
+    def test_parity_rows_ride_on_their_repo_entry(self) -> None:
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}}}})
+        drift = {"status": "WARN", "label": "parity acme/widgets engine", "detail": "local: aaaaaaa; ultron: bbbbbbb"}
+        with mock.patch.object(doctor, "parity_by_slug", return_value={"acme/widgets": [drift]}):
+            _code, out = self.district("status", "--json")
+            _code, text = self.district("status")
+
+        report = json.loads(out)
+        self.assertEqual(report["acme/widgets"]["parity"], [drift])
+        self.assertNotIn("parity", report)
+        self.assertIn("WARN  parity acme/widgets engine: local: aaaaaaa; ultron: bbbbbbb", text)
+
     def test_failed_observation_preserves_runtime_and_project_context(self) -> None:
         repo = self.repo(toml="")
         host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}}}})
@@ -2237,6 +2280,45 @@ class RmTest(DistrictCase):
         calls = self.calls("systemctl")
         self.assertLess(calls.index("disable --now factory-widgets.timer"), calls.index("daemon-reload"))
 
+    def test_rm_removes_units_on_every_listed_host(self) -> None:
+        repo = self.repo(toml="")
+        registry = {
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local",
+                                      "dashboard": {"port": 8765}}},
+        }
+        host.save(registry)
+        self.units("acme/widgets")
+        self.stub("systemctl", ("is-active *", "inactive\n"), ("show *", "not-found\n"))
+        remote = mock.Mock()
+        remote.status.return_value = mock.Mock(loaded=False)
+        local_backend = host.service_backend
+        synced = []
+
+        def backend(target=None, run=None):
+            return local_backend() if target is None else remote
+
+        with mock.patch.object(host, "service_backend", side_effect=backend), \
+                mock.patch.object(host, "remote_runner", return_value=mock.Mock()), \
+                mock.patch.object(host, "sync_remote_config", side_effect=lambda data, name, runner: synced.append(
+                    (name, data.get("repo", {})))):
+            remote.is_active.return_value = "active"
+            code, out = self.district("rm", "widgets")
+            self.assertEqual(code, 1, out)
+            self.assertIn("running a pass on ultron", out)
+            self.assertTrue((host.unit_dir() / "factory-widgets.timer").exists())
+            self.assertEqual(host.load(), registry)
+
+            remote.is_active.return_value = "inactive"
+            code, out = self.district("rm", "widgets")
+
+        self.assertEqual(code, 0, out)
+        self.assertEqual(list(host.unit_dir().glob("factory-*")), [])
+        remote.remove.assert_any_call("factory-widgets")
+        remote.remove.assert_any_call("factory-widgets-dashboard")
+        self.assertEqual(synced, [("ultron", {})])
+        self.assertNotIn("repo", host.load())
+
     def test_remote_factory_removes_launchd_agents_and_registry_entry(self) -> None:
         target = "factory@ultron.example"
         home = self.fake_ssh(target)[target]
@@ -2317,6 +2399,40 @@ class DoctorTest(DistrictCase):
             "detail": "loopback URL http://127.0.0.1:11435/v1/chat/completions resolves on the remote host",
         }, rows)
 
+
+    def test_toolchain_checks_every_host_that_runs_repo(self) -> None:
+        data = {
+            "hosts": {
+                "ultron": {"ssh": "factory@ultron.example", "platform": "macos"},
+                "benito": {"ssh": "factory@benito.example", "platform": "linux"},
+            },
+            "repo": {"acme/app": {"path": "/srv/app", "hosts": ["ultron", "benito"], "triage_host": "ultron",
+                                  "toolchain": "macos-xcode"}},
+        }
+        checked = []
+        with mock.patch.object(doctor, "macos_xcode_rows",
+                               side_effect=lambda name, table: checked.append(name) or [doctor.row("PASS", f"host {name} xcode", "ok")]):
+            rows = doctor.toolchain_rows(data)
+
+        self.assertEqual(checked, ["ultron"])
+        self.assertEqual([(r["status"], r["label"]) for r in rows],
+                         [("FAIL", "host benito macos-xcode"), ("PASS", "host ultron xcode")])
+
+    def test_doctor_checks_local_checkout_of_repo_on_local_and_remote_hosts(self) -> None:
+        repo = self.repo(toml="")
+        data = {"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+                "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "ultron"}}}
+
+        self.assertEqual([(r["status"], r["label"]) for r in doctor.repo_rows(data)], [("PASS", "repo acme/widgets")])
+        self.assertFalse(host.is_remote(data, "acme/widgets"))
+
+    def test_parity_models_do_not_leak_between_repos(self) -> None:
+        defaults = {"workers": {"omp": {"command": ["omp", "--model", "base"]}}}
+        data = {"defaults": defaults}
+        override = {"path": "/x", "workers": {"omp": {"command": ["omp", "--model", "override"]}}}
+
+        self.assertIn("override", doctor._models(doctor._effective(data, "local", override)))
+        self.assertEqual(defaults, {"workers": {"omp": {"command": ["omp", "--model", "base"]}}})
 
     def test_doctor_checks_declared_macos_toolchain_on_its_host(self) -> None:
         host.save({

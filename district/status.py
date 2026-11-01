@@ -646,7 +646,7 @@ def table(rows: list[dict]) -> str:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district status", description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--json", action="store_true", help="dump shared operational classification, evidence, snapshot and project metrics keyed by slug; a failed `gh auth status` adds a top-level `host` row")
+    parser.add_argument("--json", action="store_true", help="dump shared operational classification, evidence, snapshot and project metrics keyed by slug; a failed `gh auth status` adds a top-level `host` row; a repo on several hosts adds `parity` rows to its entry")
     parser.add_argument("--slug", action="append", metavar="OWNER/REPO", help="limit output and collection to this slug (repeatable)")
     parser.add_argument("--unhealthy", action="store_true", help="limit output to slugs whose assessment is not normal")
     args = parser.parse_args(argv)
@@ -664,18 +664,19 @@ def main(argv: list[str]) -> int:
     gh = doctor.gh_auth()
     failed = gh["status"] == "FAIL"
     entries = fleet(data)
-    parity = doctor.parity_rows(data)
+    parity = doctor.parity_by_slug(data)
     if args.unhealthy:
         entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}
     if args.json:
         extra = {"host": gh} if failed else {}
-        if parity:
-            extra["parity"] = parity
+        for slug, rows in parity.items():
+            if slug in entries:
+                entries[slug] = {**entries[slug], "parity": rows}
         print(json.dumps({**extra, **entries}, indent=2))
     else:
         if failed:
             print(f"  FAIL  {gh['label']}: {gh['detail']}")
-        for item in parity:
+        for item in (item for slug, rows in parity.items() if slug in entries for item in rows):
             if item["status"] != "PASS":
                 print(f"  {item['status']}  {item['label']}: {item['detail']}")
         if entries:

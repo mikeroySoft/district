@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from ipaddress import ip_address
 import json
 import os
@@ -177,7 +178,8 @@ def toolchain_rows(data: dict) -> list[dict[str, str]]:
         if not isinstance(profile, str) or not profile:
             rows.append(row("FAIL", f"repo {slug} toolchain", "must be a non-empty string"))
             continue
-        requirements.setdefault(table.get("host", "local"), set()).add(profile)
+        for name in host.repo_hosts(table, slug):
+            requirements.setdefault(name, set()).add(profile)
     configured = {"local": {
         "platform": "macos" if sys.platform == "darwin" else "linux",
     }, **host.hosts(data)}
@@ -321,18 +323,24 @@ def _effective(data: dict, name: str, table: dict) -> dict:
     defaults = host.remote_config(data, name).get("defaults", {}) if name != "local" else {
         key: value for key, value in data.get("defaults", {}).items() if key != "engine"
     }
-    config = {key: value for key, value in defaults.items()}
-    host._merge(config, {key: value for key, value in table.items() if key not in host.HOST_KEYS})
+    config = copy.deepcopy(defaults)
+    host._merge(config, {key: copy.deepcopy(value) for key, value in table.items()
+                         if key not in host.HOST_KEYS and key != "fleet"})
     return config
 
 
 def parity_rows(data: dict) -> list[dict[str, str]]:
     """Compare engine, worker CLIs and models across every host that runs one repo; drift is WARN."""
-    rows = []
+    return [item for rows in parity_by_slug(data).values() for item in rows]
+
+
+def parity_by_slug(data: dict) -> dict[str, list[dict[str, str]]]:
+    by_slug = {}
     for slug, table in host.repos(data).items():
         names = host.repo_hosts(table, slug)
         if len(names) < 2:
             continue
+        rows = by_slug.setdefault(slug, [])
         checks: list[tuple[str, dict[str, str]]] = []
         engines = {}
         for name in names:
@@ -349,7 +357,7 @@ def parity_rows(data: dict) -> list[dict[str, str]]:
             rows.append(row("WARN", f"parity {slug} {what}", "; ".join(f"{n}: {v}" for n, v in values.items())))
         if not drift:
             rows.append(row("PASS", f"parity {slug}", f"{', '.join(names)}: same engine, worker CLIs and models"))
-    return rows
+    return by_slug
 
 
 def repo_rows(data: dict) -> list[dict[str, str]]:

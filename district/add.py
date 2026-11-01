@@ -483,8 +483,8 @@ def main(argv: list[str]) -> int:
             raise DistrictError(f"{slug} would share unit {host.unit_name(slug)} with {other}; rename one checkout's origin")
 
     # 1. registry entry first: both paths depend on the port and path being persisted
-    wanted = args.host or "local"
-    current = host.repo_hosts(registered[slug], slug) if slug in registered else [wanted]
+    current = host.repo_hosts(registered[slug], slug) if slug in registered else [args.host or "local"]
+    wanted = args.host or current[0]
     joining = wanted not in current
     if joining:
         names = [*current, wanted]
@@ -500,6 +500,7 @@ def main(argv: list[str]) -> int:
         table.pop("host", None)
         table.setdefault("triage_host", current[0])
         table["hosts"] = names
+        host.sync_local_fleet(data)
         print(f"{slug}: hosts {', '.join(names)} (triage on {table['triage_host']})")
     elif "hosts" in table:
         pass
