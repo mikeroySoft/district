@@ -452,6 +452,15 @@ class OneInstallTest(unittest.TestCase):
         self.backend.pause_timer.assert_not_called()
         self.backend.resume_timer.assert_not_called()
 
+    def test_configured_extras_are_preserved_on_target_and_rollback(self):
+        self.data["defaults"]["factory_extras"] = ["atlas", "ops"]
+        self.bad_rev = True
+        self.assertEqual(self.reconcile(), "failed")
+        self.assertEqual([argv[argv.index("--from") + 1] for argv in self.installs()],
+                         [f"git+{REPO}@{TARGET}[atlas,ops]", f"git+{REPO}@{OLD}[atlas,ops]"])
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+
 
 if __name__ == "__main__":
     unittest.main()
