@@ -241,6 +241,125 @@ class OneInstallTest(unittest.TestCase):
                         self.assertEqual(engine["sha"], TARGET)
                         self.assertFalse(engine.get("paused_timers"))
 
+    def alias_tool_runner(self, remote):
+        alias = self.root / "tool-link"
+        alias.symlink_to(self.tool.parent, target_is_directory=True)
+        os.environ["UV_TOOL_DIR"] = str(alias)
+        self.tool = alias / "factory"
+        self.install_receipt(OLD)
+        if not remote:
+            return None
+        self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                       "engine": {"sha": OLD, "ref": "main"}}}
+        self.data["repo"]["acme/widgets"]["host"] = "remote"
+        runner, _, _ = self.timeout_remote("none")
+        return runner
+
+    def test_alias_process_blocks_apply_until_hand_run_pass_exits(self):
+        for remote in (False, True):
+            with self.subTest(remote=remote), contextlib.ExitStack() as stack:
+                # Each host gets an independent alias layout and engine transaction.
+                if remote:
+                    (self.root / "tool-link").unlink()
+                    self.tool = self.root / "tools/factory"
+                runner = self.alias_tool_runner(remote)
+                if runner:
+                    stack.enter_context(mock.patch.object(host, "remote_runner", return_value=runner))
+                self.data["defaults"]["engine_idle_timeout"] = "1s"
+                self.render_executable = str(self.tool / "bin/python")
+                self.backend.definitions_changed.return_value = False
+                self.calls.clear()
+                self.events.clear()
+                busy = [True]
+                clock = [0.0]
+                run_cmd = self.run_cmd
+                real_python = self.tool.resolve() / "bin/python"
+
+                def processes(argv, **kwargs):
+                    if argv[0] == "ps" and busy[0]:
+                        return subprocess.CompletedProcess(
+                            argv, 0, f"123 {real_python} -m factory dispatch --ticket 12\n", "")
+                    return run_cmd(argv, **kwargs)
+
+                stack.enter_context(mock.patch.object(self, "run_cmd", side_effect=processes))
+                stack.enter_context(mock.patch.object(apply, "run", side_effect=processes))
+                stack.enter_context(mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]))
+                self.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+                self.assertEqual(self.apply(), 0, self.output.getvalue())
+                self.assertEqual(self.installs(), [], "must not replace an engine used through its real path")
+                self.assertIn("idle wait timed out", self.output.getvalue())
+                self.assertEqual(self.active, {"factory-widgets.timer"})
+                self.assertEqual([e for e in self.events if e[0] in ("pause", "enable")], [
+                    ("pause", "factory-widgets.timer"), ("enable", "factory-widgets.timer")])
+                busy[0] = False
+                self.assertEqual(self.apply(), 0, self.output.getvalue())
+                self.assertEqual(len(self.installs()), 1)
+                self.assertEqual(self.active, {"factory-widgets.timer"})
+                self.assertEqual(host.engine(host.load(), "remote" if remote else "local")["sha"], TARGET)
+
+    def test_alias_renderer_accepts_tool_bin_but_rejects_outside_argv(self):
+        for remote in (False, True):
+            with self.subTest(remote=remote), contextlib.ExitStack() as stack:
+                if remote:
+                    (self.root / "tool-link").unlink()
+                    self.tool = self.root / "tools/factory"
+                runner = self.alias_tool_runner(remote)
+                if runner:
+                    stack.enter_context(mock.patch.object(host, "remote_runner", return_value=runner))
+                self.install_receipt(TARGET)
+                self.backend.definitions_changed.return_value = False
+                real_bin = self.tool.resolve() / "bin"
+                # Resolving python itself would lose venv identity.
+                (real_bin / "python").unlink()
+                (real_bin / "python").symlink_to(sys.executable)
+                resolve = Path.resolve
+
+                def no_controller_resolution(path, *args, **kwargs):
+                    if remote and (path == self.cli or path.is_relative_to(self.tool)
+                                   or path.is_relative_to(real_bin)):
+                        self.fail(f"remote tool path resolved on controller: {path}")
+                    return resolve(path, *args, **kwargs)
+
+                stack.enter_context(mock.patch.object(Path, "resolve", new=no_controller_resolution))
+                for executable, accepted in ((real_bin / "python", True),
+                                             (real_bin / "factory", True),
+                                             (self.root / "legacy/bin/python", False),
+                                             (self.root / "legacy/bin/factory", False)):
+                    for plist in (False, True):
+                        with self.subTest(executable=executable, plist=plist):
+                            self.render_executable = str(executable)
+                            self.render_plist = plist
+                            self.output.seek(0)
+                            self.output.truncate(0)
+                            self.assertEqual(self.apply(), 0 if accepted else 1, self.output.getvalue())
+                            self.assertIn("acme/widgets  0.4.7", self.output.getvalue())
+                            if not accepted:
+                                self.assertIn("Factory argv must use", self.output.getvalue())
+
+    def test_process_path_resolution_failure_fails_engine_and_restores_timers(self):
+        runner = self.alias_tool_runner(True)
+        transport = runner.transport
+        failed = []
+
+        def fail_resolution(argv, **kwargs):
+            parts = shlex.split(argv[-1])
+            if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                parts = shlex.split(parts[-1])
+            if (parts[:2] == ["python3", "-c"] and "resolve(" in parts[2]
+                    and "json.dumps" in parts[2] and not failed):
+                failed.append(parts)
+                return subprocess.CompletedProcess(parts, 1, "", "path resolution denied")
+            return transport(argv, **kwargs)
+
+        runner.transport = fail_resolution
+        self.render_executable = str(self.tool / "bin/python")
+        with mock.patch.object(host, "remote_runner", return_value=runner):
+            self.assertEqual(self.apply(), 1, self.output.getvalue())
+        self.assertEqual(self.installs(), [])
+        self.assertIn("path resolution denied", self.output.getvalue())
+        self.assertIn("engine:remote failed", self.output.getvalue())
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+
     def test_restore_verification_failure_names_paused_timers_and_retries_on_next_apply(self):
         for fleet in (False, True):
             for failure in ("unreadable-receipt", "mismatched-receipt", "cli-ownership", "version", "timeout"):

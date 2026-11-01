@@ -280,12 +280,37 @@ def _engine_units(repos: dict, backend, *, timeout: float) -> tuple[list[str], l
     return services, timers
 
 
+def _resolved_paths(paths: list[Path], runner, *, timeout: float = SMOKE_TIMEOUT) -> list[Path]:
+    """Resolve identities on the host that owns the paths, never the controller."""
+    if not isinstance(runner, host.RemoteRunner):
+        return [path.resolve() for path in paths]
+    script = (
+        "import json,pathlib,sys; "
+        "print(json.dumps([str(pathlib.Path(p).resolve()) for p in sys.argv[1:]]))"
+    )
+    proc = runner(["python3", "-c", script, *map(str, paths)], timeout=timeout)
+    if proc.returncode:
+        raise OSError(f"cannot resolve Factory paths: {proc.stderr.strip() or proc.returncode}")
+    try:
+        resolved = json.loads(proc.stdout)
+        if not isinstance(resolved, list) or len(resolved) != len(paths):
+            raise ValueError("unexpected path count")
+        if not all(isinstance(path, str) and Path(path).is_absolute() for path in resolved):
+            raise ValueError("expected absolute paths")
+        return [Path(path) for path in resolved]
+    except (TypeError, ValueError) as exc:
+        raise OSError(f"cannot resolve Factory paths: {exc}") from exc
+
+
 def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> list[str]:
-    proc = run_cmd(["ps", "-eo", "pid=,args="], timeout=timeout)
+    deadline = time.monotonic() + timeout
+    real_tool, real_cli = _resolved_paths([tool, cli], run_cmd, timeout=remaining_timeout(deadline))
+    spellings = (str(tool) + "/", str(real_tool) + "/", str(cli), str(real_cli))
+    proc = run_cmd(["ps", "-eo", "pid=,args="], timeout=remaining_timeout(deadline))
     if proc.returncode:
         raise OSError(proc.stderr.strip() or "cannot inspect Factory processes")
     return [line.strip() for line in proc.stdout.splitlines()
-            if (str(tool) + "/" in line or str(cli) in line)
+            if any(spelling in line for spelling in spellings)
             and not re.search(r"(?:^|\s)dashboard(?:\s|$)", line)]
 
 
@@ -709,20 +734,23 @@ def _units_changed(slug: str, output: str, backend) -> bool:
     return backend.definitions_changed(unit, wanted)
 
 
-def _argv_error(argv, tool: Path, cli: Path) -> str | None:
+def _argv_error(argv, tool: Path, cli: Path, runner) -> str | None:
     if not argv:
         return "missing Factory argv"
     executable = Path(argv[0])
     offset = 2 if len(argv) > 1 and argv[1] == "-P" else 1
-    if executable == cli:
-        return None
-    if (executable.parent == tool / "bin" and re.fullmatch(r"python(?:3(?:\.\d+)?)?", executable.name)
-            and list(argv[offset:offset + 2]) == ["-m", "factory"]):
-        return None
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", executable.name):
+        parent, tool_bin = _resolved_paths([executable.parent, tool / "bin"], runner)
+        if parent == tool_bin and list(argv[offset:offset + 2]) == ["-m", "factory"]:
+            return None
+    else:
+        resolved, real_cli = _resolved_paths([executable, cli], runner)
+        if resolved == real_cli:
+            return None
     return f"Factory argv must use {cli} or {tool}/bin/python -m factory; got {shlex.join(argv)}"
 
 
-def _render_errors(output: str, tool: Path, cli: Path) -> list[str]:
+def _render_errors(output: str, tool: Path, cli: Path, runner) -> list[str]:
     units = _rendered_units(output)
     if not any(name.endswith((".service", ".plist")) for name in units):
         return ["factory install --print: no rendered Factory service"]
@@ -737,8 +765,9 @@ def _render_errors(output: str, tool: Path, cli: Path) -> list[str]:
                 commands = [line.removeprefix("ExecStart=").strip() for line in body.splitlines()
                             if line.startswith("ExecStart=")]
                 argv = shlex.split(commands[0]) if len(commands) == 1 else None
-            error = _argv_error(argv, tool, cli)
-        except (ValueError, TypeError, AttributeError, plistlib.InvalidFileException) as exc:
+            error = _argv_error(argv, tool, cli, runner)
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError,
+                plistlib.InvalidFileException) as exc:
             error = f"invalid Factory argv: {exc}"
         if error:
             errors.append(f"{name}: {error}")
@@ -759,7 +788,7 @@ def plan_apply(targets: dict[str, dict], backend, *, run_cmd=None, env=None,
         proc = run_cmd([str(cli), "install", "--print"], cwd=Path(table["path"]), **kwargs)
         if errors is not None:
             failures = ([f"factory install --print exited {proc.returncode}: {proc.stderr.strip()}"]
-                        if proc.returncode else _render_errors(proc.stdout, tool, cli))
+                        if proc.returncode else _render_errors(proc.stdout, tool, cli, run_cmd))
             if failures:
                 errors[slug] = failures
         changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout, backend)

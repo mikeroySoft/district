@@ -76,6 +76,22 @@ class EngineHostTest(unittest.TestCase):
         ))
         self.assertNotIn(str(self.root / "config"), json.dumps(facts))
 
+    def test_remote_tool_paths_preserve_configured_alias_for_process_matching(self) -> None:
+        real = self.root / "real-tools"
+        real.mkdir()
+        alias = self.root / "tool-link"
+        alias.symlink_to(real, target_is_directory=True)
+        remote_env = {"HOME": str(self.root / "remote-home"), "PATH": os.defpath,
+                      "UV_TOOL_DIR": str(alias), "UV_TOOL_BIN_DIR": str(self.root / "bin")}
+
+        def transport(argv, **kwargs):
+            return subprocess.run(["sh", "-c", argv[-1]], capture_output=True, text=True,
+                                  env=remote_env, input=kwargs.get("input"), timeout=kwargs.get("timeout"))
+
+        runner = host.RemoteRunner("remote", "unused", transport=transport)
+        self.assertEqual(host.factory_tool_paths(runner),
+                         (alias / "factory", self.root / "bin/factory"))
+
     def test_save_migrates_every_legacy_source_and_backs_up_disk_bytes(self) -> None:
         config = host.path()
         config.parent.mkdir(parents=True)
