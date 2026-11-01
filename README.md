@@ -53,7 +53,14 @@ only once.
 Before stating an install version or timer state, run `district install-state --json`
 and quote its `observed_at`. Every `district apply`, successful or failed, atomically
 rewrites `${XDG_STATE_HOME:-~/.local/state}/district/install-state.json`; a warning
-in text mode identifies timers the last apply re-enabled.
+in text mode identifies timers apply disabled and then re-enabled. `last_apply.stopped`
+lists corrective stops when `factory install` starts an operator-stopped timer.
+
+When repo units change, apply preserves an existing timer's pre-install active/inactive
+state: active timers are drained and restored; inactive timers are stopped again
+without disabling them if install starts them. First installs and unchanged units
+still converge an inactive timer through install. A retained inactive timer remains visible in apply's
+output and nonzero convergence status.
 
 ## Ownership
 
@@ -141,11 +148,14 @@ controller-absolute path, the controller resolves its canonical Git origin and
 the remote installs `git+<origin>@<sha>`; the controller path is never sent
 remotely. Engine state is recorded under `[defaults.engine]` for the controller
 and `[hosts.NAME.engine]` for each remote host. An unchanged commit
-is left alone without checking CI or reinstalling. A busy Factory service
-defers only that host's changed engine install without disabling another host's
-timers. Remove `factory_ref` before rolling back, or the next apply will
-reinstall the configured ref's SHA. Omit `factory_ref` to retain explicit
-`district apply --upgrade` behavior.
+is left alone without checking CI or reinstalling. A busy Factory service,
+active/activating/deactivating `handland-*` user unit, or hand-run uv-tool
+`factory gate` / `factory dispatch` process defers that host's changed engine
+install. Both plain apply and `--upgrade` check before and after draining;
+dashboards do not block swaps. The receipt names the busy unit or PID, other
+repo unit drift still converges, and the next apply retries. Remove `factory_ref`
+before rolling back, or the next apply will reinstall the configured ref's SHA.
+Omit `factory_ref` to retain explicit `district apply --upgrade` behavior.
 
 ### One repo on several hosts
 

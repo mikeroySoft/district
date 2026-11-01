@@ -1550,7 +1550,7 @@ class ApplyTest(DistrictCase):
         backend = mock.Mock()
         backend.configuration.return_value = {"platform": "linux", "executable": "systemctl"}
         backend.is_active.side_effect = lambda name: states.get(name, "inactive")
-        backend.status.return_value = mock.Mock(loaded=False)
+        backend.status.return_value = mock.Mock(loaded=False, unit_file_state="enabled")
         backend.enable.side_effect = lambda name, enabled=True, **_: states.update(
             {name: "active" if enabled else "inactive"})
         backend.stop.side_effect = lambda name, **_: states.update({name: "inactive"})
@@ -1642,6 +1642,8 @@ class ApplyTest(DistrictCase):
         tool = Path.home() / ".local/share/uv/tools/factory/bin"
         launcher = Path.home() / ".local/bin/factory"
         for command, busy in (
+            ("factory gate --base origin/main", True),
+            ("factory dispatch --ticket 489", True),
             (f"{tool}/factory gate --base origin/main", True),
             (f"{tool}/python -m factory dispatch --ticket 489", True),
             (f"{launcher} gate --base origin/main", True),
@@ -1649,6 +1651,11 @@ class ApplyTest(DistrictCase):
             (f"{launcher} dashboard --json", False),
             (f"{tool}/python -m factory dashboard --json", False),
             ("/unrelated/bin/python -m factory gate", False),
+            (f"{tool}/python -m factory gate --base origin/main", True),
+            (str(launcher), False),
+            (str(tool / "python"), False),
+            (f"/usr/bin/python3 {launcher} gate --base origin/main", True),
+            (f"/usr/bin/bash -c '{launcher} gate'", False),
         ):
             with self.subTest(command=command):
                 states = {"factory-widgets.timer": "inactive"}
@@ -2255,6 +2262,30 @@ class ApplyTest(DistrictCase):
         calls = self.calls("systemctl")
         self.assertLess(calls.index("disable --now factory-widgets.timer"),
                         calls.index("enable --now factory-widgets.timer"))
+
+    def test_upgrade_defers_when_hand_run_work_starts_during_drain(self) -> None:
+        self.engine_source()
+        record = install_state.ApplyRun.start()
+        real_run = apply.run
+        launcher = Path.home() / ".local/bin/factory"
+
+        def process_started_after_drain(argv, **kwargs):
+            if argv[0] == "ps":
+                drained = (self.bin / "factory-widgets.timer.disabled").exists()
+                output = f"218269 {launcher} gate --base origin/main\n" if drained else ""
+                return subprocess.CompletedProcess(argv, 0, output, "")
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(apply, "run", side_effect=process_started_after_drain):
+            result = apply.upgrade(host.load(), record=record)
+
+        self.assertEqual(result, "deferred")
+        self.assertIn("pid 218269 factory gate", record.deferred["engine"]["reason"])
+        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
+        self.assertEqual(record.disabled, {"factory-widgets.timer"})
+        self.assertEqual(record.reenabled, {"factory-widgets.timer"})
+        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
+        self.assertNotIn("engine", host.load()["defaults"])
 
     def test_upgrade_installs_the_renamed_engine_package(self) -> None:
         src = self.engine_source()

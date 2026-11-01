@@ -102,6 +102,7 @@
         },
         "disabled": {"$ref": "#/$defs/unitNames"},
         "reenabled": {"$ref": "#/$defs/unitNames"},
+        "stopped": {"$ref": "#/$defs/unitNames"},
         "deferred": {
           "type": "array",
           "items": {

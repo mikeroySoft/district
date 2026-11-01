@@ -179,7 +179,7 @@ def _engine_sha(data: dict) -> str:
 def unknown_last_apply() -> dict:
     return {
         "started_at": UNKNOWN, "finished_at": UNKNOWN, "exit_status": UNKNOWN,
-        "disabled": [], "reenabled": [], "deferred": [],
+        "disabled": [], "reenabled": [], "stopped": [], "deferred": [],
         "engine_change": {"from": UNKNOWN, "to": UNKNOWN},
         "config_sha_before": UNKNOWN, "config_sha_after": UNKNOWN,
     }
@@ -270,6 +270,7 @@ class ApplyRun:
     observed: bool = False
     disabled: set[str] = field(default_factory=set)
     reenabled: set[str] = field(default_factory=set)
+    stopped: set[str] = field(default_factory=set)
     deferred: dict[str, dict[str, str]] = field(default_factory=dict)
 
     @classmethod
@@ -301,7 +302,7 @@ class ApplyRun:
         data = _safe_config()
         after = timer_states(data)
         disabled = set(self.disabled)
-        reenabled = set(self.reenabled)
+        reenabled = self.reenabled & self.disabled
         if self.observed:
             for name in set(self.timers_before) | set(after):
                 before_active = self.timers_before.get(name, {}).get("active")
@@ -310,7 +311,7 @@ class ApplyRun:
                     continue
                 if before_active == "active" and after_active != "active":
                     disabled.add(name)
-                if before_active != "active" and after_active == "active":
+                if name in self.disabled and after_active == "active":
                     reenabled.add(name)
         last_apply = {
             "started_at": self.started_at,
@@ -318,6 +319,7 @@ class ApplyRun:
             "exit_status": exit_status,
             "disabled": sorted(disabled),
             "reenabled": sorted(reenabled),
+            "stopped": sorted(self.stopped),
             "deferred": sorted(self.deferred.values(), key=lambda item: item["target"]),
             "engine_change": {"from": self.engine_before, "to": _engine_sha(data)},
             "config_sha_before": self.config_sha_before,
