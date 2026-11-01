@@ -1434,6 +1434,27 @@ class ApplyTest(DistrictCase):
         self.assertIn("start factory-widgets.service", self.calls("systemctl"))
         self.assertIn("install", self.calls("factory"))
 
+    def test_reset_reports_a_timer_disabled_by_a_prior_apply(self) -> None:
+        self.register(disabled_at="2026-11-01T20:00:00+00:00",
+                      disabled_reason="10 consecutive failed passes (cap 10)")
+        host.unit_dir().mkdir(parents=True)
+        (host.unit_dir() / "factory-widgets.timer").write_text("[Timer]\nOnUnitActiveSec=10min\n")
+        self.render_installed_units()
+        marker = self.bin / "factory-widgets.timer.disabled"
+        marker.touch()
+
+        code, output = self.district("apply", "--reset", "widgets")
+
+        self.assertEqual(code, 0, output)
+        self.assertFalse(marker.exists())
+        self.assertNotIn("disabled_at", host.load()["repo"]["acme/widgets"])
+        receipt = install_state.read_record()["last_apply"]
+        self.assertEqual(receipt["disabled"], [])
+        self.assertEqual(receipt["reenabled"], ["factory-widgets.timer"])
+        code, output = self.district("install-state")
+        self.assertEqual(code, 0, output)
+        self.assertIn("WARNING: last apply re-enabled factory-widgets.timer", output)
+
     def test_units_unchanged_on_launchd_backend(self) -> None:
         backend = host.service_backend(
             {"platform": "macos"}, run=mock.Mock(), home=self.tmp / "home", uid=501,
@@ -1528,6 +1549,210 @@ class ApplyTest(DistrictCase):
 
         self.assertEqual(code, 0, out)
         self.assertFalse(any(call.startswith("disable ") for call in self.calls("systemctl")))
+
+    def timer_state_apply(self, states: dict[str, str], *, engine: bool = False,
+                          install_starts_timer: bool = True, handland: str = "",
+                          processes: str = ""):
+        """Apply changed units through a stateful backend and install's real timer side effect."""
+        root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=self.tmp)))
+        repos = {}
+        for timer in states:
+            name = timer.removeprefix("factory-").removesuffix(".timer")
+            path = root / name
+            path.mkdir()
+            repos[f"acme/{name}"] = {"path": str(path)}
+        data = {"repo": repos}
+        if engine:
+            data["defaults"] = {
+                "factory_source": str(root), "factory_ref": "main",
+                "engine": {"ref": "main", "sha": "b" * 40},
+            }
+        host.save(data)
+        backend = mock.Mock()
+        backend.configuration.return_value = {"platform": "linux", "executable": "systemctl"}
+        backend.is_active.side_effect = lambda name: states.get(name, "inactive")
+        backend.status.return_value = mock.Mock(loaded=False, unit_file_state="enabled")
+        backend.enable.side_effect = lambda name, enabled=True, **_: states.update(
+            {name: "active" if enabled else "inactive"})
+        backend.stop.side_effect = lambda name, **_: states.update({name: "inactive"})
+        commands, during_install = [], []
+
+        def run_cmd(argv, **kwargs):
+            commands.append(argv)
+            output = ""
+            if argv == ["factory", "install"]:
+                timer = f"factory-{Path(kwargs['cwd']).name}.timer"
+                during_install.append((timer, states[timer]))
+                if install_starts_timer:
+                    states[timer] = "active"
+            elif argv == ["factory", "doctor", "--json"]:
+                output = json.dumps(DOCTOR)
+            elif argv == ["factory", "dashboard", "--json"]:
+                output = json.dumps(dashboard())
+            elif argv[0] == "systemctl" and "list-units" in argv and handland:
+                output = f"handland-526-pr60-20.service loaded {handland} running Hand gate\n"
+            elif argv[0] == "ps":
+                output = processes
+            return subprocess.CompletedProcess(argv, 0, output, "")
+
+        with mock.patch.object(apply, "plan_apply", return_value={slug: True for slug in repos}), \
+             mock.patch.object(apply, "_resolve_engine", return_value=(
+                 "https://github.com/acme/factory.git", "acme/factory", "main", "a" * 40)), \
+             mock.patch.object(apply, "_ci_state", return_value="success"), \
+             mock.patch.object(install_state, "timer_states", side_effect=lambda *_: {
+                 timer: {"active": state} for timer, state in states.items()}), \
+             mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
+            record = install_state.ApplyRun.start()
+            _, code, _ = apply._apply_host(
+                data, "local", repos, mock.Mock(upgrade=None, reset=None), record, "OK",
+                context=(run_cmd, backend),
+            )
+            record.finish(code)
+        return install_state.read_record()["last_apply"], backend, commands, during_install
+
+    def test_changed_units_keep_an_operator_stopped_timer_stopped(self) -> None:
+        timer = "factory-widgets.timer"
+        states = {timer: "inactive"}
+
+        receipt, backend, commands, _ = self.timer_state_apply(states)
+
+        self.assertEqual(states[timer], "inactive")
+        self.assertEqual(commands.count(["factory", "install"]), 1)
+        self.assertNotIn(timer, receipt["reenabled"])
+        self.assertIn(timer, receipt["stopped"])
+        backend.enable.assert_not_called()  # stopped, not disabled
+        backend.start.assert_not_called()
+
+    def test_changed_units_reenable_a_timer_that_was_running(self) -> None:
+        timer = "factory-widgets.timer"
+        states = {timer: "active"}
+
+        receipt, backend, _, during = self.timer_state_apply(states, install_starts_timer=False)
+
+        self.assertEqual(during, [(timer, "inactive")])
+        self.assertEqual(states[timer], "active")
+        self.assertIn(timer, receipt["disabled"])
+        self.assertIn(timer, receipt["reenabled"])
+        backend.start.assert_not_called()
+
+    def test_engine_change_restores_each_timer_to_its_prior_state(self) -> None:
+        states = {"factory-alpha.timer": "active", "factory-beta.timer": "inactive"}
+
+        receipt, _, commands, _ = self.timer_state_apply(states, engine=True)
+
+        self.assertEqual(states, {"factory-alpha.timer": "active", "factory-beta.timer": "inactive"})
+        self.assertTrue(any(argv[:4] == ["uv", "tool", "install", "--reinstall"] for argv in commands))
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], "a" * 40)
+        self.assertEqual(receipt["reenabled"], ["factory-alpha.timer"])
+
+    def test_engine_swap_defers_while_a_handland_unit_is_active(self) -> None:
+        for state in ("active", "activating", "deactivating"):
+            with self.subTest(state=state):
+                states = {"factory-alpha.timer": "active", "factory-beta.timer": "inactive"}
+                receipt, _, commands, _ = self.timer_state_apply(
+                    states, engine=True, handland=state, install_starts_timer=False)
+
+                self.assertFalse(any(argv[:3] == ["uv", "tool", "install"] for argv in commands))
+                self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
+                self.assertEqual(receipt["deferred"][0]["target"], "engine")
+                self.assertIn("handland-526-pr60-20.service", receipt["deferred"][0]["reason"])
+                self.assertEqual(states, {"factory-alpha.timer": "active", "factory-beta.timer": "inactive"})
+                self.assertEqual(commands.count(["factory", "install"]), 2)  # unit drift still converges
+
+    def test_engine_swap_defers_while_a_hand_run_gate_or_dispatch_process_uses_the_tool(self) -> None:
+        tool = Path.home() / ".local/share/uv/tools/factory/bin"
+        launcher = Path.home() / ".local/bin/factory"
+        for command, busy in (
+            ("factory gate --base origin/main", True),
+            ("factory dispatch --ticket 489", True),
+            (f"{tool}/factory gate --base origin/main", True),
+            (f"{tool}/python -m factory dispatch --ticket 489", True),
+            (f"{launcher} gate --base origin/main", True),
+            (f"{tool}/python {launcher} dispatch --ticket 489", True),
+            (f"{launcher} dashboard --json", False),
+            (f"{tool}/python -m factory dashboard --json", False),
+            ("/unrelated/bin/python -m factory gate", False),
+            (f"{tool}/python -m factory gate --base origin/main", True),
+            (str(launcher), False),
+            (str(tool / "python"), False),
+            (f"/usr/bin/python3 {launcher} gate --base origin/main", True),
+            (f"/usr/bin/bash -c '{launcher} gate'", False),
+        ):
+            with self.subTest(command=command):
+                states = {"factory-widgets.timer": "inactive"}
+                receipt, _, commands, _ = self.timer_state_apply(
+                    states, engine=True, processes=f"218269 {command}\n", install_starts_timer=False)
+
+                installed = any(argv[:3] == ["uv", "tool", "install"] for argv in commands)
+                self.assertEqual(installed, not busy)
+                self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
+                self.assertEqual(states["factory-widgets.timer"], "inactive")
+                if busy:
+                    self.assertIn("pid 218269", receipt["deferred"][0]["reason"])
+                    self.assertRegex(receipt["deferred"][0]["reason"], r"factory (gate|dispatch)")
+                else:
+                    self.assertEqual(receipt["deferred"], [])
+
+    def test_engine_swap_defers_for_python_flags_before_factory_module(self) -> None:
+        python = Path.home() / ".local/share/uv/tools/factory/bin/python"
+        for args, busy in (
+            ("-u -m factory gate --base origin/main", True),
+            ("-X dev -m factory dispatch --ticket 489", True),
+            ("-W ignore -m factory gate", True),
+            ("-Xdev -Wignore -m factory dispatch", True),
+            ("-S -O -m factory gate", True),
+            ("-uS -m factory dispatch", True),
+            ("--check-hash-based-pycs always -m factory gate", True),
+            ("-u -m factory dashboard --json", False),
+            ("-c print(1) -m factory gate", False),
+            ("-cprint(1) -m factory gate", False),
+            ("-m unrelated -m factory gate", False),
+            ("-W -m factory gate", False),
+            ("-X -m factory gate", False),
+            ("- -m factory gate", False),
+            ("-- -m factory gate", False),
+            ("unrelated.py -m factory gate", False),
+        ):
+            with self.subTest(args=args):
+                receipt, _, commands, _ = self.timer_state_apply(
+                    {"factory-widgets.timer": "inactive"}, engine=True,
+                    processes=f"218269 {python} {args}\n", install_starts_timer=False)
+                self.assertEqual(
+                    any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
+                self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
+                if busy:
+                    self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
+                else:
+                    self.assertEqual(receipt["deferred"], [])
+
+    def test_engine_swap_defers_for_attached_and_grouped_python_module_options(self) -> None:
+        python = Path.home() / ".local/share/uv/tools/factory/bin/python"
+        for args, busy in (
+            ("-mfactory gate", True),
+            ("-um factory dispatch", True),
+            ("-uSmfactory gate", True),
+            ("-uW ignore -mfactory gate", True),
+            ("-uWignore -mfactory dispatch", True),
+            ("-uX dev -mfactory gate", True),
+            ("-uXdev -mfactory dispatch", True),
+            ("--check-hash-based-pycs=always -mfactory gate", True),
+            ("-mfactory dashboard --json", False),
+            ("-um factory dashboard --json", False),
+            ("-uc -mfactory gate", False),
+            ("-uW -mfactory gate", False),
+            ("-uX -mfactory gate", False),
+        ):
+            with self.subTest(args=args):
+                receipt, _, commands, _ = self.timer_state_apply(
+                    {"factory-widgets.timer": "inactive"}, engine=True,
+                    processes=f"218269 {python} {args}\n", install_starts_timer=False)
+                self.assertEqual(
+                    any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
+                self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
+                if busy:
+                    self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
+                else:
+                    self.assertEqual(receipt["deferred"], [])
 
     def test_remote_host_without_engine_installs_from_host_source_not_controller_path(self) -> None:
         sha = "a" * 40
@@ -2119,6 +2344,30 @@ class ApplyTest(DistrictCase):
         calls = self.calls("systemctl")
         self.assertLess(calls.index("disable --now factory-widgets.timer"),
                         calls.index("enable --now factory-widgets.timer"))
+
+    def test_upgrade_defers_when_hand_run_work_starts_during_drain(self) -> None:
+        self.engine_source()
+        record = install_state.ApplyRun.start()
+        real_run = apply.run
+        launcher = Path.home() / ".local/bin/factory"
+
+        def process_started_after_drain(argv, **kwargs):
+            if argv[0] == "ps":
+                drained = (self.bin / "factory-widgets.timer.disabled").exists()
+                output = f"218269 {launcher} gate --base origin/main\n" if drained else ""
+                return subprocess.CompletedProcess(argv, 0, output, "")
+            return real_run(argv, **kwargs)
+
+        with mock.patch.object(apply, "run", side_effect=process_started_after_drain):
+            result = apply.upgrade(host.load(), record=record)
+
+        self.assertEqual(result, "deferred")
+        self.assertIn("pid 218269 factory gate", record.deferred["engine"]["reason"])
+        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
+        self.assertEqual(record.disabled, {"factory-widgets.timer"})
+        self.assertEqual(record.reenabled, {"factory-widgets.timer"})
+        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
+        self.assertNotIn("engine", host.load()["defaults"])
 
     def test_upgrade_installs_the_renamed_engine_package(self) -> None:
         src = self.engine_source()

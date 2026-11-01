@@ -229,7 +229,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
         return "unchanged"
 
     services = [f"{host.unit_name(slug)}.service" for slug in repos]
-    if busy := busy_units(services, backend):
+    if busy := busy_engine(services, backend, run_cmd):
         _defer(record, engine_target, busy)
         return "deferred"
     timers = [f"{host.unit_name(slug)}.timer" for slug in repos]
@@ -241,7 +241,8 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     if extras:
         install_source += f"[{','.join(extras)}]"
     try:
-        if busy := drain(active_timers, services, data, record, backend=backend):
+        if busy := (drain(active_timers, services, data, record, backend=backend)
+                    or busy_engine(services, backend, run_cmd)):
             _defer(record, engine_target, busy)
             return "deferred"
         try:
@@ -300,14 +301,14 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         print(f"engine fleet ({names}) held: {ref} resolves differently ({detail}); every host keeps its engine")
         return "failed"
     pin = next(iter(resolved.values()))
-    for name, (_, backend, repos) in contexts.items():
+    for name, (run_cmd, backend, repos) in contexts.items():
         if installed_engine_commit(data, name) == pin[1]:
             continue
         held = None
         try:
             if (state := _ci_state(*sources[name], pin[1])) != "success":
                 held, result = f"CI {state}", "unchanged"
-            elif busy := busy_units([f"{host.unit_name(slug)}.service" for slug in repos], backend):
+            elif busy := busy_engine([f"{host.unit_name(slug)}.service" for slug in repos], backend, run_cmd):
                 _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
                 held, result = f"busy: {', '.join(busy)}", "deferred"
         except host.RemoteHostError as exc:
@@ -447,6 +448,82 @@ def busy_units(services: list[str], backend=None) -> list[str]:
             if backend.is_active(service) in ("active", "activating", "deactivating")]
 
 
+def _python_entrypoint(argv: list[str]) -> list[str]:
+    """Stop at Python's module/script boundary, not text in script arguments."""
+    args = iter(argv)
+    for arg in args:
+        if arg in {"-", "--"}:
+            return []
+        if arg == "--check-hash-based-pycs":
+            next(args, None)
+        elif not arg.startswith("-"):
+            return [arg, *args]
+        elif option := re.match(r"^-[^-]*?([cmWX])(.*)$", arg):
+            # Short options can group; c/m/W/X consume the rest or the next token.
+            flag, value = option.groups()
+            if flag == "c":
+                return []
+            value = value or next(args, "")
+            if flag == "m":
+                return ["-m", value, *args]
+    return []
+
+
+def _python_factory_args(argv: list[str], tool_bin: Path, launchers: set[str]) -> list[str]:
+    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(argv[0]).name):
+        return []
+    args = _python_entrypoint(argv[1:])
+    if args and args[0] in launchers:
+        return args[1:]
+    if Path(argv[0]).parent == tool_bin and args[:2] == ["-m", "factory"]:
+        return args[2:]
+    return []
+
+
+def _factory_work(command: str, home: Path) -> str | None:
+    """Recognize uv-tool gate/dispatch entrypoints, not text mentioning those commands."""
+    argv = command.split()
+    if not argv:
+        return None
+    tool_bin = home / ".local/share/uv/tools/factory/bin"
+    launchers = {str(home / ".local/bin/factory"), str(tool_bin / "factory")}
+    if argv[0] in launchers or argv[0] == "factory":
+        args = argv[1:]
+    else:
+        args = _python_factory_args(argv, tool_bin, launchers)
+    if args and args[0] in {"gate", "dispatch"}:
+        return f"factory {args[0]}"
+    return None
+
+
+def _busy_handland(backend, run_cmd) -> list[str]:
+    config = backend.configuration()
+    if config.get("platform") == "linux":
+        units = run_cmd([
+            str(config["executable"]), "--user", "list-units", "--no-legend", "--plain",
+            "--state=active,activating,deactivating", "handland-*",
+        ], check=True)
+        return [line.split()[0] for line in units.stdout.splitlines() if line.strip()]
+    return []
+
+
+def busy_engine(services: list[str], backend, run_cmd) -> list[str]:
+    """All known users of the target host's engine, checked again after timers drain."""
+    if busy := (busy_units(services, backend) or _busy_handland(backend, run_cmd)):
+        return busy
+    if isinstance(run_cmd, host.RemoteRunner):
+        facts = run_cmd.facts()
+        home, uid = Path(facts["home"]), facts["uid"]
+    else:
+        home, uid = Path.home(), os.getuid()
+    processes = run_cmd(["ps", "-ww", "-u", str(uid), "-o", "pid=,args="], check=True)
+    for line in processes.stdout.splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) == 2 and fields[0].isdigit() and (work := _factory_work(fields[1], home)):
+            busy.append(f"pid {fields[0]} {work}")
+    return busy
+
+
 def disable_timers(timers: list[str], timeout: float, backend, *, check: bool = True,
                    record: install_state.ApplyRun | None = None) -> None:
     deadline = time.monotonic() + timeout
@@ -512,7 +589,7 @@ def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None
     ).stdout.strip():
         raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
     services = [f"{host.unit_name(slug)}.service" for slug in repos]
-    if busy := busy_units(services, backend):
+    if busy := busy_engine(services, backend, run_cmd):
         _defer(record, engine_target, busy)
         return "deferred"
     timers = [f"{host.unit_name(slug)}.timer" for slug in repos]
@@ -538,7 +615,8 @@ def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None
         source = f"{tree}[{','.join(extras)}]" if extras else str(tree)
         active_timers = [timer for timer in timers if backend.is_active(timer) == "active"]
         try:
-            if busy := drain(active_timers, services, data, record, backend=backend):
+            if busy := (drain(active_timers, services, data, record, backend=backend)
+                        or busy_engine(services, backend, run_cmd)):
                 _defer(record, engine_target, busy)
                 return "deferred"
             try:
@@ -579,8 +657,8 @@ def restore(timers: list[str], repos: dict[str, dict],
     for timer in timers:
         if timer not in disabled and backend.is_active(timer) != "active":
             backend.enable(timer, check=False)
-            if record:
-                record.reenabled.add(timer)
+        if record and timer in record.disabled and backend.is_active(timer) == "active":
+            record.reenabled.add(timer)
 
 
 # ---------------------------------------------------------------- per repo
@@ -785,7 +863,10 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                 rows.append(deferred_row(slug, table, reason, backend))
                 continue
             timer = f"{host.unit_name(slug)}.timer"
-            active_timers = [timer] if changed and backend.is_active(timer) == "active" else []
+            timer_state = backend.is_active(timer) if changed else None
+            if timer_state == "inactive" and backend.status(timer).unit_file_state == "not-found":
+                timer_state = None  # First install has no operator state to preserve.
+            active_timers = [timer] if timer_state == "active" else []
             install_error = None
             try:
                 if changed and (busy := drain(active_timers, [service], data, record, backend=backend)):
@@ -808,6 +889,9 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                         install_error = f"install: {tail[0]}"
             finally:
                 restore(active_timers, all_repos, record, backend=backend)
+                if timer_state == "inactive" and backend.is_active(timer) == "active":
+                    backend.stop(timer, timeout=DRAIN_TIMEOUT)
+                    record.stopped.add(timer)
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
             if install_error:
                 row["fail"].insert(0, install_error)
