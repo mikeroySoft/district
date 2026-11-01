@@ -490,7 +490,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
                 record.clear_deferred(engine_target)
             print(f"engine {sha[:7]} ({resolved_ref})")
             return "unchanged"
-    except subprocess.TimeoutExpired as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"{engine_target} failed preparing {sha}: {exc}; retaining recovery state")
         return "failed"
     if receipt == sha:

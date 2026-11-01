@@ -140,6 +140,8 @@ Resolution, ancestry, target persistence, receipt, and dashboard completion time
 fail the named engine step without further installs; repository checks on a usable
 engine and the remaining hosts still run. Initial config-sync timeout fails that
 host without retrying setup or installing; other selected hosts continue.
+Nonzero dashboard restarts also fail the engine step without aborting repository
+checks; the pending restart remains saved for the next apply.
 
 Every apply checks that the CLI exists, resolves into the canonical tool, and
 has a valid uv receipt before rendering, even without `factory_ref`. Missing

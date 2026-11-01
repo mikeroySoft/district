@@ -181,6 +181,30 @@ class OneInstallTest(unittest.TestCase):
         args = argparse.Namespace(slug=None, reset=None, upgrade=upgrade, allow_downgrade=False)
         return apply._run(args, install_state.ApplyRun("", "", OLD))
 
+    def test_current_engine_dashboard_restart_failure_still_checks_repositories(self):
+        self.install_receipt(TARGET)
+        self.backend.status.return_value = service.ServiceStatus("loaded", "active", "enabled", 42)
+        self.backend.start.return_value = subprocess.CompletedProcess([], 1, "", "restart failed")
+        for recorded in (OLD, None):
+            with self.subTest(recorded=recorded):
+                self.data["defaults"]["engine"] = {"ref": "main"}
+                if recorded:
+                    self.data["defaults"]["engine"]["sha"] = recorded
+                self.calls.clear()
+                self.output.truncate(0)
+                self.output.seek(0)
+                with contextlib.redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(self.apply(), 1)
+                output = self.output.getvalue()
+                self.assertNotIn("Traceback", output + errors.getvalue())
+                self.assertIn("engine failed preparing", output)
+                self.assertIn("factory-widgets-dashboard.service: restart exited 1", output)
+                self.assertIn("acme/widgets  0.4.7", output)
+                self.assertIn("engine step failed; install skipped", output)
+                self.assertTrue(any(argv[1:] == ["doctor", "--json"] for argv, _ in self.calls))
+                self.assertEqual(self.installs(), [])
+                self.assertTrue(host.engine(host.load(), "local")["dashboards_pending"])
+
     def test_one_tool_and_rendered_units_reject_versioned_venvs(self):
         self.assertEqual(self.apply(), 0)
         self.assertEqual(self.installs(), [["uv", "tool", "install", "--force", "--from",
