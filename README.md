@@ -5,7 +5,7 @@ Host-side fleet manager for [Factory](https://github.com/mikeroySoft/factory) in
 Factory runs an autonomous ticket pipeline for **one** repository: a `.factory.toml`
 at the repo root, a host service timer, and a dashboard. District owns everything
 that belongs to the **host** instead of the repo — the registry of managed repos,
-the engine install and its version pins, triage endpoint, dashboard ports, timer
+the engine install and its host-wide target, triage endpoint, dashboard ports, timer
 cadence, service definitions, labels, supply-chain policy, and the failure cap.
 
 Full rationale: [PRD.md](PRD.md). Project page: <https://mikeroysoft.github.io/district/>.
@@ -39,7 +39,7 @@ only once.
 | Command | What one invocation does |
 |---|---|
 | `district add <path\|url>` | Onboard a repo, or adopt one that already has `.factory.toml`. `--dry-run` prints the proposal (slug, clone path, fork parent, port, gate checks); `--host NAME`, `--check NAME=CMD`, `--exclusive a,b`, `--no-edit`. |
-| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: units, labels, `factory doctor`, failure cap, package-age policy. Remote commands and config writes use bounded BatchMode SSH. Unit changes drain only that repository's active timer; a busy service is deferred without touching its timer. If `[defaults].factory_ref` is set, each target host installs the exact CI-green commit through its own `uv`; engine metadata is per host. An unreachable host exits 1 for its factories while other hosts continue. Then runs `gh --version` and `factory --version` under each reconciled dispatch/dashboard unit's PATH. `--upgrade` explicitly reinstalls Factory from the target host's `factory_source`; `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
+| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: the host's one Factory uv tool, units, labels, `factory doctor`, failure cap, package-age policy, and safe legacy-engine cleanup. Remote commands and config writes use bounded BatchMode SSH. A changed engine pauses active Factory timers, waits within the configured bound for services and uv-tool processes to become idle, installs the newest CI-green target, verifies it, rolls back on failure, and restores exactly the paused timers. `--upgrade [REF]` requests an explicit target; `--allow-downgrade` permits an ancestor. `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table across local and remote hosts. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. An unreachable host keeps its factories visible as unreachable with the last successful observation time and produces unknown exit 2, not fleet failure exit 1. Exit 1 remains operational attention or a failed controller `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row); exit 0 means every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
 | `district doctor` | Check District's own host prerequisites and every toolchain profile declared by a managed repository. `--json`. |
@@ -59,7 +59,7 @@ in text mode identifies timers the last apply re-enabled.
 
 | District owns (host, never committed) | Factory owns (committed to its repo) |
 |---|---|
-| engine install, upgrade, per-repo version pin | `[[gate.check]]`, `[leak_scan]`, `[repo].upstream` |
+| one shared uv-tool engine install and host-wide target | `[[gate.check]]`, `[leak_scan]`, `[repo].upstream` |
 | triage endpoint and model | `.github/ISSUE_TEMPLATE/agent_task.md` |
 | worker/reviewer argv, gate lock path | `.factory-lessons.md` |
 | dashboard port, timer cadence, bind host, toolchain profile | `.gitignore` lines |
@@ -82,7 +82,6 @@ then assign it with `district add --host ultron …` or a repo table:
 [hosts.ultron]
 ssh = "factory@ultron.example"
 platform = "macos"
-factory_source = "~/src/factory" # optional override for this host
 xcode_version = "27.1"
 root = "~/factories" # optional
 defaults_unset = ["triage.url"] # inherited dotted keys to omit remotely
@@ -125,27 +124,42 @@ when one cannot be reached or a remote host operation fails.
 `district update` updates this controller; registered
 remote factories do not require District installations of their own.
 
-Set `factory_ref = "latest-odd"` under `[defaults]` to let the hourly plain
-`district apply` follow Factory's highest odd-patch semver tag, including
-prereleases. District resolves remote tags without checking out or requiring a
-clean developer clone, uses the peeled commit for annotated tags, and never
-falls back to `main`. A tag, such as `factory_ref = "v0.4.7"`, or a branch,
-such as `"main"`, pins that explicit remote ref instead; tags take precedence
-over branches with the same name.
+Set optional `factory_ref` under `[defaults]` to reconcile Factory automatically.
+`factory_repo` defaults to `https://github.com/mikeroySoft/factory`; no checkout
+is required. The chosen SHA (`target`), `target_ref`, and `resolved_at` are
+recorded beside the installed `sha` in `[defaults.engine]` locally.
+`latest-odd` selects the highest odd-patch semver tag, including prereleases;
+a tag or branch such as `"v0.4.7"` or `"main"` selects that remote ref. A
+selected tag commit must itself be green. For a branch, District walks up to 50
+remote commits back to the newest commit whose GitHub checks are complete and
+green. Remote hosts record that target under `[hosts.NAME.engine]`; their
+filtered config receives the same target under `[defaults.engine]`.
 
-Every target resolves the ref from its Factory checkout, requires successful
-GitHub check runs, and installs the immutable revision through `uv` with
-`factory_extras`. Optional `[hosts.NAME].factory_source` overrides the default
-source on that host. If a remote host has no override and the default is a
-controller-absolute path, the controller resolves its canonical Git origin and
-the remote installs `git+<origin>@<sha>`; the controller path is never sent
-remotely. Engine state is recorded under `[defaults.engine]` for the controller
-and `[hosts.NAME.engine]` for each remote host. An unchanged commit
-is left alone without checking CI or reinstalling. A busy Factory service
-defers only that host's changed engine install without disabling another host's
-timers. Remove `factory_ref` before rolling back, or the next apply will
-reinstall the configured ref's SHA. Omit `factory_ref` to retain explicit
-`district apply --upgrade` behavior.
+Every host has exactly one Factory installation: the `factory` uv tool, with no
+version in its path. Every managed unit and launchd job uses that tool's Python,
+and District invokes its CLI to render units. When the target changes, District
+pauses the active Factory timers, waits up to `[defaults].engine_idle_timeout`
+(default `"30min"`) for non-dashboard services and uv-tool Factory processes
+to become idle, installs with `uv tool install
+--force`, and verifies both the receipt revision and CLI. A failed install or
+verification reinstalls and verifies the previous revision. The `finally` path
+restores exactly the timers District paused; dashboards restart on the new code.
+
+`district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
+when no ref is supplied. It resolves only against the remote repository, never a
+local checkout. Installing an ancestor is refused with both revisions named
+unless `--allow-downgrade` is present. Without `factory_ref`, ordinary apply
+leaves a verified installed engine unchanged.
+
+`install-state` obtains ahead/behind counts from GitHub compare, or reports
+`unknown` when that bounded lookup is unavailable.
+
+After successful engine reconciliation and unit rendering, apply scans all
+managed systemd units, Factory launchd plists, the host config, and the uv
+receipt before removing unreferenced legacy `factory-*` directories. Referenced
+directories and symlinks are kept and reported. A legacy `factory_source`
+setting is removed through District's config writer after a timestamped backup;
+other files are untouched.
 
 ### One repo on several hosts
 
@@ -184,23 +198,17 @@ multi-host repo, both with a link to that issue. A host that can't be reached
 is reported as unreachable, not as lacking support. Applying a repo whose hosts
 run no multi-host repo never contacts the fleet hosts.
 
-All hosts of a shared repo run one engine commit. `district apply` resolves
-`factory_ref` on every one of those hosts and installs only when they agree,
-with no partial upgrade. Before installing anywhere it checks the commit's CI
-and running passes on every host that needs it; if a host can't resolve the
-ref, its CI check isn't green, or a pass is running there, no host installs.
-If an install still fails or is deferred, hosts that already moved are
-reinstalled at their previous commit. Either way apply names the host that
-blocked it. `district apply --upgrade` refuses when the selection touches
-these hosts; use `factory_ref`. `district doctor` and `district status` compare the hosts'
+All factories on one host use that host's single uv tool and target revision;
+per-factory engine pins are unsupported. A multi-host apply requires every
+participating host to resolve the same newest-green target before any install,
+pauses and waits on all changed hosts, and rolls moved hosts back if one fails.
+`district doctor` and `district status` compare hosts'
 installed engine, `omp` and `droid` versions, and configured worker and review
 models, with one `WARN` row per difference and one `PASS` row when they match.
 
 ### Manual Ultron smoke test
 
-From the controller, after registering `mikeroySoft-org/benito-app` on `ultron`
-and ensuring its configured `factory_source` checkout exists and is clean on
-Ultron:
+From the controller, after registering `mikeroySoft-org/benito-app` on `ultron`:
 
 ```sh
 ssh -o BatchMode=yes -o ConnectTimeout=10 factory@ultron.example true
