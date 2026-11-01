@@ -119,6 +119,76 @@ class EngineCleanupTest(unittest.TestCase):
         self.assertTrue(referenced.exists())
         self.assertFalse(unused.exists())
 
+    def test_type_wide_and_prefix_service_drop_ins_expand_specifiers_locally(self) -> None:
+        type_wide = self.leftover("type-wide%service", historical=True)
+        prefixed = self.leftover("prefix-service")
+        unused = self.leftover("unused")
+        unit_dir = self.config_home / "systemd/user"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / "factory-example-worker.service").write_text(
+            "Environment=PROGRESS=100%%\n")
+        type_drop_in = unit_dir / "service.d"
+        type_drop_in.mkdir()
+        (type_drop_in / "legacy.conf").write_text(
+            "ExecStart=%h/.local/share/district/factory-type-wide%%service/bin/python\n")
+        prefix_drop_in = unit_dir / "factory-example-.service.d"
+        prefix_drop_in.mkdir()
+        (prefix_drop_in / "legacy.conf").write_text(
+            f"Environment=LEGACY={prefixed}/bin/python\n")
+
+        engine_cleanup.cleanup({})
+
+        self.assertTrue(type_wide.exists())
+        self.assertTrue(prefixed.exists())
+        self.assertFalse(unused.exists())
+        self.assertNotIn("reference scan incomplete", self.output.getvalue())
+
+    def test_type_wide_and_prefix_timer_drop_ins_expand_specifiers_remotely(self) -> None:
+        type_wide = self.leftover("type-wide-timer", historical=True)
+        prefixed = self.leftover("prefix-timer")
+        unused = self.leftover("unused")
+        unit_dir = self.config_home / "systemd/user"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / "factory-nightly-daily.timer").write_text(
+            "Description=Factory progress 100%%\n")
+        type_drop_in = unit_dir / "timer.d"
+        type_drop_in.mkdir()
+        (type_drop_in / "legacy.conf").write_text(
+            "Environment=LEGACY=%h/.local/share/district/factory-type-wide-timer\n")
+        prefix_drop_in = unit_dir / "factory-nightly-.timer.d"
+        prefix_drop_in.mkdir()
+        (prefix_drop_in / "legacy.conf").write_text(
+            f"Environment=LEGACY={prefixed}\n")
+
+        engine_cleanup.cleanup({}, run_cmd=self.remote_runner())
+
+        self.assertTrue(type_wide.exists())
+        self.assertTrue(prefixed.exists())
+        self.assertFalse(unused.exists())
+        self.assertNotIn("reference scan incomplete", self.output.getvalue())
+
+    def test_type_wide_drop_in_is_scanned_without_a_named_unit_fragment(self) -> None:
+        candidate = self.leftover("type-wide-only")
+        drop_in = self.config_home / "systemd/user/service.d"
+        drop_in.mkdir(parents=True)
+        (drop_in / "legacy.conf").write_text(f"WorkingDirectory={candidate}\n")
+
+        engine_cleanup.cleanup({})
+
+        self.assertTrue(candidate.exists())
+
+    def test_unknown_systemd_specifier_blocks_cleanup(self) -> None:
+        candidate = self.leftover("unknown-specifier")
+        unit_dir = self.config_home / "systemd/user"
+        unit_dir.mkdir(parents=True)
+        (unit_dir / "factory-example.service").write_text(
+            "ExecStart=%Z/.local/share/district/factory-unknown-specifier/bin/python\n")
+
+        engine_cleanup.cleanup({})
+
+        self.assertTrue(candidate.exists())
+        self.assertIn("reference scan incomplete", self.output.getvalue())
+
     def test_unreadable_drop_in_fragment_or_directory_removes_nothing(self) -> None:
         first = self.leftover("first")
         second = self.leftover("second")

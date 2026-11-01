@@ -48,6 +48,28 @@ def _expanded(value, home):
     return re.sub(r"(?<![A-Za-z0-9_])~(?=/)", home, value)
 
 
+def _expanded_systemd(value, home):
+    result = []
+    index = 0
+    while index < len(value):
+        marker = value.find("%", index)
+        if marker < 0:
+            result.append(value[index:])
+            break
+        result.append(value[index:marker])
+        if marker + 1 == len(value):
+            raise ValueError("unresolved systemd specifier %")
+        specifier = value[marker + 1]
+        if specifier == "%":
+            result.append("%")
+        elif specifier == "h":
+            result.append(home)
+        else:
+            raise ValueError(f"unresolved systemd specifier %{specifier}")
+        index = marker + 2
+    return "".join(result)
+
+
 def _references(value, candidate, home):
     value = _expanded(value, home)
     logical, resolved = candidate
@@ -113,20 +135,24 @@ def _reference_scan(payload):
     unit_dir = config_home / "systemd" / "user"
     unit_entries = _scan_directory(
         unit_dir,
-        lambda path: path.name.startswith("factory-"),
+        lambda path: path.name.startswith("factory-")
+        or path.name in ("service.d", "timer.d"),
         errors,
     )
     units = [path for path in unit_entries if path.suffix in (".service", ".timer")]
-    for directory in (
-        path for path in unit_entries
-        if path.name.endswith((".service.d", ".timer.d"))
-    ):
+    drop_ins = [path for path in unit_entries
+                if path.name in ("service.d", "timer.d")
+                or path.name.endswith((".service.d", ".timer.d"))]
+    for directory in drop_ins:
         units.extend(_scan_directory(directory, lambda path: path.suffix == ".conf", errors))
     for path in units:
         text = _read(path, errors)
         if text is not None:
             _source_path(path, references)
-            references.append(text)
+            try:
+                references.append(_expanded_systemd(text, home))
+            except ValueError as exc:
+                errors.append(f"{path}: {exc}")
 
     agent_dir = Path(home) / "Library" / "LaunchAgents"
     plists = _scan_directory(agent_dir, lambda path: path.suffix == ".plist", errors)

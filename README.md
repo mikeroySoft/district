@@ -181,10 +181,11 @@ leaves a verified installed engine unchanged.
 are also unknown when the uv receipt and recorded revision do not agree.
 
 After successful engine reconciliation and unit rendering, apply scans all
-managed systemd units and their service/timer drop-ins, Factory launchd plists,
-the host config, and the uv receipt before removing unreferenced legacy
-`factory-*` directories. An unreadable fragment makes the scan incomplete and
-prevents deletion. Referenced directories and symlinks are kept and reported.
+managed systemd units and their named, prefix, and type-wide service/timer
+drop-ins, Factory launchd plists, the host config, and the uv receipt before
+removing unreferenced legacy `factory-*` directories. Systemd `%h` and `%%` are
+expanded; unresolved specifiers or unreadable fragments make the scan incomplete
+and prevent deletion. Referenced directories and symlinks are kept and reported.
 A legacy `factory_source` setting is removed through District's config writer
 after a timestamped, byte-for-byte backup, including on remote hosts; other
 files are untouched.
