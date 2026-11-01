@@ -276,33 +276,47 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
 
 def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                            contexts: dict[str, tuple]) -> str:
-    """One engine sha on every host that shares a repo: resolve `factory_ref` on each host, install
-    only when they all agree, and roll moved hosts back when any host fails, defers or holds.
+    """One engine sha on every host that shares a repo: resolve `factory_ref` on each host, check
+    CI and running passes on every host that needs the sha, install only when all of that agrees,
+    and roll moved hosts back when an install still fails or defers.
 
     `contexts` maps host name to (backend, run_cmd, repos)."""
     ref = data.get("defaults", {}).get("factory_ref")
     if ref is None:
         return "unchanged"
     names = ", ".join(contexts)
-    resolved = {}
+    resolved, sources = {}, {}
     for name, (_, run_cmd, _) in contexts.items():
         source_cmd, src = _engine_source(data, name, run_cmd)
         try:
-            _, _, resolved_ref, sha = _resolve_engine(ref, source_cmd, src)
+            _, slug, resolved_ref, sha = _resolve_engine(ref, source_cmd, src)
         except OSError as exc:
             print(f"engine fleet ({names}) held: {name} cannot resolve {ref}: {exc}; every host keeps its engine")
             return "failed"
         resolved[name] = (resolved_ref, sha)
+        sources[name] = (source_cmd, slug)
     if len({sha for _, sha in resolved.values()}) > 1:
         detail = ", ".join(f"{name} {sha[:12]}" for name, (_, sha) in resolved.items())
         print(f"engine fleet ({names}) held: {ref} resolves differently ({detail}); every host keeps its engine")
         return "failed"
     pin = next(iter(resolved.values()))
+    for name, (backend, _, repos) in contexts.items():
+        if installed_engine_commit(data, name) == pin[1]:
+            continue
+        held = None
+        if (state := _ci_state(*sources[name], pin[1])) != "success":
+            held, result = f"CI {state}", "unchanged"
+        elif busy := busy_units([f"{host.unit_name(slug)}.service" for slug in repos], backend):
+            _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
+            held, result = f"busy: {', '.join(busy)}", "deferred"
+        if held:
+            print(f"engine fleet ({names}) held by {name} ({held}): every host keeps its engine")
+            return result
     before = {name: copy.deepcopy(host.engine(data, name)) for name in contexts}
     moved = []
     for name, (backend, run_cmd, repos) in contexts.items():
         result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
-                                  run_cmd=run_cmd, pin=pin)
+                                  run_cmd=run_cmd, pin=pin, verify_ci=False)
         if result == "applied":
             moved.append(name)
             continue

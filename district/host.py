@@ -211,12 +211,7 @@ def factory_host(data: dict, slug: str) -> str | dict:
         if name != "local" and name not in configured:
             raise DistrictError(f"{slug}: host {name!r} is not defined in [hosts]")
     name = primary_host(table, slug)
-    if name == "local":
-        return "local"
-    configured = hosts(data)
-    if not isinstance(name, str) or name not in configured:
-        raise DistrictError(f"{slug}: host {name!r} is not defined in [hosts]")
-    return configured[name]
+    return "local" if name == "local" else configured[name]
 
 
 def is_remote(data: dict, slug: str) -> bool:

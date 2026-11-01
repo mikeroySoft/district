@@ -181,9 +181,11 @@ with a link to that issue.
 
 All hosts of a shared repo run one engine commit. `district apply` resolves
 `factory_ref` on every one of those hosts and installs only when they agree,
-with no partial upgrade. If a host can't resolve the ref, or its install fails
-or is deferred, every host stays on its current engine: hosts that already
-moved are reinstalled at their previous commit, and apply names the host that
+with no partial upgrade. Before installing anywhere it checks the commit's CI
+and running passes on every host that needs it; if a host can't resolve the
+ref, its CI check isn't green, or a pass is running there, no host installs.
+If an install still fails or is deferred, hosts that already moved are
+reinstalled at their previous commit. Either way apply names the host that
 blocked it. `district apply --upgrade` refuses for these repos; use
 `factory_ref`. `district doctor` and `district status` compare the hosts'
 installed engine, `omp` and `droid` versions, and configured worker and review
