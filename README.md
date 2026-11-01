@@ -158,6 +158,9 @@ remote state synchronization. Zero or exhausted time defers before another
 command. Timer/dashboard restoration has a separate 30-second budget after
 expiry; a failed timer restore does not prevent bounded attempts on the others.
 Unfinished restoration intents remain durable for the next apply.
+Fleet preflight uses the same receipt, canonical CLI, and successful `--version`
+verification as reconciliation; only hosts that actually entered a window may
+install without opening one.
 Saved timer intents and pending dashboard restarts are recovered from the
 verified receipt before resolving a fresh target, including without policy or
 with unavailable remote refs. If repair and rollback cannot verify a usable

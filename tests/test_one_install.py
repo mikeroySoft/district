@@ -441,6 +441,27 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(self.installs(), [])
         self.assertFalse(host.load()["defaults"]["engine"]["dashboards_pending"])
 
+    def test_fleet_matching_receipt_with_broken_cli_drains_before_any_install(self):
+        self.install_receipt(TARGET)
+        self.busy = 1
+        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
+
+        def broken_until_reinstalled(argv, **kwargs):
+            if argv == [str(self.cli), "--version"] and not self.installs():
+                return subprocess.CompletedProcess(argv, 1, "", "interrupted install")
+            return self.run_cmd(argv, **kwargs)
+
+        context = (broken_until_reinstalled, self.backend, self.data["repo"])
+        self.assertEqual(apply.reconcile_fleet_engine(
+            self.data, None, {"local": context, "remote": context}), "applied")
+        first_install = next(i for i, event in enumerate(self.events) if event[0] == "install")
+        self.assertIn(("pause", "factory-widgets.timer"), self.events[:first_install])
+        self.assertIn(("processes", "scan"), self.events[:first_install])
+        self.assertEqual(self.busy, 0)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(host.engine(self.data, "local")["sha"], TARGET)
+        self.assertEqual(host.engine(self.data, "remote")["sha"], TARGET)
+
     def test_unchanged_fleet_does_not_restart_dashboards_or_pause_timers(self):
         self.install_receipt(TARGET)
         self.data["defaults"]["engine"]["sha"] = TARGET

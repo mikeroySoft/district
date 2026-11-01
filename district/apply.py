@@ -231,6 +231,14 @@ def _verify_engine(sha: str | None, tool: Path, cli: Path, run_cmd, *, deadline:
         raise OSError(f"{cli} --version exited {proc.returncode}")
 
 
+def _engine_current(sha: str, tool: Path, cli: Path, runner) -> bool:
+    try:
+        _verify_engine(sha, tool, cli, runner)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return True
+
+
 def _save_engine(data: dict, name: str, runner, *, deadline: float | None = None, **values) -> None:
     engine = dict(host.engine(data, name) or {})
     engine.update(values)
@@ -458,13 +466,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     receipt = _receipt_sha(tool, run_cmd)
     stored_sha = installed_engine_commit(data, host_name)
     previous = receipt or stored_sha
-    current = receipt == sha and _tool_cli(tool, cli, run_cmd)
-    if current and (stored_sha != sha or (host.engine(data, host_name) or {}).get("dashboards_pending")):
-        try:
-            _verify_engine(sha, tool, cli, run_cmd)
-        except OSError:
-            current = False
-    if current:
+    if _engine_current(sha, tool, cli, run_cmd):
         if stored_sha != sha:
             _save_engine(data, host_name, run_cmd, sha=sha, ref=resolved_ref,
                          installed_at=iso(now()), dashboards_pending=True)
@@ -544,10 +546,11 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         _save_engine(data, name, runner, target=pin[1], target_ref=pin[0], resolved_at=iso(now()))
     moved, attempted = [], []
     result = "unchanged"
+    opened = set()
     with ExitStack() as windows:
         for name, (runner, backend, repos) in contexts.items():
             tool, cli = host.factory_tool_paths(runner)
-            if (_receipt_sha(tool, runner) == pin[1] and _tool_cli(tool, cli, runner)
+            if (_engine_current(pin[1], tool, cli, runner)
                     and not (host.engine(data, name) or {}).get("paused_timers")):
                 continue
             try:
@@ -558,11 +561,12 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
             if not ready:
                 print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
                 return "deferred"
+            opened.add(name)
         for name, (runner, backend, repos) in contexts.items():
             attempted.append(name)
             try:
                 result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
-                                          run_cmd=runner, pin=pin, verify_ci=False, window_open=True,
+                                          run_cmd=runner, pin=pin, verify_ci=False, window_open=name in opened,
                                           allow_downgrade=allow_downgrade)
                 why = result
             except (OSError, host.RemoteHostError, DistrictError) as exc:
@@ -574,9 +578,14 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                 continue
             stuck = []
             for back in moved:
-                back_cmd, _, _ = contexts[back]
+                back_cmd, back_backend, back_repos = contexts[back]
                 tool, cli = host.factory_tool_paths(back_cmd)
                 try:
+                    if back not in opened:
+                        if not windows.enter_context(_engine_window(
+                                data, back, back_cmd, back_backend, back_repos, record)):
+                            raise OSError("rollback idle wait timed out")
+                        opened.add(back)
                     restored = bool(previous[back]) and _replace_engine(
                         data, back, back_cmd, origin, "previous", previous[back], pin[1], tool, cli,
                     ) == "applied"
