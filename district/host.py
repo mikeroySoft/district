@@ -175,6 +175,10 @@ REMOTE_TOOL = 'PATH="$HOME/.local/bin:$PATH"; exec "$0" "$@"'
 def repo_hosts(table: dict, slug: str = "repo") -> list[str]:
     """Hosts that run `slug`'s factory: `hosts = [...]`, else the single `host` (default local)."""
     listed = table.get("hosts")
+    if listed is not None and (not isinstance(listed, list) or not listed
+                               or any(not isinstance(n, str) or not n for n in listed)
+                               or len(set(listed)) != len(listed)):
+        raise DistrictError(f"{slug}: hosts must be a non-empty array of distinct host names")
     if listed is None or len(listed) == 1:
         # factory#526 reads triage_host from [repo."SLUG"] directly: alone it would stop triage here
         if "triage_host" in table:
@@ -183,9 +187,6 @@ def repo_hosts(table: dict, slug: str = "repo") -> list[str]:
         return [table.get("host", "local")]
     if "host" in table:
         raise DistrictError(f"{slug}: set host or hosts, not both")
-    if not isinstance(listed, list) or not listed or any(not isinstance(n, str) or not n for n in listed) \
-            or len(set(listed)) != len(listed):
-        raise DistrictError(f"{slug}: hosts must be a non-empty array of distinct host names")
     if len(listed) > 1 and table.get("triage_host") not in listed:
         raise DistrictError(f"{slug}: hosts lists {len(listed)} hosts; set triage_host to one of {', '.join(listed)}")
     return list(listed)
@@ -204,18 +205,36 @@ def multi_host(table: dict, slug: str = "repo") -> bool:
 def claims_supported(data: dict, name: str) -> bool:
     """True when `name`'s installed factory coordinates ticket claims across hosts. factory#526's
     contract: `factory claims --supported` prints exactly `host-claims 1` and exits 0; engines
-    without claims exit 2 (unknown command)."""
+    without claims exit 2 (unknown command). A remote host that cannot be reached raises
+    RemoteHostError: that says nothing about its engine."""
     argv = ["factory", "claims", "--supported"]
     try:
         if name == "local":
             path = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
             proc = run(argv, quiet=True, timeout=CLAIMS_PROBE_TIMEOUT, env={**os.environ, "PATH": path})
         else:
-            proc = remote_runner(name, hosts(data)[name])(
-                ["sh", "-c", REMOTE_TOOL, *argv], quiet=True, timeout=CLAIMS_PROBE_TIMEOUT)
-    except (OSError, RemoteHostError, subprocess.TimeoutExpired):
+            try:
+                proc = remote_runner(name, hosts(data)[name])(
+                    ["sh", "-c", REMOTE_TOOL, *argv], quiet=True, timeout=CLAIMS_PROBE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                raise RemoteHostError(name, f"{' '.join(argv)} timed out after {CLAIMS_PROBE_TIMEOUT}s") from None
+    except (OSError, subprocess.TimeoutExpired):
         return False
     return proc.returncode == 0 and proc.stdout.strip() == CLAIMS_PROTOCOL
+
+
+def claims_blockers(data: dict, names: list[str]) -> str | None:
+    """Why `names` cannot share one repo yet: engines without claims, then unreachable hosts."""
+    unsupported, unreachable = [], []
+    for name in names:
+        try:
+            if not claims_supported(data, name):
+                unsupported.append(name)
+        except RemoteHostError as exc:
+            unreachable.append(str(exc))
+    reasons = [f"the factory on {', '.join(unsupported)} does not coordinate ticket claims yet ({CLAIMS_ISSUE})"] \
+        if unsupported else []
+    return "; ".join(reasons + unreachable) or None
 
 
 def factory_host(data: dict, slug: str) -> str | dict:

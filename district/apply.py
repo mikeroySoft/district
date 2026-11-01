@@ -280,13 +280,13 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
     CI and running passes on every host that needs the sha, install only when all of that agrees,
     and roll moved hosts back when an install still fails or defers.
 
-    `contexts` maps host name to (backend, run_cmd, repos)."""
+    `contexts` maps host name to (run_cmd, backend, repos)."""
     ref = data.get("defaults", {}).get("factory_ref")
     if ref is None:
         return "unchanged"
     names = ", ".join(contexts)
     resolved, sources = {}, {}
-    for name, (_, run_cmd, _) in contexts.items():
+    for name, (run_cmd, _, _) in contexts.items():
         source_cmd, src = _engine_source(data, name, run_cmd)
         try:
             _, slug, resolved_ref, sha = _resolve_engine(ref, source_cmd, src)
@@ -300,7 +300,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         print(f"engine fleet ({names}) held: {ref} resolves differently ({detail}); every host keeps its engine")
         return "failed"
     pin = next(iter(resolved.values()))
-    for name, (backend, _, repos) in contexts.items():
+    for name, (_, backend, repos) in contexts.items():
         if installed_engine_commit(data, name) == pin[1]:
             continue
         held = None
@@ -314,7 +314,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
             return result
     before = {name: copy.deepcopy(host.engine(data, name)) for name in contexts}
     moved = []
-    for name, (backend, run_cmd, repos) in contexts.items():
+    for name, (run_cmd, backend, repos) in contexts.items():
         result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
                                   run_cmd=run_cmd, pin=pin, verify_ci=False)
         if result == "applied":
@@ -325,7 +325,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         stuck = []
         for back in moved:
             previous = before[back]
-            back_backend, back_cmd, back_repos = contexts[back]
+            back_cmd, back_backend, back_repos = contexts[back]
             if not (previous and previous.get("sha")) or reconcile_engine(
                 data, record, backend=back_backend, host_name=back, repos=back_repos, run_cmd=back_cmd,
                 pin=(previous.get("ref", "previous"), previous["sha"]), verify_ci=False,
@@ -726,12 +726,6 @@ def _host_context(data: dict, host_name: str):
     return run_cmd, host.service_backend(target, run=run_cmd)
 
 
-def _reuse(context: tuple | None) -> tuple | None:
-    """(run_cmd, backend) from a fleet engine context (backend, run_cmd, repos), so a host's
-    config is synced and its backend probed once per apply."""
-    return (context[1], context[0]) if context else None
-
-
 def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argparse.Namespace,
                 record: install_state.ApplyRun, status: str, engine_done: bool = False,
                 context: tuple | None = None) -> tuple[list[dict], int, tuple[int, list[str]]]:
@@ -845,15 +839,19 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         if not selected:
             print("no repositories registered (district add)")
             return 0
+        groups: dict[str, dict[str, dict]] = {}
+        for slug, table in selected.items():
+            for name in host.repo_hosts(table, slug):
+                groups.setdefault(name, {})[slug] = table
         fleet = {slug: table for slug, table in registered.items() if host.multi_host(table, slug)}
         fleet_hosts = list(dict.fromkeys(name for slug, table in fleet.items() for name in host.repo_hosts(table, slug)))
+        # A selection that runs on no fleet host leaves the fleet alone: single-host repos keep
+        # their old behavior (#134). One that does moves every fleet host's engine together.
+        if not any(name in groups for name in fleet_hosts):
+            fleet, fleet_hosts = {}, []
         if fleet:
-            blocked = [name for name in fleet_hosts if not host.claims_supported(data, name)]
-            if blocked:
-                raise DistrictError(
-                    f"{', '.join(fleet)} lists several hosts, but the factory on {', '.join(blocked)} does not "
-                    f"coordinate ticket claims yet ({host.CLAIMS_ISSUE}); list one host until it does"
-                )
+            if blocked := host.claims_blockers(data, fleet_hosts):
+                raise DistrictError(f"{', '.join(fleet)} lists several hosts, but {blocked}; list one host until it does")
             if args.upgrade:
                 raise DistrictError(
                     f"{', '.join(fleet)} lists several hosts; --upgrade installs per host, so set "
@@ -862,10 +860,6 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         host.sync_local_claims(data)
         status, warnings = policy(data)
         host.save(data)
-        groups: dict[str, dict[str, dict]] = {}
-        for slug, table in selected.items():
-            for name in host.repo_hosts(table, slug):
-                groups.setdefault(name, {})[slug] = table
 
         rows = []
         smokes = []
@@ -875,7 +869,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             try:
                 for name in fleet_hosts:
                     run_cmd, backend = _host_context(data, name)
-                    contexts[name] = (backend, run_cmd, _host_repos(data, name))
+                    contexts[name] = (run_cmd, backend, _host_repos(data, name))
             except (host.RemoteHostError, DistrictError) as exc:
                 contexts = {}
                 print(f"engine fleet ({', '.join(fleet_hosts)}) held: {exc}; every host keeps its engine")
@@ -887,7 +881,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             try:
                 host_rows, host_code, host_smoke = _apply_host(
                     data, host_name, targets, args, record, status, engine_done=host_name in fleet_hosts,
-                    context=_reuse(contexts.get(host_name)),
+                    context=contexts[host_name][:2] if host_name in contexts else None,
                 )
             except host.RemoteHostError as exc:
                 for slug in targets:

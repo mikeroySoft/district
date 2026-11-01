@@ -488,11 +488,10 @@ def main(argv: list[str]) -> int:
     joining = wanted not in current
     if joining:
         names = [*current, wanted]
-        blocked = [name for name in names if not host.claims_supported(data, name)]
-        if blocked:
+        if blocked := host.claims_blockers(data, names):
             raise DistrictError(
-                f"{slug} already runs on {', '.join(current)}; a second host needs the factory on "
-                f"{', '.join(blocked)} to coordinate ticket claims ({host.CLAIMS_ISSUE}); nothing written"
+                f"{slug} already runs on {', '.join(current)}; a second host needs every host to coordinate "
+                f"ticket claims, but {blocked}; nothing written"
             )
     table = host.repo_table(data, slug)
     table["path"] = str(root)

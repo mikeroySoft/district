@@ -179,8 +179,10 @@ Several hosts on one repo need Factory's host claims
 never work the same ticket. Until `factory claims --supported` prints exactly `host-claims 1` and exits
 0 on every listed host (run with `~/.local/bin` first on `PATH` and a
 10-second timeout), `district add` refuses to add a second host and
-`district apply` refuses any registry that lists several hosts for a repo, both
-with a link to that issue.
+`district apply` refuses to apply a repo that shares a host with any
+multi-host repo, both with a link to that issue. A host that can't be reached
+is reported as unreachable, not as lacking support. Applying a repo whose hosts
+run no multi-host repo never contacts the fleet hosts.
 
 All hosts of a shared repo run one engine commit. `district apply` resolves
 `factory_ref` on every one of those hosts and installs only when they agree,
@@ -189,8 +191,8 @@ and running passes on every host that needs it; if a host can't resolve the
 ref, its CI check isn't green, or a pass is running there, no host installs.
 If an install still fails or is deferred, hosts that already moved are
 reinstalled at their previous commit. Either way apply names the host that
-blocked it. `district apply --upgrade` refuses for these repos; use
-`factory_ref`. `district doctor` and `district status` compare the hosts'
+blocked it. `district apply --upgrade` refuses when the selection touches
+these hosts; use `factory_ref`. `district doctor` and `district status` compare the hosts'
 installed engine, `omp` and `droid` versions, and configured worker and review
 models, with one `WARN` row per difference and one `PASS` row when they match.
 
