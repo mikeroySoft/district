@@ -589,7 +589,7 @@ class LaunchdBackend(ServiceBackend):
                         continue
                 return result
         finally:
-            if not was_loaded:
+            if scheduled and not was_loaded:
                 try:
                     self._run("bootout", target, check=False, timeout=LAUNCHD_CLEANUP_TIMEOUT)
                 except Exception:

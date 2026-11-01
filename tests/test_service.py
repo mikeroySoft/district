@@ -267,6 +267,22 @@ class LaunchdBackendTest(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 backend.start("factory-widgets.service", check=False, timeout=0)
 
+    def test_starting_unloaded_keepalive_job_leaves_it_loaded(self) -> None:
+        for timeout in (0, 0.5):
+            for restart in (False, True):
+                with self.subTest(timeout=timeout, restart=restart):
+                    run = RunningRun(loaded=False)
+                    backend = self.backend(run, Path.home())
+                    path = backend.agent_dir / "factory-widgets-dashboard.plist"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(backend.render(
+                        self.definition(dashboard=True, root=Path.home() / "factory")))
+                    proc = backend.start("factory-widgets-dashboard.service",
+                                         restart=restart, timeout=timeout)
+                    self.assertEqual(proc.returncode, 0)
+                    self.assertTrue(run.loaded, f"dashboard unloaded: {run.calls}")
+                    self.assertFalse(any(call[1] == "bootout" for call in run.calls))
+
     def test_timed_out_temporary_job_is_unloaded_but_existing_job_is_not(self) -> None:
         for loaded in (False, True):
             with self.subTest(loaded=loaded):
