@@ -36,6 +36,27 @@ class EngineCleanupTest(unittest.TestCase):
         path.mkdir(parents=True)
         return path
 
+    def remote_runner(self) -> host.RemoteRunner:
+        facts = {
+            "home": str(self.home),
+            "config_home": str(self.config_home),
+            "data_home": str(self.data_home),
+            "tool_dir": str(self.tool_dir),
+            "tool_bin": str(self.bin_dir),
+            "path": os.environ.get("PATH", ""),
+            "uid": os.getuid(),
+        }
+
+        def transport(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["sh", "-c", argv[-1]], capture_output=True, text=True,
+                input=kwargs.get("input"), check=False,
+            )
+
+        runner = host.RemoteRunner("test", "unused.example", transport=transport)
+        runner._facts = facts
+        return runner
+
     def test_scans_expanded_and_symlinked_references_before_removing(self) -> None:
         unit = self.leftover("unit")
         plist = self.leftover("plist", historical=True)
@@ -71,6 +92,51 @@ class EngineCleanupTest(unittest.TestCase):
         self.assertFalse(unused.exists())
         self.assertIn(str(unit), self.output.getvalue())
 
+    def test_service_drop_in_reference_is_retained_locally(self) -> None:
+        referenced = self.leftover("service-drop-in")
+        unused = self.leftover("unused")
+        alias = self.root / "service-engine-alias"
+        alias.symlink_to(referenced, target_is_directory=True)
+        drop_in = self.config_home / "systemd/user/factory-example.service.d"
+        drop_in.mkdir(parents=True)
+        (drop_in / "override.conf").write_text(f"ExecStart={alias}/.venv/bin/python\n")
+
+        engine_cleanup.cleanup({})
+
+        self.assertTrue(referenced.exists())
+        self.assertFalse(unused.exists())
+
+    def test_timer_drop_in_reference_is_retained_through_remote_runner(self) -> None:
+        referenced = self.leftover("timer-drop-in", historical=True)
+        unused = self.leftover("unused")
+        drop_in = self.config_home / "systemd/user/factory-example.timer.d"
+        drop_in.mkdir(parents=True)
+        relative = referenced.relative_to(self.home)
+        (drop_in / "schedule.conf").write_text(f"Environment=LEGACY=$HOME/{relative}\n")
+
+        engine_cleanup.cleanup({}, run_cmd=self.remote_runner())
+
+        self.assertTrue(referenced.exists())
+        self.assertFalse(unused.exists())
+
+    def test_unreadable_drop_in_fragment_or_directory_removes_nothing(self) -> None:
+        first = self.leftover("first")
+        second = self.leftover("second")
+        unit_dir = self.config_home / "systemd/user"
+        fragment = unit_dir / "factory-example.service.d/override.conf"
+        fragment.mkdir(parents=True)
+        unreadable_dir = unit_dir / "factory-example.timer.d"
+        unreadable_dir.write_text("not a directory")
+
+        engine_cleanup.cleanup({})
+
+        self.assertTrue(first.exists())
+        self.assertTrue(second.exists())
+        output = self.output.getvalue()
+        self.assertIn("reference scan incomplete", output)
+        self.assertIn(str(fragment), output)
+        self.assertIn(str(unreadable_dir), output)
+
     def test_incomplete_reference_scan_removes_nothing(self) -> None:
         unused = self.leftover("unused")
         config_file = self.config_home / "factory/config.toml"
@@ -83,24 +149,7 @@ class EngineCleanupTest(unittest.TestCase):
 
     def test_remote_runner_inspects_and_removes_on_target(self) -> None:
         unused = self.leftover("remote")
-        facts = {
-            "home": str(self.home),
-            "config_home": str(self.config_home),
-            "data_home": str(self.data_home),
-            "tool_dir": str(self.tool_dir),
-            "tool_bin": str(self.bin_dir),
-            "path": os.environ.get("PATH", ""),
-            "uid": os.getuid(),
-        }
-
-        def transport(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(
-                ["sh", "-c", argv[-1]], capture_output=True, text=True,
-                input=kwargs.get("input"), check=False,
-            )
-
-        runner = host.RemoteRunner("test", "unused.example", transport=transport)
-        runner._facts = facts
+        runner = self.remote_runner()
         engine_cleanup.cleanup({}, run_cmd=runner)
 
         self.assertFalse(unused.exists())

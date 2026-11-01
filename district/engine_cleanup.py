@@ -111,11 +111,17 @@ def _reference_scan(payload):
     references = list(_strings(payload.get("data", {})))
 
     unit_dir = config_home / "systemd" / "user"
-    units = _scan_directory(
+    unit_entries = _scan_directory(
         unit_dir,
-        lambda path: path.name.startswith("factory-") and path.suffix in (".service", ".timer"),
+        lambda path: path.name.startswith("factory-"),
         errors,
     )
+    units = [path for path in unit_entries if path.suffix in (".service", ".timer")]
+    for directory in (
+        path for path in unit_entries
+        if path.name.endswith((".service.d", ".timer.d"))
+    ):
+        units.extend(_scan_directory(directory, lambda path: path.suffix == ".conf", errors))
     for path in units:
         text = _read(path, errors)
         if text is not None:
@@ -256,7 +262,7 @@ def _run_local(payload: dict) -> dict:
 
 
 def cleanup(data: dict, *, run_cmd=None) -> None:
-    """Remove only unreferenced legacy ``factory-*`` directories on the target host."""
+    """Remove legacy directories only after a complete reference scan, including unit drop-ins."""
     if run_cmd is None:
         run_cmd = host.run
     remote = isinstance(run_cmd, host.RemoteRunner)
