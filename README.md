@@ -152,7 +152,8 @@ is left alone without checking CI or reinstalling. A busy Factory service,
 active/activating/deactivating `handland-*` user unit, or hand-run uv-tool
 `factory gate` / `factory dispatch` process defers that host's changed engine
 install. Python interpreter options before `-m factory`, such as `-u` and
-`-X dev`, are recognized too. Both plain apply and `--upgrade` check before
+`-X dev`, and attached/grouped forms such as `-mfactory` and `-um factory`,
+are recognized too. Both plain apply and `--upgrade` check before
 and after draining; dashboards do not block swaps. The receipt names the busy unit or PID, other
 repo unit drift still converges, and the next apply retries. Remove `factory_ref`
 before rolling back, or the next apply will reinstall the configured ref's SHA.

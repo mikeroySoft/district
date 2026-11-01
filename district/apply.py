@@ -452,14 +452,20 @@ def _python_entrypoint(argv: list[str]) -> list[str]:
     """Stop at Python's module/script boundary, not text in script arguments."""
     args = iter(argv)
     for arg in args:
-        if arg.startswith("-c") or arg in {"-", "--"}:
+        if arg in {"-", "--"}:
             return []
-        if arg == "-m":
-            return [arg, *args]
-        if arg in {"-W", "-X", "--check-hash-based-pycs"}:
+        if arg == "--check-hash-based-pycs":
             next(args, None)
         elif not arg.startswith("-"):
             return [arg, *args]
+        elif option := re.match(r"^-[^-]*?([cmWX])(.*)$", arg):
+            # Short options can group; c/m/W/X consume the rest or the next token.
+            flag, value = option.groups()
+            if flag == "c":
+                return []
+            value = value or next(args, "")
+            if flag == "m":
+                return ["-m", value, *args]
     return []
 
 
