@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import plistlib
@@ -137,18 +138,24 @@ def remaining_timeout(deadline: float) -> float:
 
 
 
-def _definition_bodies(directory, pattern: str, *, deadline: float | None = None) -> dict[str, str]:
+def _definition_bytes(directory, pattern: str, *, deadline: float | None = None) -> dict[str, bytes]:
     timeout = remaining_timeout(deadline) if deadline is not None else 10
     if isinstance(directory, Path):
-        return {path.name: path.read_text() for path in directory.glob(pattern)}
+        return {path.name: path.read_bytes() for path in directory.glob(pattern)}
     script = (
-        "import json,pathlib,sys; "
-        "print(json.dumps({p.name:p.read_text() for p in pathlib.Path(sys.argv[1]).glob(sys.argv[2])}))"
+        "import base64,json,pathlib,sys; "
+        "print(json.dumps({p.name:base64.b64encode(p.read_bytes()).decode() "
+        "for p in pathlib.Path(sys.argv[1]).glob(sys.argv[2])}))"
     )
     proc = directory.runner(["python3", "-c", script, str(directory), pattern], timeout=timeout)
     if proc.returncode:
         raise OSError(proc.stderr.strip() or f"cannot scan {directory}")
-    return json.loads(proc.stdout)
+    return {name: base64.b64decode(body) for name, body in json.loads(proc.stdout).items()}
+
+
+def _definition_bodies(directory, pattern: str, *, deadline: float | None = None) -> dict[str, str]:
+    return {name: body.decode() for name, body in
+            _definition_bytes(directory, pattern, deadline=deadline).items()}
 
 
 def _home_local_bin(home: Path) -> Path:
@@ -462,8 +469,11 @@ class LaunchdBackend(ServiceBackend):
     def factory_units(self, *, timeout: float = 10) -> set[str]:
         deadline = time.monotonic() + timeout
         units = set()
-        for name, body in _definition_bodies(self.agent_dir, "*factory*.plist", deadline=deadline).items():
-            document = plistlib.loads(body.encode())
+        for name, body in _definition_bytes(self.agent_dir, "*factory*.plist", deadline=deadline).items():
+            try:
+                document = plistlib.loads(body)
+            except (plistlib.InvalidFileException, ValueError) as exc:
+                raise OSError(f"invalid launchd plist {name}: {exc}") from exc
             label = document.get("Label", name.removesuffix(".plist"))
             units.add(f"{label}.service")
             if "StartInterval" in document or "StartCalendarInterval" in document:
@@ -630,9 +640,9 @@ class LaunchdBackend(ServiceBackend):
         body = None
         try:
             filename = f"{label}.plist"
-            body = _definition_bodies(self.agent_dir, filename, deadline=deadline).get(filename)
-            document = plistlib.loads((body or "").encode())
-        except (OSError, plistlib.InvalidFileException):
+            body = _definition_bytes(self.agent_dir, filename, deadline=deadline).get(filename)
+            document = plistlib.loads(body or b"")
+        except (OSError, plistlib.InvalidFileException, ValueError):
             document = {}
         environment = document.get("EnvironmentVariables")
         if not isinstance(environment, dict):

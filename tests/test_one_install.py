@@ -1411,6 +1411,122 @@ class OneInstallTest(unittest.TestCase):
                     self.assertTrue(host.engine(host.load(), "remote")["dashboards_pending"])
                     self.assertFalse(host.engine(host.load(), "local")["dashboards_pending"])
 
+    def binary_launchd_backend(self, remote):
+        home = self.root / "binary-home"
+        agents = home / "Library/LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        self.launchd_disabled = set()
+        self.launchd_running = True
+        self.launchd_calls = []
+
+        def launchctl(argv, **kwargs):
+            self.launchd_calls.append((argv, kwargs))
+            operation = argv[1]
+            label = argv[-1].rsplit("/", 1)[-1]
+            if operation == "print" and not (agents / f"{label}.plist").exists():
+                return subprocess.CompletedProcess(argv, 3, "", "not loaded")
+            if operation == "disable":
+                self.launchd_disabled.add(label)
+            elif operation == "enable":
+                self.launchd_disabled.discard(label)
+            else:
+                self.assertIn(operation, ("print", "print-disabled", "bootstrap", "kickstart", "bootout"))
+            output = ("state = running\npid = 42\n" if self.launchd_running else
+                      "state = exited\nlast exit code = 0\n")
+            if operation == "print-disabled":
+                output = "\n".join(f'"{name}" => true' for name in self.launchd_disabled)
+            return subprocess.CompletedProcess(argv, 0, output, "")
+
+        runner = None
+        if remote:
+            self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "macos",
+                                           "engine": {"sha": OLD, "ref": "main"}}}
+            self.data["repo"]["acme/widgets"]["host"] = "remote"
+            runner, _, _ = self.timeout_remote("none")
+            transport = runner.transport
+
+            def remote_transport(argv, **kwargs):
+                parts = shlex.split(argv[-1])
+                if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                    parts = shlex.split(parts[-1])
+                if parts[0] == "launchctl":
+                    return launchctl(parts, **kwargs)
+                return transport(argv, **kwargs)
+
+            runner.transport = remote_transport
+        backend = service.LaunchdBackend(runner or launchctl,
+            home=runner.path(str(home)) if runner else home, uid=501, raw_path=os.defpath)
+        return backend, runner, agents
+
+    def test_binary_launchd_plists_discover_status_and_upgrade_through_apply(self):
+        self.data["defaults"]["engine_idle_timeout"] = "5s"
+        for remote in (False, True):
+            with self.subTest(remote=remote), contextlib.ExitStack() as stack:
+                self.install_receipt(OLD)
+                self.calls.clear()
+                self.render_plist = True
+                backend, runner, agents = self.binary_launchd_backend(remote)
+                stack.enter_context(mock.patch.object(host, "service_backend", return_value=backend))
+                if runner:
+                    stack.enter_context(mock.patch.object(host, "remote_runner", return_value=runner))
+                for label, scheduled in (("factory-aux", True), ("factory-aux-worker", False)):
+                    document = {"Label": label, "ProgramArguments": [
+                        str(self.tool / "bin/python"), "-m", "factory", "dispatch"],
+                        "EnvironmentVariables": {"UV_EXCLUDE_NEWER": "PT24H"}}
+                    if scheduled:
+                        document["StartInterval"] = 600
+                    (agents / f"{label}.plist").write_bytes(
+                        plistlib.dumps(document, fmt=plistlib.FMT_BINARY))
+                    with self.subTest(status=label):
+                        status = backend.status(f"{label}.service", timeout=2)
+                        self.assertEqual(status.environment, {"UV_EXCLUDE_NEWER": "PT24H"})
+                        self.assertEqual(status.active_state, "activating" if scheduled else "active")
+                        self.assertEqual(status.main_pid, 42)
+                        self.assertEqual(status.argv, tuple(document["ProgramArguments"]))
+                with self.subTest(discovery=True):
+                    self.assertEqual(backend.factory_units(timeout=2),
+                                     {"factory-aux.service", "factory-aux.timer", "factory-aux-worker.service"})
+                self.launchd_running = False
+                with self.subTest(apply=True):
+                    self.assertEqual(apply.reconcile_engine(
+                        self.data, backend=backend, run_cmd=runner or apply.run,
+                        host_name="remote" if remote else "local"), "applied", self.output.getvalue())
+                    self.assertEqual(len(self.installs()), 1)
+                    self.assertEqual(self.launchd_disabled, set())
+                    mutations = [(argv[1], argv[-1]) for argv, _ in self.launchd_calls
+                                 if argv[1] in ("disable", "enable")]
+                    self.assertIn(("disable", "gui/501/factory-aux"), mutations)
+                    self.assertIn(("enable", "gui/501/factory-aux"), mutations)
+                    self.assertTrue(all(0 < kwargs["timeout"] <= 30 for argv, kwargs in self.launchd_calls
+                                        if argv[1] in ("disable", "enable")))
+                    self.assertEqual(host.engine(host.load(), "remote" if remote else "local")["sha"], TARGET)
+                for path in agents.glob("*.plist"):
+                    path.unlink()
+
+    def test_malformed_launchd_plist_status_is_tolerant_and_apply_fails_named(self):
+        for remote in (False, True):
+            with self.subTest(remote=remote), contextlib.ExitStack() as stack:
+                self.install_receipt(OLD)
+                self.calls.clear()
+                backend, runner, agents = self.binary_launchd_backend(remote)
+                stack.enter_context(mock.patch.object(host, "service_backend", return_value=backend))
+                if runner:
+                    stack.enter_context(mock.patch.object(host, "remote_runner", return_value=runner))
+                (agents / "factory-broken.plist").write_bytes(
+                    b'<?xml version="1.0"?><plist version="1.0"><dict><key>StartInterval</key>'
+                    b'<integer>not-an-integer</integer></dict></plist>')
+                with self.subTest(status=True):
+                    status = backend.status("factory-broken.service", timeout=2)
+                    self.assertEqual(status.environment, {})
+                    self.assertEqual(status.active_state, "active")
+                self.launchd_running = False
+                with self.subTest(apply=True):
+                    self.assertEqual(self.apply(), 1, self.output.getvalue())
+                    self.assertEqual(self.installs(), [])
+                    self.assertIn("factory-broken.plist", self.output.getvalue())
+                    self.assertIn("engine", self.output.getvalue())
+                (agents / "factory-broken.plist").unlink()
+
 if __name__ == "__main__":
     unittest.main()
 
