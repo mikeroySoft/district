@@ -1629,6 +1629,10 @@ class ApplyTest(DistrictCase):
                                       "tool_dir": str(home / ".local/share/uv/tools"),
                                       "tool_bin": str(home / ".local/bin"), "path": "/usr/bin", "uid": 501})
                     return subprocess.CompletedProcess(argv, 0, out + "\n", "")
+                if "json.dumps([" in command and ".resolve()" in command:
+                    parts = shlex.split(command)
+                    return subprocess.run([sys.executable, *parts[1:]], capture_output=True, text=True,
+                                          input=_kwargs.get("input"), timeout=_kwargs["timeout"])
                 if "git ls-remote --exit-code" in command:
                     return subprocess.CompletedProcess(argv, 0, f"{resolves}\trefs/heads/main\n", "")
                 if "uv-receipt.toml" in command:
