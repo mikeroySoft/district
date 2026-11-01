@@ -1567,10 +1567,14 @@ class ApplyTest(DistrictCase):
         self.assertEqual([c for c in self.calls("factory") if c != "claims --supported"], [])
         self.assertFalse(any("factory install" in " ".join(call) for call in self.ssh_calls()))
 
-    def test_multi_host_repo_pins_same_engine_sha_on_every_host(self) -> None:
-        old, new, other = "0" * 40, "a" * 40, "b" * 40
+    OLD, NEW = "0" * 40, "a" * 40
 
-        def runner(name: str, resolves: str, install_rc: int, log: list[str]) -> host.RemoteRunner:
+    def run_fleet(self, ultron_spec: tuple, benito_spec: tuple):
+        """reconcile_fleet_engine over fake ultron/benito; a spec is (resolves, install_rc[, ci_rc[, busy]])."""
+        old, new = self.OLD, self.NEW
+
+        def runner(name: str, resolves: str, install_rc: int, log: list[str],
+                   ci_rc: int = 0, busy: bool = False) -> host.RemoteRunner:
             def transport(argv, **_kwargs):
                 command = argv[-1]
                 log.append(command)
@@ -1582,6 +1586,8 @@ class ApplyTest(DistrictCase):
                 if "git ls-remote --exit-code" in command:
                     return subprocess.CompletedProcess(argv, 0, f"{resolves}\trefs/heads/main\n", "")
                 if command.startswith("gh api "):
+                    if ci_rc:
+                        return subprocess.CompletedProcess(argv, ci_rc, "", "gh: not logged in")
                     out = json.dumps([{"total_count": 1, "check_runs": [{"status": "completed", "conclusion": "success"}]}])
                     return subprocess.CompletedProcess(argv, 0, out, "")
                 if command.startswith("uv tool install") and f"@{new}" in command:
@@ -1589,7 +1595,7 @@ class ApplyTest(DistrictCase):
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return host.RemoteRunner(name, f"factory@{name}.example", transport=transport)
 
-        def run_fleet(ultron: tuple[str, int], benito: tuple[str, int]):
+        def run_fleet(ultron: tuple, benito: tuple):
             host.save({
                 "defaults": {"factory_ref": "main"},
                 "hosts": {
@@ -1599,13 +1605,18 @@ class ApplyTest(DistrictCase):
                 },
                 "repo": {"acme/widgets": {"path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron"}},
             })
-            backend = mock.Mock()
-            backend.is_active.return_value = "inactive"
-            backend.status.return_value = mock.Mock(loaded=False)
+            def backend(busy: bool):
+                unit = mock.Mock()
+                unit.is_active.side_effect = lambda name: "activating" if busy and name.endswith(".service") else "inactive"
+                unit.status.return_value = mock.Mock(loaded=False)
+                return unit
+
             logs = {"ultron": [], "benito": []}
             data = host.load()
             contexts = {
-                name: (backend, runner(name, *spec, logs[name]), {"acme/widgets": data["repo"]["acme/widgets"]})
+                name: (backend(spec[3] if len(spec) > 3 else False),
+                       runner(name, spec[0], spec[1], logs[name], *spec[2:]),
+                       {"acme/widgets": data["repo"]["acme/widgets"]})
                 for name, spec in (("ultron", ultron), ("benito", benito))
             }
             out = io.StringIO()
@@ -1615,6 +1626,12 @@ class ApplyTest(DistrictCase):
                         for name, log in logs.items()}
             engines = {name: host.load()["hosts"][name]["engine"]["sha"] for name in logs}
             return result, installs, engines, out.getvalue()
+
+        return run_fleet(ultron_spec, benito_spec)
+
+    def test_multi_host_repo_pins_same_engine_sha_on_every_host(self) -> None:
+        old, new, other = self.OLD, self.NEW, "b" * 40
+        run_fleet = self.run_fleet
 
         with mock.patch.object(host, "sync_remote_config"):
             result, installs, engines, out = run_fleet((new, 0), (new, 0))
@@ -1634,6 +1651,20 @@ class ApplyTest(DistrictCase):
             self.assertEqual(engines, {"ultron": old, "benito": old})
             self.assertIn("held by benito (failed)", out)
             self.assertIn("rolled back ultron", out)
+
+    def test_multi_host_engine_checks_every_host_before_installing_any(self) -> None:
+        old, new = self.OLD, self.NEW
+        with mock.patch.object(host, "sync_remote_config"):
+            result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, True))
+            self.assertEqual(result, "deferred", out)
+            self.assertEqual(installs, {"ultron": [], "benito": []})
+            self.assertEqual(engines, {"ultron": old, "benito": old})
+            self.assertIn("held by benito", out)
+
+            result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 1))
+            self.assertEqual(installs, {"ultron": [], "benito": []})
+            self.assertEqual(engines, {"ultron": old, "benito": old})
+            self.assertIn("held by benito (CI unavailable)", out)
 
     def test_remote_host_with_unusable_source_fails_naming_host(self) -> None:
         source = "/Users/mike/missing-factory"
