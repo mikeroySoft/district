@@ -15,6 +15,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,6 +180,15 @@ class UpdateCase(unittest.TestCase):
         self.state_home = self.tmp / "state"
         self.cache_home = self.tmp / "cache"
         self.config_home = self.tmp / "config"
+        self.enterContext(mock.patch.dict(os.environ, {
+            "HOME": str(self.tmp / "home"),
+            "XDG_CONFIG_HOME": str(self.config_home),
+            "XDG_STATE_HOME": str(self.state_home),
+            "XDG_CACHE_HOME": str(self.cache_home),
+            "XDG_DATA_HOME": str(self.tmp / "data"),
+            "UV_TOOL_DIR": str(self.tools),
+            "UV_TOOL_BIN_DIR": str(self.tool_bin),
+        }))
         for path in (self.bin, self.tools, self.tool_bin):
             path.mkdir(parents=True)
         self.port = self.free_port()

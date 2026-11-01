@@ -271,6 +271,10 @@ README.
 uv run python -m unittest discover -s tests
 ```
 
+Standalone filesystem/CLI fixtures must isolate `HOME`, XDG config/state/data/cache,
+and uv tool/bin directories under temporary roots and replace external runners.
+The suite does not require the invoking shell to sandbox the developer's home.
+
 District shells out to the `factory` CLI and never imports `agent_factory`
 internals. If District needs a per-repo fact or action, the fix is a flag on
 `factory`, not a reimplementation here.

@@ -2977,6 +2977,20 @@ class DashboardTest(DistrictCase):
 
 
 class ServicePathTest(unittest.TestCase):
+    def setUp(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.dict(os.environ, {
+            "HOME": str(root / "home"),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_STATE_HOME": str(root / "state"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "UV_TOOL_DIR": str(root / "tools"),
+            "UV_TOOL_BIN_DIR": str(root / "bin"),
+        }))
+        self.enterContext(mock.patch.object(
+            host, "run", side_effect=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")))
+
     def test_demotes_local_bin_after_mise_installs(self) -> None:
         home = Path.home()
         local = str(home / ".local" / "bin")
@@ -3000,6 +3014,7 @@ class ServicePathTest(unittest.TestCase):
         self.assertEqual(parts, ["/opt/bin", local, "/usr/bin"])
 
     def test_apply_exports_service_path_for_factory(self) -> None:
+        self.assertTrue(Path.home().is_relative_to(Path(tempfile.gettempdir())))
         home = Path.home()
         local = str(home / ".local" / "bin")
         mise_gh = str(home / ".local" / "share" / "mise" / "installs" / "gh" / "latest" / "bin")

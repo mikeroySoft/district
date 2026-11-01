@@ -68,8 +68,13 @@ class LaunchdBackendTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         env = mock.patch.dict(os.environ, {
+            "HOME": str(Path(tmp.name) / "home"),
             "XDG_CONFIG_HOME": str(Path(tmp.name) / "xdg"),
+            "XDG_STATE_HOME": str(Path(tmp.name) / "state"),
             "XDG_CACHE_HOME": str(Path(tmp.name) / "cache"),
+            "XDG_DATA_HOME": str(Path(tmp.name) / "data"),
+            "UV_TOOL_DIR": str(Path(tmp.name) / "tools"),
+            "UV_TOOL_BIN_DIR": str(Path(tmp.name) / "bin"),
         })
         env.start()
         self.addCleanup(env.stop)
