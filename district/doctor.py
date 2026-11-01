@@ -346,7 +346,9 @@ def parity_by_slug(data: dict) -> dict[str, list[dict[str, str]]]:
             version = _tool_version(data, name, "factory")
             installed = next(iter(re.findall(r"\b[0-9a-fA-F]{7,40}\b", version)), None)
             recorded = (host.engine(data, name) or {}).get("sha")
-            engines[name] = (installed or (str(recorded) if recorded else version))[:7]
+            # Only a sha shortens: two sha-less versions (`factory 0.4.6`, `factory 0.4.7`) compare whole.
+            sha = installed or (str(recorded) if recorded else None)
+            engines[name] = sha[:7] if sha else version
         checks.append(("engine", engines))
         for tool in PARITY_WORKER_CLIS:
             checks.append((f"worker {tool}", {name: _tool_version(data, name, tool) for name in names}))

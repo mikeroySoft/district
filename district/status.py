@@ -677,7 +677,7 @@ def main(argv: list[str]) -> int:
         if failed:
             print(f"  FAIL  {gh['label']}: {gh['detail']}")
         for item in (item for slug, rows in parity.items() if slug in entries for item in rows):
-            if item["status"] != "PASS":
+            if item["status"] != "PASS" or not args.unhealthy:
                 print(f"  {item['status']}  {item['label']}: {item['detail']}")
         if entries:
             print(table([row(slug, e) for slug, e in entries.items()]))

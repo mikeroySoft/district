@@ -290,7 +290,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         source_cmd, src = _engine_source(data, name, run_cmd)
         try:
             _, slug, resolved_ref, sha = _resolve_engine(ref, source_cmd, src)
-        except OSError as exc:
+        except (OSError, host.RemoteHostError) as exc:
             print(f"engine fleet ({names}) held: {name} cannot resolve {ref}: {exc}; every host keeps its engine")
             return "failed"
         resolved[name] = (resolved_ref, sha)
@@ -304,19 +304,28 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         if installed_engine_commit(data, name) == pin[1]:
             continue
         held = None
-        if (state := _ci_state(*sources[name], pin[1])) != "success":
-            held, result = f"CI {state}", "unchanged"
-        elif busy := busy_units([f"{host.unit_name(slug)}.service" for slug in repos], backend):
-            _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
-            held, result = f"busy: {', '.join(busy)}", "deferred"
+        try:
+            if (state := _ci_state(*sources[name], pin[1])) != "success":
+                held, result = f"CI {state}", "unchanged"
+            elif busy := busy_units([f"{host.unit_name(slug)}.service" for slug in repos], backend):
+                _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
+                held, result = f"busy: {', '.join(busy)}", "deferred"
+        except host.RemoteHostError as exc:
+            held, result = str(exc), "failed"
         if held:
             print(f"engine fleet ({names}) held by {name} ({held}): every host keeps its engine")
             return result
     before = {name: copy.deepcopy(host.engine(data, name)) for name in contexts}
     moved = []
     for name, (run_cmd, backend, repos) in contexts.items():
-        result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
-                                  run_cmd=run_cmd, pin=pin, verify_ci=False)
+        # A host that drops (ssh 255) or errors mid-step fails like a failed install, so the
+        # hosts already moved still roll back and the row names it (#134).
+        try:
+            result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
+                                      run_cmd=run_cmd, pin=pin, verify_ci=False)
+            why = result
+        except (host.RemoteHostError, DistrictError) as exc:
+            result, why = "failed", f"failed: {exc}"
         if result == "applied":
             moved.append(name)
             continue
@@ -326,16 +335,21 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         for back in moved:
             previous = before[back]
             back_cmd, back_backend, back_repos = contexts[back]
-            if not (previous and previous.get("sha")) or reconcile_engine(
-                data, record, backend=back_backend, host_name=back, repos=back_repos, run_cmd=back_cmd,
-                pin=(previous.get("ref", "previous"), previous["sha"]), verify_ci=False,
-            ) != "applied":
+            try:
+                restored = bool(previous and previous.get("sha")) and reconcile_engine(
+                    data, record, backend=back_backend, host_name=back, repos=back_repos, run_cmd=back_cmd,
+                    pin=(previous.get("ref", "previous"), previous["sha"]), verify_ci=False,
+                ) == "applied"
+            except (host.RemoteHostError, DistrictError) as exc:
+                print(f"engine:{back} rollback FAIL: {exc}")
+                restored = False
+            if not restored:
                 stuck.append(back)
                 continue
             host.set_engine(data, back, previous)
         host.save(data)
         rolled = [back for back in moved if back not in stuck]
-        print(f"engine fleet ({names}) held by {name} ({result}): every host keeps its engine"
+        print(f"engine fleet ({names}) held by {name} ({why}): every host keeps its engine"
               + (f"; rolled back {', '.join(rolled)}" if rolled else "")
               + (f"; FAIL could not roll back {', '.join(stuck)}" if stuck else ""))
         return "failed" if result == "failed" or stuck else result
@@ -870,13 +884,12 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                 for name in fleet_hosts:
                     run_cmd, backend = _host_context(data, name)
                     contexts[name] = (run_cmd, backend, _host_repos(data, name))
+                if reconcile_fleet_engine(data, record, contexts) == "failed":
+                    code = 1
             except (host.RemoteHostError, DistrictError) as exc:
                 contexts = {}
                 print(f"engine fleet ({', '.join(fleet_hosts)}) held: {exc}; every host keeps its engine")
                 code = 1
-            else:
-                if reconcile_fleet_engine(data, record, contexts) == "failed":
-                    code = 1
         for host_name, targets in groups.items():
             try:
                 host_rows, host_code, host_smoke = _apply_host(
