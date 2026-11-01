@@ -131,7 +131,14 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         config.write_text(original)
         runner = mock.Mock()
         runner.facts.return_value = {"config_home": str(remote / "config")}
-        runner.path.side_effect = lambda value: Path(value)
+        def remote_path(value):
+            path = Path(value)
+            proxy = mock.Mock()
+            proxy.read_bytes.side_effect = lambda **kw: path.read_bytes()
+            proxy.write_bytes.side_effect = lambda body, **kw: path.write_bytes(body)
+            proxy.write_text.side_effect = lambda body, **kw: path.write_text(body)
+            return proxy
+        runner.path.side_effect = remote_path
         data = {
             "defaults": {"factory_source": "/old/controller"},
             "hosts": {"ultron": {"engine": {

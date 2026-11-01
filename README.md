@@ -153,9 +153,11 @@ to become idle, installs with `uv tool install
 verification reinstalls and verifies the previous revision. The `finally` path
 restores exactly the timers District paused; dashboards restart on the new code.
 If both installs fail, affected repos fail without trying another `factory` on `PATH`.
-The idle budget is one deadline including discovery, probes, and timer pauses;
-zero or exhausted time defers before another command. Timer recovery runs even
-after expiry.
+The idle budget is one deadline including discovery, probes, timer pauses, and
+remote state synchronization. Zero or exhausted time defers before another
+command. Timer/dashboard restoration has a separate 30-second budget after
+expiry; a failed timer restore does not prevent bounded attempts on the others.
+Unfinished restoration intents remain durable for the next apply.
 Saved timer intents and pending dashboard restarts are recovered from the
 verified receipt before resolving a fresh target, including without policy or
 with unavailable remote refs. If repair and rollback cannot verify a usable

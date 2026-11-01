@@ -33,6 +33,7 @@ POLICY_ENV = ("NPM_CONFIG_MIN_RELEASE_AGE", "UV_EXCLUDE_NEWER")
 DRIFT_LABELS = (".factory.toml keys", "host settings committed", ".github/ISSUE_TEMPLATE/agent_task.md", ".factory.toml committed")
 SMOKE_TIMEOUT = 10  # seconds per `--version` probe under a unit's PATH
 DRAIN_TIMEOUT = 120  # maximum seconds an install may keep timers drained
+RESTORE_TIMEOUT = 30  # separate budget after the idle deadline expires
 SERVICE_WAIT = 3600  # maximum seconds a hand-run `--reset` pass may take
 ENGINE_HISTORY = 50
 SMOKE_BINARIES = ("gh", "factory")
@@ -189,10 +190,10 @@ def _resolve_engine(ref: str, run_cmd, origin: str, pin: tuple[str, str] | None 
     return origin, slug, resolved_ref, sha
 
 
-def _receipt_sha(tool: Path, run_cmd) -> str | None:
+def _receipt_sha(tool: Path, run_cmd, *, timeout: float = SMOKE_TIMEOUT) -> str | None:
     receipt = tool / "uv-receipt.toml"
     try:
-        body = (run_cmd.path(str(receipt)).read_text() if isinstance(run_cmd, host.RemoteRunner)
+        body = (run_cmd.path(str(receipt)).read_text(timeout=timeout) if isinstance(run_cmd, host.RemoteRunner)
                 else receipt.read_text())
         requirements = tomllib.loads(body)["tool"]["requirements"]
         for requirement in requirements:
@@ -207,34 +208,36 @@ def _receipt_sha(tool: Path, run_cmd) -> str | None:
     return None
 
 
-def _tool_cli(tool: Path, cli: Path, run_cmd) -> bool:
+def _tool_cli(tool: Path, cli: Path, run_cmd, *, timeout: float = SMOKE_TIMEOUT) -> bool:
     if isinstance(run_cmd, host.RemoteRunner):
         script = (
             "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
             "raise SystemExit(not (p.exists() and p.resolve().is_relative_to(pathlib.Path(sys.argv[2]))))"
         )
-        return run_cmd(["python3", "-c", script, str(cli), str(tool)], timeout=SMOKE_TIMEOUT).returncode == 0
+        return run_cmd(["python3", "-c", script, str(cli), str(tool)], timeout=timeout).returncode == 0
     return cli.exists() and cli.resolve().is_relative_to(tool)
 
 
-def _verify_engine(sha: str | None, tool: Path, cli: Path, run_cmd) -> None:
-    actual = _receipt_sha(tool, run_cmd)
+def _verify_engine(sha: str | None, tool: Path, cli: Path, run_cmd, *, deadline: float | None = None) -> None:
+    if deadline is None:
+        deadline = time.monotonic() + SMOKE_TIMEOUT
+    actual = _receipt_sha(tool, run_cmd, timeout=remaining_timeout(deadline))
     if actual is None or actual != sha:
         raise OSError(f"receipt rev {actual or 'unknown'} != {sha}")
-    if not _tool_cli(tool, cli, run_cmd):
+    if not _tool_cli(tool, cli, run_cmd, timeout=remaining_timeout(deadline)):
         raise OSError(f"{cli} does not resolve into {tool}")
-    proc = run_cmd([str(cli), "--version"], timeout=SMOKE_TIMEOUT)
+    proc = run_cmd([str(cli), "--version"], timeout=remaining_timeout(deadline))
     if proc.returncode:
         raise OSError(f"{cli} --version exited {proc.returncode}")
 
 
-def _save_engine(data: dict, name: str, runner, **values) -> None:
+def _save_engine(data: dict, name: str, runner, *, deadline: float | None = None, **values) -> None:
     engine = dict(host.engine(data, name) or {})
     engine.update(values)
     host.set_engine(data, name, engine)
     host.save(data)
     if isinstance(runner, host.RemoteRunner):
-        host.sync_remote_config(data, name, runner)
+        host.sync_remote_config(data, name, runner, deadline=deadline)
 
 
 def _downgrade_guard(slug: str, previous: str | None, target: str, run_cmd,
@@ -269,16 +272,19 @@ def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> lis
             and not re.search(r"(?:^|\s)dashboard(?:\s|$)", line)]
 
 
-def _restore_engine_timers(data: dict, name: str, runner, backend, record) -> None:
+def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
     paused = (host.engine(data, name) or {}).get("paused_timers", [])
     if not paused:
         return
-    tool, cli = host.factory_tool_paths(runner)
-    _verify_engine(_receipt_sha(tool, runner), tool, cli, runner)
+    if deadline is None:
+        deadline = time.monotonic() + RESTORE_TIMEOUT
+    tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+    _verify_engine(_receipt_sha(tool, runner, timeout=remaining_timeout(deadline)),
+                   tool, cli, runner, deadline=deadline)
     remaining = list(paused)
     for timer in paused:
         try:
-            proc = backend.resume_timer(timer)
+            proc = backend.resume_timer(timer, timeout=min(SMOKE_TIMEOUT, remaining_timeout(deadline)))
             if proc.returncode:
                 raise OSError(f"exited {proc.returncode}")
         except (Exception, DistrictError) as exc:
@@ -287,7 +293,7 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record) -> No
         remaining.remove(timer)
         if record:
             record.reenabled.add(timer)
-    _save_engine(data, name, runner, paused_timers=remaining)
+    _save_engine(data, name, runner, deadline=deadline, paused_timers=remaining)
     if remaining:
         raise DistrictError(f"could not restore paused timers: {', '.join(remaining)}")
 
@@ -303,13 +309,14 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record):
             services, timers = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
             active = [timer for timer in timers
                       if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
-            tool, cli = host.factory_tool_paths(runner)
+            tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
             if record:
                 record.observe(data)
             for timer in active:
                 remaining_timeout(deadline)
                 paused = list((host.engine(data, name) or {}).get("paused_timers", []))
-                _save_engine(data, name, runner, paused_timers=paused if timer in paused else paused + [timer])
+                _save_engine(data, name, runner, deadline=deadline,
+                             paused_timers=paused if timer in paused else paused + [timer])
                 remaining = remaining_timeout(deadline)
                 if record:
                     record.disabled.add(timer)
@@ -333,12 +340,15 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record):
     finally:
         _restore_engine_timers(data, name, runner, backend, record)
 
-def _finish_dashboards(data: dict, name: str, runner, repos: dict, backend) -> None:
+def _finish_dashboards(data: dict, name: str, runner, repos: dict, backend, *, deadline: float | None = None) -> None:
     if (host.engine(data, name) or {}).get("dashboards_pending"):
-        tool, cli = host.factory_tool_paths(runner)
-        _verify_engine(_receipt_sha(tool, runner), tool, cli, runner)
-        restart_dashboards(repos, backend)
-        _save_engine(data, name, runner, dashboards_pending=False)
+        if deadline is None:
+            deadline = time.monotonic() + RESTORE_TIMEOUT
+        tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+        _verify_engine(_receipt_sha(tool, runner, timeout=remaining_timeout(deadline)),
+                       tool, cli, runner, deadline=deadline)
+        restart_dashboards(repos, backend, deadline=deadline)
+        _save_engine(data, name, runner, deadline=deadline, dashboards_pending=False)
 
 
 
@@ -378,12 +388,13 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
     engine = host.engine(data, name) or {}
     if not engine.get("paused_timers") and not engine.get("dashboards_pending"):
         return None
-    tool, cli = host.factory_tool_paths(runner)
-    receipt = _receipt_sha(tool, runner)
+    deadline = time.monotonic() + RESTORE_TIMEOUT
+    tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
     stored = installed_engine_commit(data, name)
     try:
+        receipt = _receipt_sha(tool, runner, timeout=remaining_timeout(deadline))
         try:
-            _verify_engine(receipt, tool, cli, runner)
+            _verify_engine(receipt, tool, cli, runner, deadline=deadline)
         except (OSError, subprocess.TimeoutExpired):
             target = engine.get("target") or receipt or stored
             if not isinstance(target, str) or not SHA.fullmatch(target):
@@ -400,10 +411,10 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
         if receipt != stored:
             _save_engine(data, name, runner, sha=receipt,
                          ref=engine.get("target_ref", engine.get("ref", "unknown")),
-                         installed_at=iso(now()), dashboards_pending=True)
+                         installed_at=iso(now()), dashboards_pending=True, deadline=deadline)
         if engine.get("paused_timers"):
-            _restore_engine_timers(data, name, runner, backend, record)
-        _finish_dashboards(data, name, runner, repos, backend)
+            _restore_engine_timers(data, name, runner, backend, record, deadline=deadline)
+        _finish_dashboards(data, name, runner, repos, backend, deadline=deadline)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"engine:{name} recovery failed: {exc}; retaining recovery state")
         return "failed"
@@ -479,7 +490,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
                     return "deferred"
                 result = _replace_engine(data, host_name, run_cmd, origin, resolved_ref, sha, previous, tool, cli)
             _finish_dashboards(data, host_name, run_cmd, repos, backend)
-    except OSError as exc:
+    except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"{engine_target} failed {previous or 'unknown'} -> {sha}: {exc}")
         return "failed"
     if result == "applied" and record:
@@ -752,13 +763,16 @@ def drain(timers: list[str], services: list[str], data: dict,
     return busy_units(services, backend)
 
 
-def restart_dashboards(repos: dict[str, dict], backend=None) -> None:
+def restart_dashboards(repos: dict[str, dict], backend=None, *, deadline: float | None = None) -> None:
     backend = backend or host.service_backend()
+    if deadline is None:
+        deadline = time.monotonic() + RESTORE_TIMEOUT
     dashboards = {f"{host.unit_name(slug)}-dashboard.service" for slug in repos}
-    dashboards.update(name for name in backend.factory_units() if name.endswith("-dashboard.service"))
+    dashboards.update(name for name in backend.factory_units(timeout=remaining_timeout(deadline))
+                      if name.endswith("-dashboard.service"))
     for dash in sorted(dashboards):
-        if backend.status(dash).loaded:
-            proc = backend.start(dash, restart=True, check=False)
+        if backend.status(dash, timeout=remaining_timeout(deadline)).loaded:
+            proc = backend.start(dash, restart=True, check=False, timeout=remaining_timeout(deadline))
             if proc.returncode:
                 raise OSError(f"{dash}: restart exited {proc.returncode}")
 

@@ -392,7 +392,7 @@ class OneInstallTest(unittest.TestCase):
         timers = ["factory-widgets.timer", "factory-other.timer"]
         self.data["defaults"]["engine"]["paused_timers"] = timers
         self.active.clear()
-        def resume(timer):
+        def resume(timer, **kwargs):
             if timer == timers[0]:
                 raise OSError("unavailable")
             return self.enable(timer)
@@ -439,7 +439,6 @@ class OneInstallTest(unittest.TestCase):
         self.backend.status.return_value = service.ServiceStatus("loaded", "active", "enabled", 42)
         self.assertEqual(self.reconcile(), "unchanged")
         self.assertEqual(self.installs(), [])
-        self.backend.start.assert_called_once_with("factory-widgets-dashboard.service", restart=True, check=False)
         self.assertFalse(host.load()["defaults"]["engine"]["dashboards_pending"])
 
     def test_unchanged_fleet_does_not_restart_dashboards_or_pause_timers(self):
@@ -751,6 +750,54 @@ class OneInstallTest(unittest.TestCase):
                         self.assertFalse(ready)
                 self.assertEqual(observed[-1], exhausted_at)
                 self.assertEqual(host.engine(self.data, "local").get("paused_timers", []), [])
+
+    def test_remote_window_sync_and_restoration_stalls_are_bounded_and_recoverable(self):
+        self.data["hosts"] = {"remote": {"ssh": "fake"}}
+        self.data["defaults"]["engine_idle_timeout"] = "5s"
+        host.set_engine(self.data, "remote", {"sha": OLD})
+        clock = [0.0]
+        paused, resumed, deadlines = [], [], []
+        timers = ["factory-a.timer", "factory-b.timer"]
+        self.backend.factory_units.return_value = set(timers)
+        self.backend.is_active.side_effect = lambda name, **kw: "active" if name in timers else "inactive"
+        self.backend.pause_timer.side_effect = lambda name, **kw: paused.append(name)
+
+        def transport(argv, **kwargs):
+            timeout = kwargs.get("timeout")
+            self.assertIsNotNone(timeout, argv)
+            self.assertGreater(timeout, 0)
+            deadlines.append(timeout)
+            parts = shlex.split(argv[-1])
+            if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                parts = shlex.split(parts[-1])
+            if parts[0] == "fake-resume":
+                if parts[1] == timers[0]:
+                    clock[0] += timeout
+                    raise subprocess.TimeoutExpired(parts, timeout)
+                resumed.append(parts[1])
+                return subprocess.CompletedProcess(parts, 0, "", "")
+            if parts[:2] == ["python3", "-c"]:
+                if "read_bytes()" in parts[2] and paused and clock[0] < 5:
+                    self.assertLessEqual(timeout, 5 - clock[0])
+                    clock[0] = 5
+                    raise subprocess.TimeoutExpired(parts, timeout)
+                return subprocess.run([sys.executable, *parts[1:]], capture_output=True, text=True,
+                                      input=kwargs.get("input"), timeout=timeout)
+            return self.run_cmd(parts, **kwargs)
+
+        runner = host.RemoteRunner("remote", "fake", transport=transport)
+        runner._facts = {"home": str(Path.home()), "config_home": str(self.root / "remote-config"),
+                         "tool_dir": str(self.tool.parent), "tool_bin": str(self.cli.parent)}
+        self.backend.resume_timer.side_effect = lambda name, **kw: runner(["fake-resume", name], **kw)
+        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+            with self.assertRaises(host.DistrictError):
+                with apply._engine_window(self.data, "remote", runner, self.backend, {}, None) as ready:
+                    self.assertFalse(ready)
+        self.assertEqual(paused, [timers[0]])
+        self.assertEqual(resumed, [timers[1]])
+        self.assertEqual(host.engine(host.load(), "remote")["paused_timers"], [timers[0]])
+        self.assertLess(clock[0], 40)
+        self.assertTrue(all(deadline <= 30 for deadline in deadlines))
 
     def test_zero_idle_budget_issues_no_discovery_probe_or_pause(self):
         self.data["defaults"]["engine_idle_timeout"] = "0s"

@@ -100,7 +100,7 @@ class ServiceBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def status(self, name: str) -> ServiceStatus:
+    def status(self, name: str, *, timeout: float | None = None) -> ServiceStatus:
         raise NotImplementedError
 
     @abstractmethod
@@ -124,8 +124,8 @@ class ServiceBackend(ABC):
     def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
         return self.enable(name, False, timeout=timeout)
 
-    def resume_timer(self, name: str) -> subprocess.CompletedProcess:
-        return self.enable(name, check=False)
+    def resume_timer(self, name: str, *, timeout: float = 10) -> subprocess.CompletedProcess:
+        return self.enable(name, check=False, timeout=timeout)
 
 def remaining_timeout(deadline: float) -> float:
     """Reject an expired shared deadline before issuing another command."""
@@ -356,21 +356,24 @@ class SystemdUserBackend(ServiceBackend):
     def is_active(self, name: str, *, timeout: float | None = None) -> str:
         return self._run("is-active", name, check=False, timeout=timeout).stdout.strip()
 
-    def _property(self, name: str, prop: str) -> str:
-        value = self._run("show", name, f"--property={prop}", "--value", "--no-pager").stdout.strip()
+    def _property(self, name: str, prop: str, *, deadline: float | None = None) -> str:
+        value = self._run("show", name, f"--property={prop}", "--value", "--no-pager",
+                          timeout=remaining_timeout(deadline) if deadline is not None else None).stdout.strip()
         if not value:
-            value = self._run("show", "-p", prop, "--value", name).stdout.strip()
+            value = self._run("show", "-p", prop, "--value", name,
+                              timeout=remaining_timeout(deadline) if deadline is not None else None).stdout.strip()
         return value
 
-    def status(self, name: str) -> ServiceStatus:
-        path = self.unit_dir / name
-        load = self._property(name, "LoadState")
-        if not load and path.exists():
+    def status(self, name: str, *, timeout: float | None = None) -> ServiceStatus:
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        load = self._property(name, "LoadState", deadline=deadline)
+        body = _definition_bodies(self.unit_dir, name, deadline=deadline).get(name)
+        if not load and body is not None:
             load = "loaded"
         environment = {}
         file_argv = None
-        if path.exists():
-            for line in path.read_text().splitlines():
+        if body is not None:
+            for line in body.splitlines():
                 if line.startswith("Environment=") and "=" in line.removeprefix("Environment="):
                     key, value = line.removeprefix("Environment=").split("=", 1)
                     environment[key] = value
@@ -380,15 +383,15 @@ class SystemdUserBackend(ServiceBackend):
                     except ValueError:
                         pass
         if load in ("", "not-found"):
-            pid = self._property(name, "MainPID") if name.endswith(".service") else ""
+            pid = self._property(name, "MainPID", deadline=deadline) if name.endswith(".service") else ""
             return ServiceStatus(
                 load or "not-found", "inactive", "not-found", int(pid) if pid.isdigit() else 0,
                 environment=environment,
             )
-        active = self._property(name, "ActiveState")
-        enabled = self._property(name, "UnitFileState")
-        pid = self._property(name, "MainPID")
-        raw = self._property(name, "ExecStart") if name.endswith(".service") else ""
+        active = self._property(name, "ActiveState", deadline=deadline)
+        enabled = self._property(name, "UnitFileState", deadline=deadline)
+        pid = self._property(name, "MainPID", deadline=deadline)
+        raw = self._property(name, "ExecStart", deadline=deadline) if name.endswith(".service") else ""
         return ServiceStatus(
             load, active, enabled, int(pid) if pid.isdigit() else 0,
             _exec_start(raw) if raw else file_argv, environment,
@@ -470,8 +473,8 @@ class LaunchdBackend(ServiceBackend):
         # Disable scheduling without bootout, which would kill the in-flight pass.
         return self._run("disable", f"{self.domain}/{self._label(name)}", timeout=timeout)
 
-    def resume_timer(self, name: str) -> subprocess.CompletedProcess:
-        return self._run("enable", f"{self.domain}/{self._label(name)}", check=False)
+    def resume_timer(self, name: str, *, timeout: float = 10) -> subprocess.CompletedProcess:
+        return self._run("enable", f"{self.domain}/{self._label(name)}", check=False, timeout=timeout)
 
 
     @property

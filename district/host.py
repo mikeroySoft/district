@@ -20,6 +20,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import time
 import tomllib
 import uuid
 from datetime import datetime, timezone
@@ -169,9 +170,9 @@ def default(data: dict, key: str):
     return data.get("defaults", {}).get(key, DEFAULTS[key])
 
 
-def factory_tool_paths(runner: RemoteRunner | None = None) -> tuple[Path, Path]:
+def factory_tool_paths(runner: RemoteRunner | None = None, *, timeout: float = 10) -> tuple[Path, Path]:
     if isinstance(runner, RemoteRunner):
-        facts = runner.facts()
+        facts = runner.facts(timeout=timeout)
         tool_dir = Path(facts["tool_dir"])
         tool_bin = Path(facts["tool_bin"])
     else:
@@ -469,28 +470,28 @@ class RemotePath:
             check=True,
         )
 
-    def read_text(self) -> str:
+    def read_text(self, *, timeout: float = 10) -> str:
         script = "import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
-        proc = self.runner(["python3", "-c", script, str(self)])
+        proc = self.runner(["python3", "-c", script, str(self)], timeout=timeout)
         if proc.returncode:
             raise OSError(proc.stderr.strip() or f"cannot read {self}")
         return proc.stdout
 
-    def read_bytes(self) -> bytes:
+    def read_bytes(self, *, timeout: float = 10) -> bytes:
         script = "import base64,pathlib,sys; print(base64.b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode())"
-        proc = self.runner(["python3", "-c", script, str(self)])
+        proc = self.runner(["python3", "-c", script, str(self)], timeout=timeout)
         if proc.returncode:
             raise OSError(proc.stderr.strip() or f"cannot read {self}")
         return base64.b64decode(proc.stdout)
 
-    def write_text(self, body: str) -> None:
+    def write_text(self, body: str, *, timeout: float = 10) -> None:
         script = (
             "import os,pathlib,sys; p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); "
             "t=p.with_name('.'+p.name+'.district.tmp'); t.write_text(sys.stdin.read()); os.replace(t,p)"
         )
-        self.runner(["python3", "-c", script, str(self)], input=body, check=True)
+        self.runner(["python3", "-c", script, str(self)], input=body, check=True, timeout=timeout)
 
-    def write_bytes(self, body: bytes) -> None:
+    def write_bytes(self, body: bytes, *, timeout: float = 10) -> None:
         script = (
             "import base64,os,pathlib,sys; p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); "
             "t=p.with_name('.'+p.name+'.district.tmp'); t.write_bytes(base64.b64decode(sys.stdin.read())); os.replace(t,p)"
@@ -498,7 +499,7 @@ class RemotePath:
         self.runner(
             ["python3", "-c", script, str(self)],
             input=base64.b64encode(body).decode(),
-            check=True,
+            check=True, timeout=timeout,
         )
 
     def unlink(self, missing_ok: bool = False) -> None:
@@ -552,7 +553,7 @@ class RemoteRunner:
             raise DistrictError(f"{self.name}: `{' '.join(argv)}` exited {result.returncode}")
         return result
 
-    def facts(self) -> dict:
+    def facts(self, *, timeout: float = 10) -> dict:
         if self._facts is None:
             script = (
                 "import json,os; from pathlib import Path; "
@@ -567,7 +568,7 @@ class RemoteRunner:
                 "'tool_dir':tool_dir,'tool_bin':tool_bin,'path':os.environ.get('PATH',''),"
                 "'uid':os.getuid()}))"
             )
-            proc = self(["python3", "-c", script])
+            proc = self(["python3", "-c", script], timeout=timeout)
             if proc.returncode:
                 raise DistrictError(
                     f"{self.name}: cannot inspect remote host: "
@@ -651,18 +652,21 @@ def remote_config(data: dict, name: str) -> dict:
     return result
 
 
-def sync_remote_config(data: dict, name: str, runner: RemoteRunner) -> None:
-    config_path = PurePosixPath(runner.facts()["config_home"]) / "factory" / "config.toml"
+def sync_remote_config(data: dict, name: str, runner: RemoteRunner, *, deadline: float | None = None) -> None:
+    if deadline is None:
+        deadline = time.monotonic() + 10
+    config_path = PurePosixPath(runner.facts(timeout=service.remaining_timeout(deadline))["config_home"]) / "factory" / "config.toml"
     config = runner.path(config_path)
     try:
-        original = config.read_bytes()
+        original = config.read_bytes(timeout=service.remaining_timeout(deadline))
         stored = tomllib.loads(original.decode())
     except (OSError, tomllib.TOMLDecodeError):
         original = None
         stored = {}
     if original is not None and _has_factory_source(stored):
-        runner.path(config_path.with_name(_backup_name(config_path.name))).write_bytes(original)
-    config.write_text(tomli_w.dumps(remote_config(data, name)))
+        runner.path(config_path.with_name(_backup_name(config_path.name))).write_bytes(
+            original, timeout=service.remaining_timeout(deadline))
+    config.write_text(tomli_w.dumps(remote_config(data, name)), timeout=service.remaining_timeout(deadline))
 
 
 def engine(data: dict, name: str) -> dict | None:
