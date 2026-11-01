@@ -493,7 +493,7 @@ class HostTest(DistrictCase):
     def test_claims_probe_matches_factory_contract(self) -> None:
         """factory#526: `factory claims --supported` prints exactly `host-claims 1`, exit 0, run with
         ~/.local/bin first on PATH and a 10-second timeout; older engines exit 2 (unknown command)."""
-        data = {"hosts": {"ultron": {"ssh": "factory@ultron.example"}}}
+        data = {"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "linux"}}}
         cases = (("host-claims 1\n", 0, True), ("host-claims\n", 0, False), ("host-claims 10\n", 0, False),
                  ("", 2, False), ("host-claims 1\n", 1, False))
         for stdout, rc, expected in cases:
@@ -1630,7 +1630,7 @@ class ApplyTest(DistrictCase):
         code, out, _, reconciled, applied = self.fleet_apply(context)
 
         self.assertEqual(code, 1, out)
-        self.assertIn("engine fleet (local, ultron) held: ultron: config.toml is not writable", out)
+        self.assertIn("engine fleet (local, ultron) held: district: ultron: config.toml is not writable", out)
         reconciled.assert_not_called()
 
     def test_apply_builds_each_fleet_host_context_once(self) -> None:

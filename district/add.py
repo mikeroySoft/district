@@ -500,7 +500,7 @@ def main(argv: list[str]) -> int:
         table.pop("host", None)
         table.setdefault("triage_host", current[0])
         table["hosts"] = names
-        host.sync_local_fleet(data)
+        host.sync_local_claims(data)
         print(f"{slug}: hosts {', '.join(names)} (triage on {table['triage_host']})")
     elif "hosts" in table:
         pass

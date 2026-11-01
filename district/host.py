@@ -163,12 +163,22 @@ def hosts(data: dict) -> dict[str, dict]:
 
 
 CLAIMS_ISSUE = "https://github.com/mikeroySoft/factory/issues/526"
-HOST_KEYS = ("host", "hosts", "triage_host")  # District-only: never synced into a factory config
+# District-owned keys: never copied as-is into a host's factory config; claim_keys() sets the
+# factory#526 ones (host_name, triage_host) per host.
+HOST_KEYS = ("host", "hosts", "triage_host", "host_name")
+CLAIMS_PROBE_TIMEOUT = 10
+CLAIMS_PROTOCOL = "host-claims 1"
+# Run a user-installed tool on a remote host the way its service units do: ~/.local/bin first.
+REMOTE_TOOL = 'PATH="$HOME/.local/bin:$PATH"; exec "$0" "$@"'
 
 
 def repo_hosts(table: dict, slug: str = "repo") -> list[str]:
     """Hosts that run `slug`'s factory: `hosts = [...]`, else the single `host` (default local)."""
     listed = table.get("hosts")
+    if listed is None or len(listed) == 1:
+        # factory#526 reads triage_host from [repo."SLUG"] directly: alone it would stop triage here
+        if "triage_host" in table:
+            raise DistrictError(f"{slug}: triage_host applies only when hosts lists several hosts")
     if listed is None:
         return [table.get("host", "local")]
     if "host" in table:
@@ -192,13 +202,20 @@ def multi_host(table: dict, slug: str = "repo") -> bool:
 
 
 def claims_supported(data: dict, name: str) -> bool:
-    """True when `name`'s installed factory coordinates ticket claims across hosts (factory#526)."""
+    """True when `name`'s installed factory coordinates ticket claims across hosts. factory#526's
+    contract: `factory claims --supported` prints exactly `host-claims 1` and exits 0; engines
+    without claims exit 2 (unknown command)."""
     argv = ["factory", "claims", "--supported"]
     try:
-        proc = run(argv, quiet=True) if name == "local" else remote_runner(name, hosts(data)[name])(argv, quiet=True)
+        if name == "local":
+            path = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
+            proc = run(argv, quiet=True, timeout=CLAIMS_PROBE_TIMEOUT, env={**os.environ, "PATH": path})
+        else:
+            proc = remote_runner(name, hosts(data)[name])(
+                ["sh", "-c", REMOTE_TOOL, *argv], quiet=True, timeout=CLAIMS_PROBE_TIMEOUT)
     except (OSError, RemoteHostError, subprocess.TimeoutExpired):
         return False
-    return proc.returncode == 0 and proc.stdout.startswith("host-claims")
+    return proc.returncode == 0 and proc.stdout.strip() == CLAIMS_PROTOCOL
 
 
 def factory_host(data: dict, slug: str) -> str | dict:
@@ -220,30 +237,25 @@ def is_remote(data: dict, slug: str) -> bool:
     return "local" not in repo_hosts(repos(data)[slug], slug)
 
 
-FLEET_KEYS = ("host_name", "triage_host")  # District-owned keys of a factory `[fleet]` table
-
-
-def fleet_table(table: dict, name: str, slug: str = "repo") -> dict:
-    """`[repo.SLUG.fleet]` for host `name`: the table's own fleet keys (e.g. claim_ttl) plus, when
-    several hosts run the repo, this host's name and the triage host."""
-    fleet = {key: value for key, value in table.get("fleet", {}).items() if key not in FLEET_KEYS}
+def claim_keys(table: dict, name: str, slug: str = "repo") -> dict:
+    """factory#526 keys for host `name`'s `[repo."SLUG"]`: its own host_name and the triage host,
+    only when several hosts run the repo (a single host keeps claims off)."""
     if len(repo_hosts(table, slug)) > 1:
-        fleet.update(host_name=name, triage_host=table["triage_host"])
-    return fleet
+        return {"host_name": name, "triage_host": table["triage_host"]}
+    return {}
 
 
-def sync_local_fleet(data: dict) -> bool:
-    """The controller's own factory config is this registry, so keep `[repo.SLUG.fleet]` here for
-    repos that run on local and other hosts. Returns True when `data` changed."""
+def sync_local_claims(data: dict) -> bool:
+    """The controller's own factory config is this registry, which already holds triage_host, so
+    keep `host_name = "local"` in repos that run on local and other hosts. True when `data` changed."""
     changed = False
     for slug, table in repos(data).items():
-        fleet = fleet_table(table, "local", slug) if "local" in repo_hosts(table, slug) else \
-            {key: value for key, value in table.get("fleet", {}).items() if key not in FLEET_KEYS}
-        if fleet != table.get("fleet", {}):
-            if fleet:
-                table["fleet"] = fleet
+        name = claim_keys(table, "local", slug).get("host_name") if "local" in repo_hosts(table, slug) else None
+        if table.get("host_name") != name:
+            if name:
+                table["host_name"] = name
             else:
-                del table["fleet"]
+                del table["host_name"]
             changed = True
     return changed
 
@@ -561,11 +573,8 @@ def remote_config(data: dict, name: str) -> dict:
     for slug, table in repos(data).items():
         listed = repo_hosts(table, slug)
         if name in listed:
-            tables[slug] = {key: copy.deepcopy(value) for key, value in table.items()
-                            if key not in HOST_KEYS and key != "fleet"}
-            fleet = fleet_table(table, name, slug)
-            if fleet:
-                tables[slug]["fleet"] = fleet
+            tables[slug] = {key: copy.deepcopy(value) for key, value in table.items() if key not in HOST_KEYS}
+            tables[slug].update(claim_keys(table, name, slug))
     if tables:
         result["repo"] = tables
     return result

@@ -159,13 +159,15 @@ triage_host = "local"
 ```
 
 Set either `host` or `hosts`, not both. With more than one host,
-`triage_host` is required and must be one of them; it is the only host that
-triages, and `district status` reads the repo's state from it. Each host's
-Factory config carries `[repo."SLUG".fleet]` with that host's `host_name` and
-the `triage_host`. On the controller that config is this registry, so
-`district add` and `district apply` keep `fleet` up to date there (as
-`host_name = "local"`); other `fleet` keys such as `claim_ttl` are kept and
-synced to every host. `district add --host NAME` on a repo already registered
+`triage_host` is required and must be one of them; with one host it is
+refused. It is the only host that triages, and `district status` reads the
+repo's state from it. Each host's Factory config carries that host's
+`host_name` and the `triage_host` directly in its `[repo."SLUG"]` table, as
+factory#526 reads them. On the controller that config is this registry, which
+already holds `triage_host`, so `district add` and `district apply` keep
+`host_name = "local"` there. Other keys such as `claim_ttl` set in the
+registry's `[repo."SLUG"]` reach every host.
+`district add --host NAME` on a repo already registered
 on another host appends `NAME` to `hosts`, keeping the first host as
 `triage_host`; a bare `district add` leaves the repo's hosts alone.
 `district rm` removes the units on every listed host and refuses, removing
@@ -174,8 +176,9 @@ nothing, while any of them is running a pass unless you pass `--wait`.
 
 Several hosts on one repo need Factory's host claims
 ([factory#526](https://github.com/mikeroySoft/factory/issues/526)) so two hosts
-never work the same ticket. Until `factory claims --supported` succeeds on
-every listed host, `district add` refuses to add a second host and
+never work the same ticket. Until `factory claims --supported` prints exactly `host-claims 1` and exits
+0 on every listed host (run with `~/.local/bin` first on `PATH` and a
+10-second timeout), `district add` refuses to add a second host and
 `district apply` refuses any registry that lists several hosts for a repo, both
 with a link to that issue.
 

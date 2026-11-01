@@ -726,11 +726,18 @@ def _host_context(data: dict, host_name: str):
     return run_cmd, host.service_backend(target, run=run_cmd)
 
 
+def _reuse(context: tuple | None) -> tuple | None:
+    """(run_cmd, backend) from a fleet engine context (backend, run_cmd, repos), so a host's
+    config is synced and its backend probed once per apply."""
+    return (context[1], context[0]) if context else None
+
+
 def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argparse.Namespace,
-                record: install_state.ApplyRun, status: str,
-                engine_done: bool = False) -> tuple[list[dict], int, tuple[int, list[str]]]:
+                record: install_state.ApplyRun, status: str, engine_done: bool = False,
+                context: tuple | None = None) -> tuple[list[dict], int, tuple[int, list[str]]]:
+    """`context` is the (run_cmd, backend) the fleet engine step already built for this host."""
     all_repos = _host_repos(data, host_name)
-    run_cmd, backend = _host_context(data, host_name)
+    run_cmd, backend = context or _host_context(data, host_name)
     install_env = None
     if host_name != "local":
         facts = run_cmd.facts()
@@ -852,7 +859,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                     f"{', '.join(fleet)} lists several hosts; --upgrade installs per host, so set "
                     "[defaults].factory_ref and run `district apply` to move every host to one engine sha"
                 )
-        host.sync_local_fleet(data)
+        host.sync_local_claims(data)
         status, warnings = policy(data)
         host.save(data)
         groups: dict[str, dict[str, dict]] = {}
@@ -863,13 +870,14 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         rows = []
         smokes = []
         code = 0
+        contexts = {}
         if fleet_hosts:
             try:
-                contexts = {}
                 for name in fleet_hosts:
                     run_cmd, backend = _host_context(data, name)
                     contexts[name] = (backend, run_cmd, _host_repos(data, name))
-            except host.RemoteHostError as exc:
+            except (host.RemoteHostError, DistrictError) as exc:
+                contexts = {}
                 print(f"engine fleet ({', '.join(fleet_hosts)}) held: {exc}; every host keeps its engine")
                 code = 1
             else:
@@ -879,6 +887,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             try:
                 host_rows, host_code, host_smoke = _apply_host(
                     data, host_name, targets, args, record, status, engine_done=host_name in fleet_hosts,
+                    context=_reuse(contexts.get(host_name)),
                 )
             except host.RemoteHostError as exc:
                 for slug in targets:

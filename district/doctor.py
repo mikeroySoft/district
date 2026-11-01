@@ -286,12 +286,11 @@ def factory_rows(data: dict) -> list[dict[str, str]]:
 
 
 PARITY_WORKER_CLIS = ("omp", "droid")
-_REMOTE_TOOL = 'PATH="$HOME/.local/bin:$PATH"; exec "$0" "$@"'
 
 
 def _tool_version(data: dict, name: str, tool: str) -> str:
     table = host.hosts(data).get(name, {})
-    argv = [tool, "--version"] if name == "local" else ["sh", "-c", _REMOTE_TOOL, tool, "--version"]
+    argv = [tool, "--version"] if name == "local" else ["sh", "-c", host.REMOTE_TOOL, tool, "--version"]
     try:
         proc = _host_run(name, table, argv)
     except (OSError, subprocess.TimeoutExpired):
@@ -325,7 +324,7 @@ def _effective(data: dict, name: str, table: dict) -> dict:
     }
     config = copy.deepcopy(defaults)
     host._merge(config, {key: copy.deepcopy(value) for key, value in table.items()
-                         if key not in host.HOST_KEYS and key != "fleet"})
+                         if key not in host.HOST_KEYS})
     return config
 
 
