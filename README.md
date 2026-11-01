@@ -147,6 +147,55 @@ timers. Remove `factory_ref` before rolling back, or the next apply will
 reinstall the configured ref's SHA. Omit `factory_ref` to retain explicit
 `district apply --upgrade` behavior.
 
+### One repo on several hosts
+
+A repository can run on more than one host so they share its ticket queue:
+
+```toml
+[repo."mikeroySoft/factory"]
+path = "/home/mike/dev/factory"
+hosts = ["local", "ultron"]
+triage_host = "local"
+```
+
+Set either `host` or `hosts`, not both. With more than one host,
+`triage_host` is required and must be one of them; with one host it is
+refused. It is the only host that triages, and `district status` reads the
+repo's state from it. Each host's Factory config carries that host's
+`host_name` and the `triage_host` directly in its `[repo."SLUG"]` table, as
+factory#526 reads them. On the controller that config is this registry, which
+already holds `triage_host`, so `district add` and `district apply` keep
+`host_name = "local"` there. Other keys such as `claim_ttl` set in the
+registry's `[repo."SLUG"]` reach every host.
+`district add --host NAME` on a repo already registered
+on another host appends `NAME` to `hosts`, keeping the first host as
+`triage_host`; a bare `district add` leaves the repo's hosts alone.
+`district rm` removes the units on every listed host and refuses, removing
+nothing, while any of them is running a pass unless you pass `--wait`.
+`district doctor` checks a repo's `toolchain` on every host that runs it.
+
+Several hosts on one repo need Factory's host claims
+([factory#526](https://github.com/mikeroySoft/factory/issues/526)) so two hosts
+never work the same ticket. Until `factory claims --supported` prints exactly `host-claims 1` and exits
+0 on every listed host (run with `~/.local/bin` first on `PATH` and a
+10-second timeout), `district add` refuses to add a second host and
+`district apply` refuses to apply a repo that shares a host with any
+multi-host repo, both with a link to that issue. A host that can't be reached
+is reported as unreachable, not as lacking support. Applying a repo whose hosts
+run no multi-host repo never contacts the fleet hosts.
+
+All hosts of a shared repo run one engine commit. `district apply` resolves
+`factory_ref` on every one of those hosts and installs only when they agree,
+with no partial upgrade. Before installing anywhere it checks the commit's CI
+and running passes on every host that needs it; if a host can't resolve the
+ref, its CI check isn't green, or a pass is running there, no host installs.
+If an install still fails or is deferred, hosts that already moved are
+reinstalled at their previous commit. Either way apply names the host that
+blocked it. `district apply --upgrade` refuses when the selection touches
+these hosts; use `factory_ref`. `district doctor` and `district status` compare the hosts'
+installed engine, `omp` and `droid` versions, and configured worker and review
+models, with one `WARN` row per difference and one `PASS` row when they match.
+
 ### Manual Ultron smoke test
 
 From the controller, after registering `mikeroySoft-org/benito-app` on `ultron`

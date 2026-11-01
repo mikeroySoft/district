@@ -162,21 +162,121 @@ def hosts(data: dict) -> dict[str, dict]:
     return configured
 
 
+CLAIMS_ISSUE = "https://github.com/mikeroySoft/factory/issues/526"
+# District-owned keys: never copied as-is into a host's factory config; claim_keys() sets the
+# factory#526 ones (host_name, triage_host) per host.
+HOST_KEYS = ("host", "hosts", "triage_host", "host_name")
+CLAIMS_PROBE_TIMEOUT = 10
+CLAIMS_PROTOCOL = "host-claims 1"
+# Run a user-installed tool on a remote host the way its service units do: ~/.local/bin first.
+REMOTE_TOOL = 'PATH="$HOME/.local/bin:$PATH"; exec "$0" "$@"'
+
+
+def repo_hosts(table: dict, slug: str = "repo") -> list[str]:
+    """Hosts that run `slug`'s factory: `hosts = [...]`, else the single `host` (default local)."""
+    listed = table.get("hosts")
+    if listed is not None and (not isinstance(listed, list) or not listed
+                               or any(not isinstance(n, str) or not n for n in listed)
+                               or len(set(listed)) != len(listed)):
+        raise DistrictError(f"{slug}: hosts must be a non-empty array of distinct host names")
+    if listed is None or len(listed) == 1:
+        # factory#526 reads triage_host from [repo."SLUG"] directly: alone it would stop triage here
+        if "triage_host" in table:
+            raise DistrictError(f"{slug}: triage_host applies only when hosts lists several hosts")
+    if listed is None:
+        return [table.get("host", "local")]
+    if "host" in table:
+        raise DistrictError(f"{slug}: set host or hosts, not both")
+    if len(listed) > 1 and table.get("triage_host") not in listed:
+        raise DistrictError(f"{slug}: hosts lists {len(listed)} hosts; set triage_host to one of {', '.join(listed)}")
+    return list(listed)
+
+
+def primary_host(table: dict, slug: str = "repo") -> str:
+    """The one host District reads a repo's state from: its triage host when several run it."""
+    listed = repo_hosts(table, slug)
+    return table["triage_host"] if len(listed) > 1 else listed[0]
+
+
+def multi_host(table: dict, slug: str = "repo") -> bool:
+    return len(repo_hosts(table, slug)) > 1
+
+
+def claims_supported(data: dict, name: str) -> bool:
+    """True when `name`'s installed factory coordinates ticket claims across hosts. factory#526's
+    contract: `factory claims --supported` prints exactly `host-claims 1` and exits 0; engines
+    without claims exit 2 (unknown command). A remote host that cannot be reached raises
+    RemoteHostError: that says nothing about its engine."""
+    argv = ["factory", "claims", "--supported"]
+    try:
+        if name == "local":
+            path = f"{Path.home() / '.local/bin'}:{os.environ.get('PATH', '')}"
+            proc = run(argv, quiet=True, timeout=CLAIMS_PROBE_TIMEOUT, env={**os.environ, "PATH": path})
+        else:
+            try:
+                proc = remote_runner(name, hosts(data)[name])(
+                    ["sh", "-c", REMOTE_TOOL, *argv], quiet=True, timeout=CLAIMS_PROBE_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                raise RemoteHostError(name, f"{' '.join(argv)} timed out after {CLAIMS_PROBE_TIMEOUT}s") from None
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == CLAIMS_PROTOCOL
+
+
+def claims_blockers(data: dict, names: list[str]) -> str | None:
+    """Why `names` cannot share one repo yet: engines without claims, then unreachable hosts."""
+    unsupported, unreachable = [], []
+    for name in names:
+        try:
+            if not claims_supported(data, name):
+                unsupported.append(name)
+        except RemoteHostError as exc:
+            unreachable.append(str(exc))
+    reasons = [f"the factory on {', '.join(unsupported)} does not coordinate ticket claims yet ({CLAIMS_ISSUE})"] \
+        if unsupported else []
+    return "; ".join(reasons + unreachable) or None
+
+
 def factory_host(data: dict, slug: str) -> str | dict:
     table = repos(data).get(slug)
     if table is None:
         raise DistrictError(f"{slug} is not registered (district add)")
-    name = table.get("host", "local")
-    if name == "local":
-        return "local"
     configured = hosts(data)
-    if not isinstance(name, str) or name not in configured:
-        raise DistrictError(f"{slug}: host {name!r} is not defined in [hosts]")
-    return configured[name]
+    listed = repo_hosts(table, slug)
+    for name in listed:
+        if name != "local" and name not in configured:
+            raise DistrictError(f"{slug}: host {name!r} is not defined in [hosts]")
+    name = primary_host(table, slug)
+    return "local" if name == "local" else configured[name]
 
 
 def is_remote(data: dict, slug: str) -> bool:
-    return factory_host(data, slug) != "local"
+    """True when the controller runs none of `slug`'s factories (every listed host is remote)."""
+    factory_host(data, slug)
+    return "local" not in repo_hosts(repos(data)[slug], slug)
+
+
+def claim_keys(table: dict, name: str, slug: str = "repo") -> dict:
+    """factory#526 keys for host `name`'s `[repo."SLUG"]`: its own host_name and the triage host,
+    only when several hosts run the repo (a single host keeps claims off)."""
+    if len(repo_hosts(table, slug)) > 1:
+        return {"host_name": name, "triage_host": table["triage_host"]}
+    return {}
+
+
+def sync_local_claims(data: dict) -> bool:
+    """The controller's own factory config is this registry, which already holds triage_host, so
+    keep `host_name = "local"` in repos that run on local and other hosts. True when `data` changed."""
+    changed = False
+    for slug, table in repos(data).items():
+        name = claim_keys(table, "local", slug).get("host_name") if "local" in repo_hosts(table, slug) else None
+        if table.get("host_name") != name:
+            if name:
+                table["host_name"] = name
+            else:
+                del table["host_name"]
+            changed = True
+    return changed
 
 
 def repo_table(data: dict, slug: str) -> dict:
@@ -490,8 +590,10 @@ def remote_config(data: dict, name: str) -> dict:
         result["defaults"] = defaults
     tables = {}
     for slug, table in repos(data).items():
-        if table.get("host", "local") == name:
-            tables[slug] = {key: copy.deepcopy(value) for key, value in table.items() if key != "host"}
+        listed = repo_hosts(table, slug)
+        if name in listed:
+            tables[slug] = {key: copy.deepcopy(value) for key, value in table.items() if key not in HOST_KEYS}
+            tables[slug].update(claim_keys(table, name, slug))
     if tables:
         result["repo"] = tables
     return result

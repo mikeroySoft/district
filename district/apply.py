@@ -7,6 +7,7 @@ never modifies a committed file. Exit nonzero when any repo is not converged.
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import json
 import math
@@ -49,7 +50,7 @@ def factory_extras(data: dict) -> list[str]:
 def _host_repos(data: dict, name: str = "local") -> dict[str, dict]:
     return {
         slug: table for slug, table in host.repos(data).items()
-        if table.get("host", "local") == name
+        if name in host.repo_hosts(table, slug)
     }
 
 
@@ -104,10 +105,95 @@ def _defer(record: install_state.ApplyRun | None, target: str, busy: list[str]) 
     print(f"{target} deferred ({reason})")
 
 
+def _ci_state(source_cmd, slug: str, sha: str) -> str:
+    """unavailable, missing, pending, failed or success for `sha`'s GitHub check runs."""
+    checks = source_cmd(["gh", "api", "--paginate", "--slurp",
+                         f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
+    if checks.returncode:
+        return "unavailable"
+    try:
+        payload = json.loads(checks.stdout)
+        pages = payload if isinstance(payload, list) else [payload]
+        runs = [check for page in pages for check in page["check_runs"]]
+        total = pages[0]["total_count"]
+    except (ValueError, KeyError, TypeError, IndexError):
+        runs, total = [], None
+    valid_runs = [check for check in runs if isinstance(check, dict)]
+    if not valid_runs or len(valid_runs) != len(runs) or total != len(runs):
+        return "missing"
+    if any(check.get("status") != "completed" for check in valid_runs):
+        return "pending"
+    if any(check.get("conclusion") not in {"success", "skipped", "neutral"} for check in valid_runs):
+        return "failed"
+    return "success"
+
+
+def _engine_source(data: dict, host_name: str, run_cmd):
+    """(runner, path) of the checkout `host_name` resolves engine refs from."""
+    source = host.factory_source(data, host_name)
+    source_cmd = run_cmd
+    if source is None:
+        source = str(host.default(data, "factory_source"))
+        source_cmd = run
+    if isinstance(source_cmd, host.RemoteRunner) and source.startswith("~/"):
+        source = str(Path(source_cmd.facts()["home"]) / source[2:])
+    if isinstance(source_cmd, host.RemoteRunner):
+        return source_cmd, Path(source)
+    return source_cmd, Path(os.path.expanduser(source))
+
+
+def _resolve_engine(ref: str, source_cmd, src: Path, pin: tuple[str, str] | None = None) -> tuple[str, str, str, str]:
+    """(origin, slug, ref, sha) for `ref` (or `pin`) at `src`'s GitHub origin; OSError when unreachable."""
+    if isinstance(source_cmd, host.RemoteRunner):
+        if source_cmd(["test", "-d", str(src)]).returncode:
+            raise OSError(f"{src} does not exist")
+    elif not src.is_dir():
+        raise OSError(f"{src} does not exist")
+    origin_proc = source_cmd(["git", "remote", "get-url", "origin"], cwd=src)
+    if origin_proc.returncode:
+        raise OSError(origin_proc.stderr.strip() or "could not read origin")
+    origin = origin_proc.stdout.strip()
+    slug = github_slug(origin)
+    if slug is None:
+        raise OSError(f"{src} origin is not a GitHub repository")
+    if pin is not None:
+        resolved_ref, sha = pin
+    elif ref == "latest-odd":
+        resolved = source_cmd(["git", "ls-remote", "--tags", origin], cwd=src)
+        if resolved.returncode:
+            raise OSError(resolved.stderr.strip() or "ls-remote failed")
+        target = latest_odd_tag(resolved.stdout)
+        if target is None:
+            raise OSError(f"no odd-patch tag on {origin}")
+        resolved_ref, sha = target
+    else:
+        resolved = source_cmd([
+            "git", "ls-remote", "--exit-code", origin,
+            f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}",
+        ], cwd=src)
+        if resolved.returncode:
+            raise OSError(resolved.stderr.strip() or "ls-remote failed")
+        remote_refs = {
+            parts[1]: parts[0].lower()
+            for line in resolved.stdout.splitlines()
+            if len(parts := line.split()) == 2 and SHA.fullmatch(parts[0].lower())
+        }
+        for candidate in (f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"):
+            if candidate in remote_refs:
+                resolved_ref, sha = ref, remote_refs[candidate]
+                break
+        else:
+            raise OSError("remote ref did not resolve to one commit")
+    return origin, slug, resolved_ref, sha
+
+
 def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *, backend=None,
                      host_name: str = "local", repos: dict[str, dict] | None = None,
-                     run_cmd=None) -> str:
-    """Install a changed, CI-green remote Factory ref without modifying its checkout."""
+                     run_cmd=None, pin: tuple[str, str] | None = None, verify_ci: bool = True) -> str:
+    """Install a changed, CI-green remote Factory ref without modifying its checkout.
+
+    `pin` = (ref, sha) installs that commit instead of resolving `factory_ref` here; a fleet
+    passes the sha every host agreed on, and a rollback passes the previous one with no CI check."""
     run_cmd = run if run_cmd is None else run_cmd
     backend = backend or host.service_backend()
     repos = _host_repos(data, host_name) if repos is None else repos
@@ -120,56 +206,12 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     if not isinstance(ref, str) or not ref.strip():
         raise DistrictError("[defaults].factory_ref must be a non-empty string")
     extras = factory_extras(data)
-    source = host.factory_source(data, host_name)
-    source_cmd = run_cmd
-    if source is None:
-        source = str(host.default(data, "factory_source"))
-        source_cmd = run
-    if isinstance(source_cmd, host.RemoteRunner) and source.startswith("~/"):
-        source = str(Path(source_cmd.facts()["home"]) / source[2:])
-    src = Path(os.path.expanduser(source)) if not isinstance(source_cmd, host.RemoteRunner) else Path(source)
+    source_cmd, src = _engine_source(data, host_name, run_cmd)
     try:
-        if isinstance(source_cmd, host.RemoteRunner):
-            if source_cmd(["test", "-d", str(src)]).returncode:
-                raise OSError(f"{src} does not exist")
-        elif not src.is_dir():
-            raise OSError(f"{src} does not exist")
-        origin_proc = source_cmd(["git", "remote", "get-url", "origin"], cwd=src)
-        if origin_proc.returncode:
-            raise OSError(origin_proc.stderr.strip() or "could not read origin")
-        origin = origin_proc.stdout.strip()
-        slug = github_slug(origin)
-        if slug is None:
-            raise OSError(f"{src} origin is not a GitHub repository")
-        if ref == "latest-odd":
-            resolved = source_cmd(["git", "ls-remote", "--tags", origin], cwd=src)
-            if resolved.returncode:
-                raise OSError(resolved.stderr.strip() or "ls-remote failed")
-            target = latest_odd_tag(resolved.stdout)
-            if target is None:
-                raise OSError(f"no odd-patch tag on {origin}")
-            resolved_ref, sha = target
-        else:
-            resolved = source_cmd([
-                "git", "ls-remote", "--exit-code", origin,
-                f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}",
-            ], cwd=src)
-            if resolved.returncode:
-                raise OSError(resolved.stderr.strip() or "ls-remote failed")
-            remote_refs = {
-                parts[1]: parts[0].lower()
-                for line in resolved.stdout.splitlines()
-                if len(parts := line.split()) == 2 and SHA.fullmatch(parts[0].lower())
-            }
-            for candidate in (f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"):
-                if candidate in remote_refs:
-                    resolved_ref, sha = ref, remote_refs[candidate]
-                    break
-            else:
-                raise OSError("remote ref did not resolve to one commit")
+        origin, slug, resolved_ref, sha = _resolve_engine(ref, source_cmd, src, pin)
     except OSError as exc:
-        if host_name != "local":
-            print(f"engine:{host_name} FAIL factory source {src}: {exc}")
+        if host_name != "local" or pin is not None:
+            print(f"{engine_target} FAIL factory source {src}: {exc}")
             return "failed"
         print(f"engine {ref} unresolved: {exc}; keeping installed engine")
         return "unchanged"
@@ -178,27 +220,10 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
             record.clear_deferred(engine_target)
         print(f"engine {sha[:7]} ({resolved_ref})")
         return "unchanged"
-    checks = source_cmd(["gh", "api", "--paginate", "--slurp",
-                         f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
-    if checks.returncode:
+    state = _ci_state(source_cmd, slug, sha) if verify_ci else "success"
+    if state == "unavailable":
         print(f"engine {sha[:12]} CI unavailable; keeping installed engine")
         return "unchanged"
-    try:
-        payload = json.loads(checks.stdout)
-        pages = payload if isinstance(payload, list) else [payload]
-        runs = [check for page in pages for check in page["check_runs"]]
-        total = pages[0]["total_count"]
-    except (ValueError, KeyError, TypeError, IndexError):
-        runs, total = [], None
-    valid_runs = [check for check in runs if isinstance(check, dict)]
-    if not valid_runs or len(valid_runs) != len(runs) or total != len(runs):
-        state = "missing"
-    elif any(check.get("status") != "completed" for check in valid_runs):
-        state = "pending"
-    elif any(check.get("conclusion") not in {"success", "skipped", "neutral"} for check in valid_runs):
-        state = "failed"
-    else:
-        state = "success"
     if state != "success":
         print(f"engine {sha[:12]} CI {state}; keeping installed engine")
         return "unchanged"
@@ -247,6 +272,88 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     return "applied"
 
 
+
+
+def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
+                           contexts: dict[str, tuple]) -> str:
+    """One engine sha on every host that shares a repo: resolve `factory_ref` on each host, check
+    CI and running passes on every host that needs the sha, install only when all of that agrees,
+    and roll moved hosts back when an install still fails or defers.
+
+    `contexts` maps host name to (run_cmd, backend, repos)."""
+    ref = data.get("defaults", {}).get("factory_ref")
+    if ref is None:
+        return "unchanged"
+    names = ", ".join(contexts)
+    resolved, sources = {}, {}
+    for name, (run_cmd, _, _) in contexts.items():
+        source_cmd, src = _engine_source(data, name, run_cmd)
+        try:
+            _, slug, resolved_ref, sha = _resolve_engine(ref, source_cmd, src)
+        except (OSError, host.RemoteHostError) as exc:
+            print(f"engine fleet ({names}) held: {name} cannot resolve {ref}: {exc}; every host keeps its engine")
+            return "failed"
+        resolved[name] = (resolved_ref, sha)
+        sources[name] = (source_cmd, slug)
+    if len({sha for _, sha in resolved.values()}) > 1:
+        detail = ", ".join(f"{name} {sha[:12]}" for name, (_, sha) in resolved.items())
+        print(f"engine fleet ({names}) held: {ref} resolves differently ({detail}); every host keeps its engine")
+        return "failed"
+    pin = next(iter(resolved.values()))
+    for name, (_, backend, repos) in contexts.items():
+        if installed_engine_commit(data, name) == pin[1]:
+            continue
+        held = None
+        try:
+            if (state := _ci_state(*sources[name], pin[1])) != "success":
+                held, result = f"CI {state}", "unchanged"
+            elif busy := busy_units([f"{host.unit_name(slug)}.service" for slug in repos], backend):
+                _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
+                held, result = f"busy: {', '.join(busy)}", "deferred"
+        except host.RemoteHostError as exc:
+            held, result = str(exc), "failed"
+        if held:
+            print(f"engine fleet ({names}) held by {name} ({held}): every host keeps its engine")
+            return result
+    before = {name: copy.deepcopy(host.engine(data, name)) for name in contexts}
+    moved = []
+    for name, (run_cmd, backend, repos) in contexts.items():
+        # A host that drops (ssh 255) or errors mid-step fails like a failed install, so the
+        # hosts already moved still roll back and the row names it (#134).
+        try:
+            result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
+                                      run_cmd=run_cmd, pin=pin, verify_ci=False)
+            why = result
+        except (host.RemoteHostError, DistrictError) as exc:
+            result, why = "failed", f"failed: {exc}"
+        if result == "applied":
+            moved.append(name)
+            continue
+        if result == "unchanged" and installed_engine_commit(data, name) == pin[1]:
+            continue
+        stuck = []
+        for back in moved:
+            previous = before[back]
+            back_cmd, back_backend, back_repos = contexts[back]
+            try:
+                restored = bool(previous and previous.get("sha")) and reconcile_engine(
+                    data, record, backend=back_backend, host_name=back, repos=back_repos, run_cmd=back_cmd,
+                    pin=(previous.get("ref", "previous"), previous["sha"]), verify_ci=False,
+                ) == "applied"
+            except (host.RemoteHostError, DistrictError) as exc:
+                print(f"engine:{back} rollback FAIL: {exc}")
+                restored = False
+            if not restored:
+                stuck.append(back)
+                continue
+            host.set_engine(data, back, previous)
+        host.save(data)
+        rolled = [back for back in moved if back not in stuck]
+        print(f"engine fleet ({names}) held by {name} ({why}): every host keeps its engine"
+              + (f"; rolled back {', '.join(rolled)}" if rolled else "")
+              + (f"; FAIL could not roll back {', '.join(stuck)}" if stuck else ""))
+        return "failed" if result == "failed" or stuck else result
+    return "applied" if moved else "unchanged"
 
 
 def now() -> datetime:
@@ -623,25 +730,31 @@ def smoke(slugs, backend=None, *, run_cmd=None) -> tuple[int, list[str]]:
     return units, fails
 
 
-def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argparse.Namespace,
-                record: install_state.ApplyRun, status: str) -> tuple[list[dict], int, tuple[int, list[str]]]:
-    all_repos = _host_repos(data, host_name)
+def _host_context(data: dict, host_name: str):
+    """(run_cmd, backend) for one host; a remote host gets its synced factory config first."""
     if host_name == "local":
-        run_cmd = run
-        backend = host.service_backend()
-        install_env = None
-    else:
-        target = data["hosts"][host_name]
-        run_cmd = host.remote_runner(host_name, target)
-        backend = host.service_backend(target, run=run_cmd)
-        host.sync_remote_config(data, host_name, run_cmd)
+        return run, host.service_backend()
+    target = data["hosts"][host_name]
+    run_cmd = host.remote_runner(host_name, target)
+    host.sync_remote_config(data, host_name, run_cmd)
+    return run_cmd, host.service_backend(target, run=run_cmd)
+
+
+def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argparse.Namespace,
+                record: install_state.ApplyRun, status: str, engine_done: bool = False,
+                context: tuple | None = None) -> tuple[list[dict], int, tuple[int, list[str]]]:
+    """`context` is the (run_cmd, backend) the fleet engine step already built for this host."""
+    all_repos = _host_repos(data, host_name)
+    run_cmd, backend = context or _host_context(data, host_name)
+    install_env = None
+    if host_name != "local":
         facts = run_cmd.facts()
         install_env = {"PATH": host.service_path(facts["path"], home=Path(facts["home"]))}
 
     rows = []
     completed = {}
     code = 0
-    engine_result = (
+    engine_result = "unchanged" if engine_done else (
         upgrade(
             data, args.upgrade, record, backend=backend, host_name=host_name,
             repos=all_repos, run_cmd=run_cmd,
@@ -740,19 +853,48 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         if not selected:
             print("no repositories registered (district add)")
             return 0
-        status, warnings = policy(data)
-        host.save(data)
         groups: dict[str, dict[str, dict]] = {}
         for slug, table in selected.items():
-            groups.setdefault(table.get("host", "local"), {})[slug] = table
+            for name in host.repo_hosts(table, slug):
+                groups.setdefault(name, {})[slug] = table
+        fleet = {slug: table for slug, table in registered.items() if host.multi_host(table, slug)}
+        fleet_hosts = list(dict.fromkeys(name for slug, table in fleet.items() for name in host.repo_hosts(table, slug)))
+        # A selection that runs on no fleet host leaves the fleet alone: single-host repos keep
+        # their old behavior (#134). One that does moves every fleet host's engine together.
+        if not any(name in groups for name in fleet_hosts):
+            fleet, fleet_hosts = {}, []
+        if fleet:
+            if blocked := host.claims_blockers(data, fleet_hosts):
+                raise DistrictError(f"{', '.join(fleet)} lists several hosts, but {blocked}; list one host until it does")
+            if args.upgrade:
+                raise DistrictError(
+                    f"{', '.join(fleet)} lists several hosts; --upgrade installs per host, so set "
+                    "[defaults].factory_ref and run `district apply` to move every host to one engine sha"
+                )
+        host.sync_local_claims(data)
+        status, warnings = policy(data)
+        host.save(data)
 
         rows = []
         smokes = []
         code = 0
+        contexts = {}
+        if fleet_hosts:
+            try:
+                for name in fleet_hosts:
+                    run_cmd, backend = _host_context(data, name)
+                    contexts[name] = (run_cmd, backend, _host_repos(data, name))
+                if reconcile_fleet_engine(data, record, contexts) == "failed":
+                    code = 1
+            except (host.RemoteHostError, DistrictError) as exc:
+                contexts = {}
+                print(f"engine fleet ({', '.join(fleet_hosts)}) held: {exc}; every host keeps its engine")
+                code = 1
         for host_name, targets in groups.items():
             try:
                 host_rows, host_code, host_smoke = _apply_host(
-                    data, host_name, targets, args, record, status,
+                    data, host_name, targets, args, record, status, engine_done=host_name in fleet_hosts,
+                    context=contexts[host_name][:2] if host_name in contexts else None,
                 )
             except host.RemoteHostError as exc:
                 for slug in targets:

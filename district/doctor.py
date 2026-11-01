@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from ipaddress import ip_address
 import json
 import os
@@ -177,7 +178,8 @@ def toolchain_rows(data: dict) -> list[dict[str, str]]:
         if not isinstance(profile, str) or not profile:
             rows.append(row("FAIL", f"repo {slug} toolchain", "must be a non-empty string"))
             continue
-        requirements.setdefault(table.get("host", "local"), set()).add(profile)
+        for name in host.repo_hosts(table, slug):
+            requirements.setdefault(name, set()).add(profile)
     configured = {"local": {
         "platform": "macos" if sys.platform == "darwin" else "linux",
     }, **host.hosts(data)}
@@ -283,6 +285,82 @@ def factory_rows(data: dict) -> list[dict[str, str]]:
     return [row("PASS", "factory", version)]
 
 
+PARITY_WORKER_CLIS = ("omp", "droid")
+
+
+def _tool_version(data: dict, name: str, tool: str) -> str:
+    table = host.hosts(data).get(name, {})
+    argv = [tool, "--version"] if name == "local" else ["sh", "-c", host.REMOTE_TOOL, tool, "--version"]
+    try:
+        proc = _host_run(name, table, argv)
+    except (OSError, subprocess.TimeoutExpired):
+        return "unavailable"
+    lines = proc.stdout.strip().splitlines()
+    return lines[0].strip() if proc.returncode == 0 and lines else "missing"
+
+
+def _models(config: dict) -> str:
+    """`label=model` for each configured worker and the reviewer, read from `--model` arguments."""
+    found = []
+    commands = [(f"workers.{label}", worker) for label, worker in sorted(config.get("workers", {}).items())]
+    commands.append(("review", config.get("review", {})))
+    for label, table in commands:
+        if not isinstance(table, dict):
+            continue
+        argv = [str(arg) for arg in table.get("command", [])]
+        model = table.get("model")
+        for i, arg in enumerate(argv):
+            if arg == "--model" and i + 1 < len(argv):
+                model = argv[i + 1]
+            elif arg.startswith("--model="):
+                model = arg.split("=", 1)[1]
+        found.append(f"{label}={model or 'default'}")
+    return " ".join(found)
+
+
+def _effective(data: dict, name: str, table: dict) -> dict:
+    defaults = host.remote_config(data, name).get("defaults", {}) if name != "local" else {
+        key: value for key, value in data.get("defaults", {}).items() if key != "engine"
+    }
+    config = copy.deepcopy(defaults)
+    host._merge(config, {key: copy.deepcopy(value) for key, value in table.items()
+                         if key not in host.HOST_KEYS})
+    return config
+
+
+def parity_rows(data: dict) -> list[dict[str, str]]:
+    """Compare engine, worker CLIs and models across every host that runs one repo; drift is WARN."""
+    return [item for rows in parity_by_slug(data).values() for item in rows]
+
+
+def parity_by_slug(data: dict) -> dict[str, list[dict[str, str]]]:
+    by_slug = {}
+    for slug, table in host.repos(data).items():
+        names = host.repo_hosts(table, slug)
+        if len(names) < 2:
+            continue
+        rows = by_slug.setdefault(slug, [])
+        checks: list[tuple[str, dict[str, str]]] = []
+        engines = {}
+        for name in names:
+            version = _tool_version(data, name, "factory")
+            installed = next(iter(re.findall(r"\b[0-9a-fA-F]{7,40}\b", version)), None)
+            recorded = (host.engine(data, name) or {}).get("sha")
+            # Only a sha shortens: two sha-less versions (`factory 0.4.6`, `factory 0.4.7`) compare whole.
+            sha = installed or (str(recorded) if recorded else None)
+            engines[name] = sha[:7] if sha else version
+        checks.append(("engine", engines))
+        for tool in PARITY_WORKER_CLIS:
+            checks.append((f"worker {tool}", {name: _tool_version(data, name, tool) for name in names}))
+        checks.append(("models", {name: _models(_effective(data, name, table)) for name in names}))
+        drift = [(what, values) for what, values in checks if len(set(values.values())) > 1]
+        for what, values in drift:
+            rows.append(row("WARN", f"parity {slug} {what}", "; ".join(f"{n}: {v}" for n, v in values.items())))
+        if not drift:
+            rows.append(row("PASS", f"parity {slug}", f"{', '.join(names)}: same engine, worker CLIs and models"))
+    return by_slug
+
+
 def repo_rows(data: dict) -> list[dict[str, str]]:
     rows = []
     for slug, table in host.repos(data).items():
@@ -384,6 +462,7 @@ def check() -> list[dict[str, str]]:
     rows.append(gh_auth())
     rows += toolchain_rows(data)
     rows += remote_config_rows(data)
+    rows += parity_rows(data)
 
     state = backend.manager_status()
     manager = "systemd user manager" if isinstance(backend, SystemdUserBackend) else "launchd user manager"
