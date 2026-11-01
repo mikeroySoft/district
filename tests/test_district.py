@@ -433,6 +433,8 @@ class HostTest(DistrictCase):
             ({"hosts": ["local", "ultron"], "host": "ultron", "triage_host": "local"}, "set host or hosts, not both"),
             ({"hosts": []}, "non-empty array of distinct host names"),
             ({"hosts": ["ultron", "ultron"]}, "non-empty array of distinct host names"),
+            ({"hosts": 5}, "non-empty array of distinct host names"),
+            ({"hosts": "ultron"}, "non-empty array of distinct host names"),
             ({"hosts": ["local", "benito"], "triage_host": "local"}, "host 'benito' is not defined in [hosts]"),
             # factory#526 reads triage_host straight from [repo."SLUG"]: on one host it would stop triage there
             ({"hosts": ["local"], "triage_host": "local"}, "triage_host applies only when hosts lists several hosts"),
@@ -514,6 +516,14 @@ class HostTest(DistrictCase):
         for error in (subprocess.TimeoutExpired(["factory"], 10), OSError("no factory")):
             with self.subTest(error=type(error).__name__), mock.patch.object(host, "run", side_effect=error):
                 self.assertFalse(host.claims_supported(data, "local"))
+        # an unreachable host is not an engine without claims: say which it is
+        for error, detail in ((subprocess.TimeoutExpired(["ssh"], 10), "factory claims --supported timed out after 10s"),
+                              (host.RemoteHostError("ultron", "ssh: connect refused"), "ssh: connect refused")):
+            with self.subTest(remote=type(error).__name__), \
+                    mock.patch.object(host, "remote_runner", return_value=mock.Mock(side_effect=error)):
+                with self.assertRaises(host.RemoteHostError) as caught:
+                    host.claims_supported(data, "ultron")
+                self.assertEqual(str(caught.exception), f"host ultron unreachable: {detail}")
 
     def test_remote_config_host_override_can_unset_inherited_key(self) -> None:
         data = {
@@ -1600,6 +1610,64 @@ class ApplyTest(DistrictCase):
         self.assertEqual([c for c in self.calls("factory") if c != "claims --supported"], [])
         self.assertFalse(any("factory install" in " ".join(call) for call in self.ssh_calls()))
 
+    def test_apply_reports_unreachable_fleet_host_as_unreachable(self) -> None:
+        repo = self.repo(toml="")
+        host.save({
+            "defaults": {"factory_ref": "main"},
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local"}},
+        })
+
+        def probe(data, name):
+            if name == "ultron":
+                raise host.RemoteHostError("ultron", "ssh: connect refused")
+            return True
+
+        with mock.patch.object(host, "claims_supported", side_effect=probe), \
+                mock.patch.object(apply, "_apply_host") as applied:
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("acme/widgets lists several hosts, but host ultron unreachable: ssh: connect refused", out)
+        self.assertNotIn("does not coordinate ticket claims", out)
+        applied.assert_not_called()
+
+    def test_single_host_repo_apply_never_touches_fleet_hosts(self) -> None:
+        """#134 'single-host repos: no behavior change': `district apply SLUG` for a repo off the
+        fleet neither probes, syncs, nor reconciles the engine on the fleet hosts, even with --upgrade."""
+        host.save({
+            "defaults": {"factory_ref": "main"},
+            "hosts": {name: {"ssh": f"factory@{name}.example", "platform": "macos"} for name in ("ultron", "benito")},
+            "repo": {
+                "acme/widgets": {"path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron"},
+                "acme/solo": {"path": str(self.repo(toml=""))},
+            },
+        })
+        for argv in (("apply", "acme/solo"), ("apply", "acme/solo", "--upgrade")):
+            with self.subTest(argv=argv):
+                applied = []
+
+                def apply_host(data, name, targets, args, record, status, engine_done=False, context=None):
+                    applied.append((name, sorted(targets), engine_done, context))
+                    return [], 0, (0, [])
+
+                with mock.patch.object(host, "claims_supported") as probed, \
+                        mock.patch.object(apply, "_host_context") as built, \
+                        mock.patch.object(apply, "reconcile_fleet_engine") as reconciled, \
+                        mock.patch.object(apply, "_apply_host", side_effect=apply_host):
+                    code, out = self.district(*argv)
+
+                self.assertEqual(code, 0, out)
+                self.assertEqual(applied, [("local", ["acme/solo"], False, None)])
+                probed.assert_not_called()
+                built.assert_not_called()
+                reconciled.assert_not_called()
+
+        with mock.patch.object(host, "claims_supported", return_value=True):
+            code, out = self.district("apply", "acme/widgets", "--upgrade")
+        self.assertEqual(code, 1, out)
+        self.assertIn("acme/widgets lists several hosts; --upgrade installs per host", out)
+
     def fleet_apply(self, context):
         """`district apply` on a local+ultron repo with claims supported; `context` replaces _host_context."""
         repo = self.repo(toml="")
@@ -1688,8 +1756,8 @@ class ApplyTest(DistrictCase):
             logs = {"ultron": [], "benito": []}
             data = host.load()
             contexts = {
-                name: (backend(spec[3] if len(spec) > 3 else False),
-                       runner(name, spec[0], spec[1], logs[name], *spec[2:]),
+                name: (runner(name, spec[0], spec[1], logs[name], *spec[2:]),
+                       backend(spec[3] if len(spec) > 3 else False),
                        {"acme/widgets": data["repo"]["acme/widgets"]})
                 for name, spec in (("ultron", ultron), ("benito", benito))
             }
