@@ -273,10 +273,18 @@ def _downgrade_guard(slug: str, previous: str | None, target: str, run_cmd,
         raise DistrictError(f"cannot establish ancestry {previous} -> {target}; compare unavailable")
 
 
+def _engine_roles(repos: dict) -> tuple[set[str], set[str]]:
+    """Registered main units take precedence over dashboard-looking names."""
+    mains = {f"{host.unit_name(slug)}.service" for slug in repos}
+    dashboards = {f"{host.unit_name(slug)}-dashboard.service" for slug in repos} - mains
+    return mains, dashboards
+
+
 def _engine_units(repos: dict, backend, *, timeout: float) -> tuple[list[str], list[str]]:
-    units = set(backend.factory_units(timeout=timeout))
-    units.update(f"{host.unit_name(slug)}{suffix}" for slug in repos for suffix in (".service", ".timer"))
-    services = sorted(name for name in units if name.endswith(".service") and not name.endswith("-dashboard.service"))
+    mains, dashboards = _engine_roles(repos)
+    units = set(backend.factory_units(timeout=timeout)) | mains
+    units.update(f"{name.removesuffix('.service')}.timer" for name in mains)
+    services = sorted(name for name in units if name.endswith(".service") and name not in dashboards)
     timers = sorted(name for name in units if name.endswith(".timer"))
     return services, timers
 
@@ -502,14 +510,12 @@ def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadli
     except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
             host.RemoteHostError) as exc:
         return [f"Factory process ownership unavailable: {exc}", *processes], processes
-    mains = {f"{host.unit_name(slug)}.service" for slug in repos}
-    dashboards = {f"{host.unit_name(slug)}-dashboard.service" for slug in repos} - mains
+    mains, dashboards = _engine_roles(repos)
     processes = [work for work in processes if not (
         work.endswith("ambiguous Factory command text") and owners.get(work.split()[1]) in dashboards)]
     outside = [work for work in processes
-               if (work.endswith("ambiguous Factory command text") and owners.get(work.split()[1]) not in mains
-                   or work.endswith(("factory gate", "factory dispatch")) and
-                   (work.split()[1] not in owners or owners[work.split()[1]].endswith("-dashboard.service")))]
+               if owners.get(work.split()[1]) not in mains
+               and work.endswith(("factory gate", "factory dispatch", "ambiguous Factory command text"))]
     return outside, processes
 
 
@@ -1179,9 +1185,7 @@ def restart_dashboards(repos: dict[str, dict], backend=None, *, deadline: float 
     backend = backend or host.service_backend()
     if deadline is None:
         deadline = time.monotonic() + RESTORE_TIMEOUT
-    dashboards = {f"{host.unit_name(slug)}-dashboard.service" for slug in repos}
-    dashboards.update(name for name in backend.factory_units(timeout=remaining_timeout(deadline))
-                      if name.endswith("-dashboard.service"))
+    _, dashboards = _engine_roles(repos)
     for dash in sorted(dashboards):
         if backend.status(dash, timeout=remaining_timeout(deadline)).loaded:
             proc = backend.start(dash, restart=True, check=False, timeout=remaining_timeout(deadline))

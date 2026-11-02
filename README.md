@@ -180,16 +180,21 @@ and verifies both the receipt revision and CLI. A failed install or verification
 reinstalls and verifies the previous revision only after the rollback guards
 below pass. The `finally` path restores exactly the timers District paused;
 unverified tools or blocked automatic rollback retain paused recovery intent.
-Dashboards restart after a verified change. If both installs fail, affected
-repos fail without trying another `factory` on `PATH`.
+Only loaded, registered dashboards restart after a verified change. Roles come
+from the registry, not a `-dashboard` suffix: `acme/ops-dashboard` drains its main
+`factory-ops-dashboard.service` and restarts only
+`factory-ops-dashboard-dashboard.service`. Registered main units take precedence
+over any colliding dashboard name; unregistered suffix-looking units are not exempt.
+If both installs fail, affected repos fail without trying another `factory` on `PATH`.
 Active/activating/deactivating `handland-*` user units and hand-run uv-tool
 `factory gate` / `factory dispatch` processes defer a changed engine install.
 District identifies managed passes on the owning host by systemd cgroup, or
 launchd label PID and descendants. Their dispatch processes drain after timer
-pause rather than deferring the window. Only actual `factory dashboard`
-commands are exempt: a gate/dispatch inside a dashboard cgroup or launchd job,
-including descendants, is outside work and defers replacement. Dashboard
-services remain excluded from the service wait. Managed exemptions require an
+pause rather than deferring the window. Exact argv proving `factory dashboard`
+is exempt. An exact gate/dispatch inside a dashboard cgroup remains outside work;
+on text-only platforms only unchanged registered dashboard ownership grants the
+exemption. Registered dashboard services are excluded from the service wait.
+Managed exemptions require an
 unchanged owning-host `(PID, start time)`: Linux uses `/proc/PID/stat` field 22
 (after the final comm parenthesis). Linux reads NUL-separated `/proc/<pid>/cmdline`
 and brackets it with start-time observations on the owning host. Remote observations
