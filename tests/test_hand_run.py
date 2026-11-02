@@ -379,6 +379,26 @@ class HandRunTest(unittest.TestCase):
         self.assertIn("/tmp/external-live.sh", result.stderr)
         self.assertFalse(self.launch_log.exists())
 
+    def test_source_inside_backticks_rejects_live_dependency(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        self.script.write_text('#!/bin/bash\nvalue="`source ./settings.inc`"\n')
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/tmp/external-live.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
+    def test_concatenated_literal_source_arguments_reject_live_dependency(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        for argument in ('"./settings".inc', './"settings.inc"', "'./set'\"tings\".inc"):
+            with self.subTest(argument=argument):
+                self.script.write_text(f"#!/bin/bash\nsource {argument}\n")
+                result = self.command("launch", "532-chain", self.script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("/tmp/external-live.sh", result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
