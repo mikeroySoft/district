@@ -235,6 +235,11 @@ probe or apply must name `ultron` without running commands for factories assigne
 to other hosts.
 
 ## Hand-build preflight
+**Blocked pending a public Factory preflight CLI.** The current implementation
+imports Factory internals and must not be used to prepare a new frozen run until
+that boundary violation is resolved. Factory 0.4.6 has no read-only packaging
+command; the regular `factory gate` runs checks and is not a preflight substitute.
+
 
 `district.handbuild` checks bug-repro **packaging**, without running a test or
 gate, changing git state, or touching timers. Run it with the installed Factory
@@ -298,8 +303,7 @@ README.
 uv run python -m unittest discover -s tests
 ```
 
-District's normal CLI shells out to `factory`. The optional hand-build harness
-instead runs inside Factory's Python to reuse its authoritative parsers.
+District shells out to the `factory` CLI and never imports Factory internals.
 Per-repo facts and actions belong on `factory`, not in a second implementation.
-The hand-build fixture tests require an installed Factory (otherwise skipped);
-all git repos, issue responses, and gate launches in those tests are isolated.
+The hand-build implementation currently violates this boundary and requires an
+upstream public preflight CLI or an explicit owner-approved exception before use.
