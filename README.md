@@ -167,11 +167,13 @@ version in its path. Every managed unit and launchd job uses that tool's Python,
 and District invokes its CLI to render units. When the target changes, District
 pauses the active Factory timers, waits up to `[defaults].engine_idle_timeout`
 (default `"30min"`) for non-dashboard services and uv-tool Factory processes
-to become idle, installs with `uv tool install
---force`, and verifies both the receipt revision and CLI. A failed install or
-verification reinstalls and verifies the previous revision. The `finally` path
-restores exactly the timers District paused; dashboards restart on the new code.
-If both installs fail, affected repos fail without trying another `factory` on `PATH`.
+to become idle, installs the one `factory` tool with `uv tool install --force`,
+and verifies both the receipt revision and CLI. A failed install or verification
+reinstalls and verifies the previous revision only after the rollback guards
+below pass. The `finally` path restores exactly the timers District paused;
+unverified tools or blocked automatic rollback retain paused recovery intent.
+Dashboards restart after a verified change. If both installs fail, affected
+repos fail without trying another `factory` on `PATH`.
 Active/activating/deactivating `handland-*` user units and hand-run uv-tool
 `factory gate` / `factory dispatch` processes defer a changed engine install.
 District identifies managed passes on the owning host by systemd cgroup, or

@@ -163,12 +163,19 @@ Reconcile the host to the registry. Idempotent; safe to run any time.
   a selected tag commit must itself be green. District records one target under
   `[defaults.engine]` locally or `[hosts.NAME.engine]` remotely. Installing an
   ancestor is refused unless `--allow-downgrade` is supplied.
-- **Bounded upgrade window.** Pause active Factory timers, then wait up to the
-  configured limit for non-dashboard services and Factory processes using the
-  uv tool to become idle. Install the target with `uv tool install --force`;
-  verify the receipt revision and CLI. On install or verification failure,
-  reinstall and verify the previous revision. Restore exactly the paused
-  timers in `finally`, and restart dashboards after a successful change.
+- **Bounded upgrade window.** Defer with a named reason for outside hand work,
+  then pause only active Factory timers and wait within the configured limit for
+  non-dashboard services and uv-tool Factory processes to become idle. Only
+  semantic dashboard commands are exempt; dashboard-owned gate/dispatch is
+  outside work. Managed exemptions require stable owning-host PID/start-time
+  identities, including launchd parents/anchors. Install the one `factory` tool
+  with `uv tool install --force`; verify the receipt revision and CLI. On install
+  or verification failure, recheck outside work and the original idle deadline
+  before reinstalling and verifying the previous revision. Fleet replacement
+  and rollback use the same guards. Restore exactly the paused timers in
+  `finally`; an unverified tool or blocked automatic rollback retains named
+  paused/recovery intent for the next idle apply. Restart dashboards after a
+  verified change.
 - **Migration and cleanup.** Remove a legacy `factory_source` setting through
   the host config writer after making a timestamped backup. After a successful
   engine step and repo render, scan every managed systemd unit, Factory launchd
