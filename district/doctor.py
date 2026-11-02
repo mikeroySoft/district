@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from district import host
+from district import drain, host
 from district.add import remote_slug
 from district.apply import POLICY_ENV
 from district.service import SystemdUserBackend
@@ -463,6 +463,8 @@ def check() -> list[dict[str, str]]:
     rows += toolchain_rows(data)
     rows += remote_config_rows(data)
     rows += parity_rows(data)
+    if drain_status := drain.status():
+        rows.append(row("WARN", "drain", drain_status))
 
     state = backend.manager_status()
     manager = "systemd user manager" if isinstance(backend, SystemdUserBackend) else "launchd user manager"

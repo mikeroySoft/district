@@ -43,6 +43,10 @@ def cache_dir() -> Path:
     return Path(base) / "district" / "metrics"
 
 
+def lock_path() -> Path:
+    return cache_dir().parent / "metrics.lock"
+
+
 def cache_path(slug: str) -> Path:
     return cache_dir() / f"{slug}.json"
 
@@ -172,13 +176,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--refresh", action="store_true", help="collect now even if the cache is fresh")
     parser.add_argument("--max-age", default="1h", help="reuse a cache younger than this (default 1h)")
     args = parser.parse_args(argv)
-    lock_path = host.operation_lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a") as lock:
+    path = lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            print(f"district metrics: another apply, metrics, or update operation is running ({lock_path})", file=sys.stderr)
+            print(f"district metrics: another metrics operation is running ({path})", file=sys.stderr)
             return 1
         max_age = hours(args.max_age, "--max-age")
         out, code = {}, 0
