@@ -263,6 +263,32 @@ class HandRunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "approved")
 
+    def test_source_fragment_after_directory_change_rejects_live_dependency(self):
+        library = self.source / "lib"
+        library.mkdir()
+        fragment = library / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        fragment.chmod(0o644)
+        self.script.write_text("#!/bin/bash\ncd lib; source ./settings.inc\n")
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/tmp/external-live.sh", result.stderr)
+        self.assertIn("settings.inc", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
+    def test_source_mentions_in_comments_do_not_block_launch(self):
+        self.script.write_text("#!/bin/bash\n# source isn't needed here\nprintf 'approved\\n'\n")
+        unrelated = self.data / "handland-unrelated"
+        unrelated.mkdir()
+        (unrelated / "helper.py").write_text("# source isn't needed here\n")
+        (unrelated / "notes.md").write_text("Historical script /tmp/external-live.sh\n")
+        with (unrelated / "helper.py").open("a") as stream:
+            stream.write("# source ./notes.md\n")
+        start, _ = self.launch()
+        result = subprocess.run([str(start)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "approved")
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
