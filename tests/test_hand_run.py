@@ -237,6 +237,21 @@ class HandRunTest(unittest.TestCase):
         self.assertIn(str(interpreter), result.stderr)
         self.assertFalse(self.launch_log.exists())
 
+    def test_nested_source_fragments_remain_frozen(self):
+        outer = self.source / "settings.txt"
+        inner = self.source / "inner settings"
+        outer.write_text('. "./inner settings"\n')
+        inner.write_text("printf 'frozen settings\\n'\n")
+        outer.chmod(0o644)
+        inner.chmod(0o644)
+        self.script.write_text('#!/bin/bash\nsource ./settings.txt\n')
+        start, _ = self.launch()
+        for source in (outer, inner):
+            source.write_text("exit 91\n")
+        result = subprocess.run([str(start)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "frozen settings")
+
     def test_copied_script_shebang_interpreter_stays_frozen(self):
         interpreter = self.source / "interpreter.sh"
         interpreter.write_text('#!/bin/bash\nexec /bin/bash "$@"\n')

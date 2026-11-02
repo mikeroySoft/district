@@ -94,8 +94,11 @@ cached Python bytecode, are copied without path rewriting. Python entry and stop
 scripts retain their shebang interpreter and options; without a shebang, `.py`
 entries use District's Python.
 Keep script dependencies in these copied trees. Literal external shell/Python
-script paths are rejected; do not construct paths back to live scripts
-dynamically. Script outputs belong outside the read-only snapshot.
+script paths, including script shebang interpreters, are rejected. Dependency
+checks follow literal `source`/`.` references regardless of filename or executable
+permission; unrelated logs and notes are copied as data, not scanned as scripts.
+Do not construct paths back to live scripts dynamically. Script outputs belong
+outside the read-only snapshot.
 
 The complete snapshot is `chmod a-w` with a SHA-256 `checksums.txt`. Both
 ExecStart and optional ExecStopPost execute wrappers inside the run directory.

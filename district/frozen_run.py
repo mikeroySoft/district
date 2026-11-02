@@ -16,8 +16,12 @@ from pathlib import Path
 _MANIFEST = "checksums.txt"
 _LIVE_SCRIPT = re.compile(
     # A complete token, not the slash suffix of ./x.sh, $dir/x.sh or lib/x.py.
-    rb"(?<![^\s\"'`=|;&(<>])"
+    rb"(?:(?<![^\s\"'`=|;&(<>])|(?<=#!))"
     rb"(?P<path>(?:/|\$HOME/|\$\{HOME\}/|~/)[^\x00\r\n\t \"'`|;&()<>]*\.(?:sh|py))(?![A-Za-z0-9._-])"
+)
+_SOURCE = re.compile(
+    rb"(?:^|[\s;|&()])(?:source|\.)[ \t]+"
+    rb"(?P<path>\"(?:\\.|[^\"\\\r\n])*\"|'[^'\r\n]*'|(?:\\[^\r\n]|[^\s;|&()<>\\])+)"
 )
 _VERIFIER = r'''import hashlib, os, pathlib, stat, sys
 root = pathlib.Path(sys.argv[1])
@@ -139,15 +143,43 @@ def _replace_paths(path: Path, replacements: list[tuple[bytes, bytes]]) -> None:
         path.write_bytes(changed)
 
 
+def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
+    """Find script inputs, including literal sourced fragments with any name."""
+    scripts = set(entries)
+    for path in frozen_root.rglob("*"):
+        if path.is_file() and (path.suffix in {".sh", ".py"} or path.read_bytes().startswith(b"#!")):
+            scripts.add(path)
+    pending = list(scripts)
+    working_dirs = {entry.parent for entry in entries}
+    while pending:
+        script = pending.pop()
+        value = script.read_bytes()
+        if b"\0" in value:
+            continue
+        for match in _SOURCE.finditer(value.replace(b"\\\n", b"")):
+            words = shlex.split(os.fsdecode(match.group("path")))
+            if len(words) != 1 or any(part in words[0] for part in ("$", "`")):
+                # Runtime-constructed dependencies cannot be discovered statically.
+                continue
+            reference = Path(words[0])
+            candidates = {reference} if reference.is_absolute() else {
+                directory / reference for directory in working_dirs | {script.parent}
+            }
+            for candidate in candidates:
+                candidate = candidate.resolve()
+                if not candidate.is_relative_to(frozen_root):
+                    raise ValueError(f"cannot relocate live sourced script reference {str(reference)!r} in {script}")
+                if candidate.is_file() and candidate not in scripts:
+                    scripts.add(candidate)
+                    pending.append(candidate)
+    return scripts
+
+
 def _reject_live_scripts(path: Path, frozen_root: Path) -> None:
     if not stat.S_ISREG(path.lstat().st_mode):
         return
     value = path.read_bytes()
     if b"\0" in value:
-        return
-    # Logs and notes are snapshot data, not dependency declarations. Sourced
-    # .sh files still need inspection even without a shebang or executable bit.
-    if path.suffix not in {".sh", ".py"} and not value.startswith(b"#!"):
         return
     for match in _LIVE_SCRIPT.finditer(value):
         raw = match.group("path")
@@ -162,7 +194,7 @@ def _reject_live_scripts(path: Path, frozen_root: Path) -> None:
 
 def _entry_command(source: Path, frozen: Path, args: list[str]) -> list[str]:
     try:
-        first = source.read_bytes().splitlines()[:1]
+        first = frozen.read_bytes().splitlines()[:1]
     except OSError as error:
         raise ValueError(f"cannot read entry script: {source}") from error
     try:
@@ -291,12 +323,13 @@ def freeze(data: Path, script: Path, stop_post: Path | None, includes: list[Path
         for path in binary.rglob("*"):
             if not path.is_symlink():
                 _replace_paths(path, replacements)
-                _reject_live_scripts(path, binary)
+        frozen_entries = [binary / entry.relative_to(data) for entry in entries]
+        for path in sorted(_script_inputs(binary, frozen_entries)):
+            _reject_live_scripts(path, binary)
 
         (run / "sources.json").write_text(
             json.dumps({"sources": [str(root) for root in roots]}, indent=2) + "\n", encoding="utf-8"
         )
-        frozen_entries = [binary / entry.relative_to(data) for entry in entries]
         start_command = _entry_command(entries[0], frozen_entries[0], args)
         (run / "start").write_text(_wrapper(run, start_command, frozen_entries[0].parent), encoding="utf-8")
         (run / "start").chmod(0o755)
