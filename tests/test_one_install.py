@@ -783,6 +783,21 @@ class OneInstallTest(unittest.TestCase):
         runner = self.alias_tool_runner(True)
         remote_active = {"factory-widgets.timer"}
         drained = [False]
+        started = [False]
+        remote_sha = [OLD]
+        remote_installs = []
+        original_transport = runner.transport
+
+        def transport(argv, **kwargs):
+            parts = shlex.split(argv[-1])
+            if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                parts = shlex.split(parts[-1])
+            if parts[:2] == ["python3", "-c"] and parts[-1].endswith("/uv-receipt.toml"):
+                return subprocess.CompletedProcess(
+                    argv, 0, f'[tool]\nrequirements = [{{name="factory", rev="{remote_sha[0]}"}}]\n', "")
+            return original_transport(argv, **kwargs)
+
+        runner.transport = transport
         remote_backend = mock.Mock()
         remote_backend.configuration.return_value = {"platform": "linux", "executable": "systemctl"}
         remote_backend.factory_units.return_value = set()
@@ -804,12 +819,16 @@ class OneInstallTest(unittest.TestCase):
         remote_backend.resume_timer.side_effect = resume
         original_run = self.run_cmd
         scans = []
+        clock = [0.0]
+        scan_started = {}
 
         def commands(name, argv, **kwargs):
-            available = phase == "before" or drained[0]
+            available = phase == "before" or (phase == "after" and drained[0]) or started[0]
             if argv[0] == "ps" or argv[:3] == ["systemctl", "--user", "list-units"]:
                 self.assertGreater(kwargs.get("timeout", 0), 0)
-                self.assertLessEqual(kwargs["timeout"], 5)
+                scan_started.setdefault(name, clock[0])
+                self.assertLessEqual(kwargs["timeout"], 5 - (clock[0] - scan_started[name]) + 1e-9)
+                clock[0] += 0.05
                 scans.append((name, list(argv)))
                 output = ""
                 if name == blocked and available:
@@ -820,10 +839,24 @@ class OneInstallTest(unittest.TestCase):
                     elif work == "dispatch" and argv[0] == "ps":
                         output = f"321 {self.tool.resolve()}/bin/python -uSmfactory dispatch --ticket 42\n"
                 return subprocess.CompletedProcess(argv, 0, output, "")
+            if argv[:3] == ["uv", "tool", "install"]:
+                revision = OLD if f"@{OLD}" in argv[5] else TARGET
+                if name == "remote":
+                    remote_installs.append(revision)
+                    if phase == "rollback" and revision == TARGET:
+                        started[0] = True
+                        return subprocess.CompletedProcess(argv, 1, "", "fake remote install failed")
+                    remote_sha[0] = revision
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                result = original_run(argv, **kwargs)
+                if phase == "install" and revision == TARGET:
+                    started[0] = True
+                return result
             return original_run(argv, **kwargs)
 
         record = install_state.ApplyRun("", "", OLD)
-        with mock.patch.object(self, "run_cmd", side_effect=lambda argv, **kw: commands("remote", argv, **kw)):
+        with mock.patch.object(self, "run_cmd", side_effect=lambda argv, **kw: commands("remote", argv, **kw)), \
+             mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
             if fleet:
                 contexts = {
                     "local": (lambda argv, **kw: commands("local", argv, **kw), self.backend, self.data["repo"]),
@@ -833,8 +866,11 @@ class OneInstallTest(unittest.TestCase):
             else:
                 result = apply.reconcile_engine(
                     self.data, record, backend=remote_backend, host_name="remote", run_cmd=runner)
-        self.assertEqual(result, "deferred", self.output.getvalue())
-        self.assertEqual(self.installs(), [])
+        self.assertEqual(result, "failed" if phase in ("install", "rollback") else "deferred",
+                         self.output.getvalue())
+        expected = [TARGET, OLD] if phase == "install" else [TARGET] if phase == "rollback" else []
+        self.assertEqual([OLD if f"@{OLD}" in argv[5] else TARGET for argv in self.installs()], expected)
+        self.assertEqual(remote_installs, [TARGET, OLD] if phase == "rollback" else [])
         target = "engine" if blocked == "local" else "engine:remote"
         reason = record.deferred[target]["reason"]
         self.assertIn("handland-4242-merge.service" if work in ("active", "activating", "deactivating")
@@ -843,7 +879,7 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(remote_active, {"factory-widgets.timer"})
         for name in ("local", "remote") if fleet else ("remote",):
             engine = host.engine(self.data, name)
-            self.assertEqual(engine["sha"], OLD)
+            self.assertEqual(engine["sha"], TARGET if phase == "rollback" and name == "local" else OLD)
             self.assertFalse(engine.get("paused_timers"))
         return record, scans
 
@@ -872,6 +908,17 @@ class OneInstallTest(unittest.TestCase):
                     self.assertTrue(all(name == "remote" for name, _ in scans))
                     self.assertEqual(record.disabled, set() if phase == "before" else {"factory-widgets.timer"})
                     self.assertEqual(record.reenabled, record.disabled)
+
+    def test_fleet_rechecks_hand_work_before_each_host_install(self):
+        for work in ("active", "gate", "dispatch"):
+            with self.subTest(work=work):
+                self.hand_work_fleet(work, phase="install")
+
+    def test_fleet_does_not_rollback_an_engine_used_by_new_hand_work(self):
+        for work in ("active", "gate", "dispatch"):
+            with self.subTest(work=work):
+                self.hand_work_fleet(work, phase="rollback", blocked="local")
+                self.assertIn("FAIL could not roll back local", self.output.getvalue())
 
     def test_configured_extras_are_preserved_on_target_and_rollback(self):
         self.data["defaults"]["factory_extras"] = ["atlas", "ops"]

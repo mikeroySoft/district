@@ -679,9 +679,12 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         for name, (runner, backend, repos) in contexts.items():
             attempted.append(name)
             try:
-                result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
-                                          run_cmd=runner, pin=pin, verify_ci=False, window_open=name in opened,
-                                          allow_downgrade=allow_downgrade)
+                if name in opened and not hand_ready(name):
+                    result = "deferred"
+                else:
+                    result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
+                                              run_cmd=runner, pin=pin, verify_ci=False, window_open=name in opened,
+                                              allow_downgrade=allow_downgrade)
                 why = result
             except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
                 result, why = "failed", f"failed: {exc}"
@@ -700,6 +703,8 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                                 data, back, back_cmd, back_backend, back_repos, record)):
                             raise OSError("rollback idle wait timed out")
                         opened.add(back)
+                    if not hand_ready(back):
+                        raise OSError("hand work or expired idle deadline blocks rollback")
                     restored = bool(previous[back]) and _replace_engine(
                         data, back, back_cmd, origin, "previous", previous[back], pin[1], tool, cli,
                     ) == "applied"
