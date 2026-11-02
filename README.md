@@ -98,8 +98,9 @@ script paths, including script shebang interpreters, are rejected. Dependency
 checks follow literal `source`/`.` references regardless of filename or executable
 permission; unrelated logs and notes are copied as data, not scanned as scripts.
 If shell dependency discovery cannot tokenize a script, launch refuses with its
-path rather than silently skipping dependencies. Python files are not shell-tokenized
-unless explicitly sourced as shell.
+path rather than silently skipping dependencies. Bash ANSI-C (`$'...'`) and
+locale-translation (`$"..."`) quoting are not supported and are refused explicitly.
+Python files are not shell-tokenized unless explicitly sourced as shell.
 Do not construct paths back to live scripts dynamically. Script outputs belong
 outside the read-only snapshot.
 

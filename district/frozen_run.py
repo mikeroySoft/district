@@ -141,6 +141,8 @@ def _replace_paths(path: Path, replacements: list[tuple[bytes, bytes]]) -> None:
 
 
 def _source_references(value: bytes, script: Path) -> Iterator[str]:
+    if b"$'" in value or b'$"' in value:
+        raise ValueError(f"cannot inspect sourced dependencies in {script}: unsupported Bash quoting")
     lexer = shlex.shlex(os.fsdecode(value).replace("\\\n", ""), posix=True, punctuation_chars=";&|()<>")
     lexer.whitespace_split = True
     while True:
