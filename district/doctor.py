@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from district import drain, host
+from district import drain, host, streak
 from district.add import remote_slug
 from district.apply import POLICY_ENV
 from district.service import SystemdUserBackend
@@ -481,6 +481,11 @@ def check() -> list[dict[str, str]]:
     rows.append(row("PASS", "clone_dir", str(clone_dir)) if clone_dir.is_dir() else row("WARN", "clone_dir", f"{clone_dir} is not a directory"))
     rows += policy_rows(data)
     rows += unit_rows(backend)
+    for slug in host.repos(data):
+        alerts, gaps = streak.collect(data, slug)
+        rows += [row("FAIL", f"failure streak {alert['host']} {slug}", streak.describe(alert))
+                 for alert in alerts]
+        rows += [row("WARN", f"pass history {gap['host']} {slug}", gap["error"]) for gap in gaps]
     return rows
 
 
