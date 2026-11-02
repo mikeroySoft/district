@@ -333,6 +333,23 @@ class DrainTest(unittest.TestCase):
             self.assertFalse(drain.path().exists())
             self.assertIn("legacy engine cleanup incomplete", case.output.getvalue())
 
+    def test_automatic_drain_honors_drain_timeout_option(self):
+        with self.case() as case:
+            host.save(case.data)
+            record = install_state.ApplyRun.start()
+            for _ in range(3):
+                record.defer("engine", "busy: factory-widgets.service")
+            record.finish(0)
+            case.busy = 100
+            clock = [0.0]
+            case.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+            with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+                with self.assertRaisesRegex(host.DistrictError, "drain timeout.*factory-widgets.service"):
+                    apply.main(["--drain-timeout", "2s"])
+            self.assertFalse(case.installs())
+            self.assertFalse(drain.path().exists())
+            self.assertEqual(self.record()["drain"]["waited_s"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

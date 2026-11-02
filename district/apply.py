@@ -730,7 +730,7 @@ def _wait_drained(record, name: str, runner, backend, repos, *, deadline: float)
 def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, *, deadline: float | None = None):
     target = "engine" if name == "local" else f"engine:{name}"
     draining = record is not None and (
-        name in record.drains or record.drain_timeout is not None or _auto_drain(record, target))
+        name in record.drains or record.drain_requested or _auto_drain(record, target))
     if draining:
         _start_drain(record, name, runner)
         if deadline is None:
@@ -1009,7 +1009,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
             deadlines[name] = time.monotonic() + timeout
             target = "engine" if name == "local" else f"engine:{name}"
             if record is not None and (
-                    record.drain_timeout is not None or name in record.drains or _auto_drain(record, target)):
+                    record.drain_requested or name in record.drains or _auto_drain(record, target)):
                 _start_drain(record, name, runner)
                 deadlines[name] = record.drain_deadlines[name][0]
         except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
@@ -1643,7 +1643,8 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             print(f"district apply: another apply is running ({lock_path})", file=sys.stderr)
             return 1
         record.drain_stack = drains
-        record.drain_timeout = getattr(args, "drain_timeout", drain_flag.DEFAULT_TIMEOUT) if getattr(args, "drain", False) else None
+        record.drain_requested = getattr(args, "drain", False)
+        record.drain_timeout = getattr(args, "drain_timeout", drain_flag.DEFAULT_TIMEOUT)
 
         data = host.load()
         host.hosts(data)
@@ -1674,7 +1675,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         if len(engine_hosts) < 2 and not fleet_hosts:
             engine_hosts = []
         explicit_contexts = {}
-        if record.drain_timeout is not None:
+        if record.drain_requested:
             # Wait before policy, migrations, unit changes or any install is applied.
             for name in dict.fromkeys([*fleet_hosts, *groups]):
                 try:

@@ -321,6 +321,7 @@ class ApplyRun:
     drains: dict[str, dict] = field(default_factory=dict)
     engine_deferrals: dict[str, int] = field(default_factory=dict)
     drain_timeout: float | None = None
+    drain_requested: bool = False
     drain_stack: ExitStack | None = None
     drain_deadlines: dict[str, tuple[float, float]] = field(default_factory=dict)
 
