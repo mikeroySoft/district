@@ -186,7 +186,9 @@ that prevents a timer from starting work during replacement. Flag-based drains
 never enter that timer window.
 
 `district apply --drain` creates
-`${XDG_STATE_HOME:-$HOME/.local/state}/district/drain` on each affected host.
+`${XDG_STATE_HOME:-$HOME/.local/state}/district/drain` only on hosts with pending
+engine work. Healthy, already-current hosts do not request a flag, wait for idle,
+or run drained post-apply checks; they continue ordinary unit reconciliation.
 The UTF-8 JSON flag is written atomically and carries schema version 1,
 requester, reason, PID, creation time, and expiry. Compatible timer-started
 Factory passes see the flag and skip before starting work; already-running and

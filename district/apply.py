@@ -1718,10 +1718,23 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         explicit_contexts = {}
         if record.drain_requested:
             # Wait before policy, migrations, unit changes or any install is applied.
+            ref = args.upgrade or data.get("defaults", {}).get("factory_ref")
+            if ref == "HEAD":
+                ref = data.get("defaults", {}).get("factory_ref", "main")
             for name in dict.fromkeys([*fleet_hosts, *groups]):
                 try:
                     runner, backend = _host_context(data, name, sync=False)
                     repos = _host_repos(data, name)
+                    engine = host.engine(data, name) or {}
+                    recovering = any(engine.get(key) for key in (
+                        "install_pending", "paused_timers", "dashboards_pending"))
+                    if not recovering:
+                        if ref is None:
+                            continue
+                        _, _, _, sha = _resolve_engine(ref, runner, host.default(data, "factory_repo"))
+                        tool, cli = host.factory_tool_paths(runner)
+                        if _engine_current(sha, tool, cli, runner):
+                            continue
                     explicit_contexts[name] = (runner, backend, repos)
                     _start_drain(record, name, runner)
                 except (OSError, host.RemoteHostError, subprocess.TimeoutExpired) as exc:

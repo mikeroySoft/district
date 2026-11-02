@@ -273,7 +273,6 @@ class DrainTest(unittest.TestCase):
                 apply.postcheck.check.assert_not_called()
                 self.assertFalse(case.installs())
                 self.assertFalse(drain.path().exists())
-                self.assert_no_timer_changes(case)
 
     def test_postcheck_failure_does_not_mark_drain_applied(self):
         with self.case() as case:
@@ -317,6 +316,7 @@ class DrainTest(unittest.TestCase):
             self.assert_no_timer_changes(case)
             remote_config = Path(runner.facts()["config_home"]) / "factory/config.toml"
             before = remote_config.read_bytes()
+            case.install_receipt(fixtures.OLD)
             with mock.patch.object(host, "remote_runner", return_value=runner):
                 self.timeout_case(case)
             self.assertEqual(remote_config.read_bytes(), before, "timeout must not sync or migrate remote config")
