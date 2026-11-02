@@ -138,7 +138,7 @@
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
-      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.6 (November 2, 2026)</a></p>
+      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.7 (November 2, 2026)</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
@@ -302,12 +302,25 @@ rocm-app   capped             <span class="att">attention</span>
     <p class="lede">Selected milestones through November 2, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
     <ol class="timeline">
       <li>
+        <div><time datetime="2026-11-02">November 2, 2026</time><span class="status shipped">Release · v0.1.7</span></div>
+        <div>
+          <h3>Engine upgrades that can actually find an idle window.</h3>
+          <ul>
+            <li><strong>Drained engine apply:</strong> <code>district apply --drain</code> writes an atomic, expiring host flag so compatible timer-started Factory passes skip before starting work, waits up to 6 hours (<code>--drain-timeout</code>, at most 7h45m) for running and hand-run work to finish, then installs and post-checks the CI-green engine. A drain never stops, disables, masks, delays, or re-enables a timer and never kills a running pass; while drained, District does not call <code>factory install</code> or apply the failure cap. <code>district drain --clear [--host NAME]</code> removes a flag, doctor warns about stale or malformed flags, and the hourly apply drains after 3 deferrals or 24 hours. Drain admission needs Factory's <code>drain-check</code> (factory#563).</li>
+            <li><strong>Post-apply checks:</strong> before clearing a drain, District checks Factory help, version, tool-Python import, receipt and target ancestry, dashboard HTTP 200, restarts the installed District dashboard, validates the previous engine in isolated uv directories, and runs <code>factory watch --dry-run</code> from a registered repository checkout.</li>
+            <li><strong>Busy means Factory services:</strong> engine busy checks read the owning host's service manager (<code>factory-*.service</code> on Linux, Factory launchd jobs on macOS) instead of every process's cwd and argv, so <code>sshd</code> and long-running dashboards no longer block an upgrade forever. Probes share one idle deadline.</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> back-to-back passes left no idle window, and the old process scan counted SSH sessions and dashboards as Factory work, so engine upgrades could never apply.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/releases/tag/v0.1.7">Release v0.1.7</a> · <a href="https://github.com/mikeroySoft/district/issues/149">Drained upgrade #149</a> · <a href="https://github.com/mikeroySoft/district/issues/151">Service-state busy check #151</a></p>
+        </div>
+      </li>
+      <li>
         <div><time datetime="2026-11-02">November 2, 2026</time><span class="status shipped">Release · v0.1.6</span></div>
         <div>
           <h3>One Factory install per host, owned by District.</h3>
           <ul>
-            <li><strong>One install per host:</strong> District owns the single Factory uv tool install on every host. Apply drops the stale <code>factory_source</code> key from the host config, keeping a timestamped backup, and removes per-version <code>factory-*</code> folders that no unit, launchd agent, config, or uv receipt still references; an incomplete reference scan removes nothing. Busy work plainly defers an engine swap; an explicit or threshold-triggered drain asks compatible timer-started passes not to begin while District waits for running and hand-run work.</li>
-            <li><strong>Operator-stopped timers:</strong> an engine drain never stops, disables, masks, delays, starts, or re-enables Factory timers, and never kills a running pass. Its atomic host flag has a bounded expiry and is always cleared after the attempt. Hand-run <code>factory gate</code> and <code>factory dispatch</code> remain busy work.</li>
+            <li><strong>One install per host:</strong> District owns the single Factory uv tool install on every host. Apply drops the stale <code>factory_source</code> key from the host config, keeping a timestamped backup, and removes per-version <code>factory-*</code> folders that no unit, launchd agent, config, or uv receipt still references; an incomplete reference scan removes nothing. An engine swap is deferred to the next apply while any factory work runs on the host; process state District cannot read counts as busy, and registry dashboards do not block.</li>
+            <li><strong>Operator-stopped timers:</strong> when a repo's units change, <code>district apply</code> stops a timer again if <code>factory install</code> started it after the operator stopped it, and records the stop in <code>last_apply.stopped</code>; apply and upgrade restore only the timers they paused. A first install, or an apply where the repo's units are unchanged, still runs <code>factory install</code>, which re-enables a stopped timer; tracked in factory#549. Hand-run <code>factory gate</code> and <code>factory dispatch</code> work now defers an engine swap.</li>
             <li><strong>One repo on several hosts:</strong> a repo table may list <code>hosts = [...]</code> with a <code>triage_host</code>. Apply pins the same engine SHA on every host and rolls moved hosts back when one fails; doctor and status flag engine, worker, and model drift.</li>
             <li><strong>Per-host engine and defaults:</strong> remote hosts get their own engine source and <code>[defaults]</code> overrides (gh config dir, signing key, triage URL).</li>
           </ul>
@@ -334,8 +347,8 @@ rocm-app   capped             <span class="att">attention</span>
         <div>
           <h3>A busy factory no longer pauses the whole fleet.</h3>
           <ul>
-            <li><strong>Defer before drain:</strong> ordinary <code>district apply</code> waits for another invocation while Factory work is busy. A drained engine apply uses only an expiring host flag: it never invokes <code>factory install</code>, changes the failure cap, or touches a timer; generated-unit changes wait for a later ordinary apply.</li>
-            <li><strong>Bounded maintenance:</strong> ordinary apply retains its bounded timer-pause/recheck/restore window only after confirming idle. Explicit and threshold-triggered drains instead use an expiring host flag and leave every timer and running pass alone, while <code>district metrics</code> remains available during the wait.</li>
+            <li><strong>Defer instead of drain:</strong> <code>district apply</code> checks for running passes before touching any timer. A shared-engine install waits for the next apply while any factory is busy, leaving every timer and the installed engine as they were, and exits 0. Only repositories whose units change are drained, and only while idle.</li>
+            <li><strong>Bounded drains:</strong> the one-hour wait is gone; an install may keep timers drained for at most 120 seconds, and timers return to their prior state on every exit path. <code>district metrics</code> is no longer blocked by a waiting apply.</li>
             <li><strong>Install state:</strong> <code>district install-state --json</code> reports install, engine, timer, hold, and last-apply state, including deferred work with its reason and since time.</li>
           </ul>
           <p class="decision"><strong>Why:</strong> one long pass in one repository was switching off every factory's timer for up to an hour, several times a day.</p>
@@ -500,7 +513,7 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district status
 <span class="p">$</span> district report                       <span class="c"># on-demand read-only Markdown review on stdout</span>
 <span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span>
-<span class="p">$</span> district update --to v0.1.6 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
+<span class="p">$</span> district update --to v0.1.7 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
     <p style="color:var(--text-muted)">Factories are local unless their repo table names a <code>host</code> defined under <code>[hosts.NAME]</code> (<code>ssh</code>, <code>platform</code>, optional <code>root</code>); <code>local</code> is reserved for this machine. The single controller keeps the registry and operation lock, reaches remote hosts through BatchMode SSH with a bounded connection attempt, and writes each host's filtered Factory config there. Status, report, health, and Atlas retain every factory, label it by host, and show an unreachable host as unknown/unreachable with its last-seen time while other hosts continue.</p>
