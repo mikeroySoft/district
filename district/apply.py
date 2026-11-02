@@ -350,7 +350,7 @@ def _factory_processes(tool: Path, cli: Path, run_cmd, *, platform: str, deadlin
     launchers = {str(cli), str(real_cli), *(str(directory / "factory") for directory in tool_bins)}
     identities = _linux_identities(run_cmd, deadline=deadline) if platform == "linux" else {}
     columns = "pid=,ppid=,lstart=,args=" if platform == "macos" else "pid=,args="
-    argv = ["ps", "-eo", columns]
+    argv = ["ps", "-ww", "-eo", columns]
     if platform == "macos":
         argv = ["env", "LC_ALL=C", *argv]
     proc = run_cmd(argv, timeout=remaining_timeout(deadline))

@@ -186,7 +186,8 @@ unchanged owning-host `(PID, start time)`: Linux uses `/proc/PID/stat` field 22
 (after the final comm parenthesis), macOS uses C-locale `ps` lstart for both
 argv and identity observations. An unparseable macOS row defers with a named
 observation/ownership reason rather than dropping a potentially busy process.
-The argv observation
+Argv snapshots request unbounded `ps -ww` width on Linux and macOS, so narrow
+`COLUMNS` cannot truncate a launcher or subcommand. The argv observation
 is bracketed by identity checks; launchd ancestry also checks every parent and
 label anchor. A reused/disappeared PID or changed parent defers with a named
 identity reason, never a stale managed exemption. All probes share the idle

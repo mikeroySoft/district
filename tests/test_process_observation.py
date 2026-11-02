@@ -18,6 +18,9 @@ class ProcessObservationTest(unittest.TestCase):
     def observation_case(self, *, remote, platform="macos", mode="localized",
                          phase="before", command="dispatch", rollback=False):
         case = self.case
+        if mode == "width":
+            case.tool = case.root / ("long-launcher-" + "x" * 120) / "factory"
+            os.environ["UV_TOOL_DIR"] = str(case.tool.parent)
         case.install_receipt(fixtures.OLD)
         case.calls.clear()
         case.events.clear()
@@ -57,6 +60,8 @@ class ProcessObservationTest(unittest.TestCase):
                 if not live:
                     return subprocess.CompletedProcess(raw, 0, "", "")
                 text = argv_text
+                if mode == "width" and "-ww" not in argv:
+                    text = text[:int(os.environ["COLUMNS"])]
                 if platform == "macos":
                     start = ("木 11/12 00:00:00 2026" if mode == "malformed" or
                              mode == "identity-malformed" and "args=" not in argv[-1] or
@@ -148,3 +153,9 @@ class ProcessObservationTest(unittest.TestCase):
         for remote in (False, True):
             with self.subTest(remote=remote):
                 self.observation_case(remote=remote, mode="identity-malformed")
+
+    def test_long_argv_under_narrow_columns_still_defers(self):
+        for platform in ("linux", "macos"):
+            for remote in (False, True):
+                with self.subTest(platform=platform, remote=remote):
+                    self.observation_case(remote=remote, platform=platform, mode="width")
