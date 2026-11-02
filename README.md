@@ -186,6 +186,11 @@ District-rendered systemd executable/argument, working-directory and environment
 values preserve spaces, quotes and backslashes; literal `%` and ExecStart `$`
 are escaped rather than expanded by the manager. Factory render validation and
 systemd file-status reads use the same systemd word decoder, not shell parsing.
+Render validation checks every `ExecStart=` in a oneshot service, including
+separate triage and dispatch commands. After stripping systemd exec prefixes
+(`-`, `@`, `:`, `+`, `!`, `!!`), each must use the canonical tool's
+`bin/python [-P] -m factory ...` or the resolved Factory CLI. A missing or
+invalid command blocks installation and names the affected unit and argv.
 Ambiguous loaded `ExecStart` debug text remains untrusted: self-update refuses
 an unverifiable executable rather than guessing from a potentially stale unit file.
 The retained self-update/recovery bundle includes that decoder and remains
