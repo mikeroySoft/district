@@ -319,6 +319,14 @@ def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> lis
     return busy
 
 
+def _hand_work(tool: Path, cli: Path, runner, backend, *, deadline: float) -> list[str]:
+    busy = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
+    busy += [work for work in _factory_processes(tool, cli, runner, timeout=remaining_timeout(deadline))
+             if work.endswith(("factory gate", "factory dispatch"))]
+    remaining_timeout(deadline)
+    return busy
+
+
 def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
     paused = (host.engine(data, name) or {}).get("paused_timers", [])
     if not paused:
@@ -350,10 +358,11 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, de
 
 
 @contextmanager
-def _engine_window(data: dict, name: str, runner, backend, repos: dict, record):
+def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, *, deadline: float | None = None):
     target = "engine" if name == "local" else f"engine:{name}"
-    timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
-    deadline = time.monotonic() + timeout
+    if deadline is None:
+        timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
+        deadline = time.monotonic() + timeout
     try:
         ready = False
         try:
@@ -361,11 +370,7 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record):
             active = [timer for timer in timers
                       if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
             tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
-            hand_work = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
-            hand_work += [work for work in _factory_processes(
-                tool, cli, runner, timeout=remaining_timeout(deadline))
-                if work.endswith(("factory gate", "factory dispatch"))]
-            remaining_timeout(deadline)
+            hand_work = _hand_work(tool, cli, runner, backend, deadline=deadline)
             if hand_work:
                 _defer(record, target, hand_work)
             else:
@@ -620,14 +625,41 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
     moved, attempted = [], []
     result = "unchanged"
     opened = set()
+    deadlines = {}
+
+    def hand_ready(name):
+        runner, backend, _ = contexts[name]
+        try:
+            tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadlines[name]))
+            busy = _hand_work(tool, cli, runner, backend, deadline=deadlines[name])
+        except subprocess.TimeoutExpired:
+            busy = ["idle wait timed out"]
+        if busy:
+            _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
+        return not busy
+
+    # Preflight every changed host before pausing any host's timers.
+    for name, (runner, backend, _) in contexts.items():
+        try:
+            tool, cli = host.factory_tool_paths(runner)
+            if (_engine_current(pin[1], tool, cli, runner)
+                    and not (host.engine(data, name) or {}).get("paused_timers")):
+                continue
+            timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
+            deadlines[name] = time.monotonic() + timeout
+            if not hand_ready(name):
+                print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
+                return "deferred"
+        except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+            print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
+            return "failed"
     with ExitStack() as windows:
         for name, (runner, backend, repos) in contexts.items():
+            if name not in deadlines:
+                continue
             try:
-                tool, cli = host.factory_tool_paths(runner)
-                if (_engine_current(pin[1], tool, cli, runner)
-                        and not (host.engine(data, name) or {}).get("paused_timers")):
-                    continue
-                ready = windows.enter_context(_engine_window(data, name, runner, backend, repos, record))
+                ready = windows.enter_context(_engine_window(
+                    data, name, runner, backend, repos, record, deadline=deadlines[name]))
             except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
                 print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
                 return "failed"
@@ -635,6 +667,15 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                 print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
                 return "deferred"
             opened.add(name)
+        # A later host's drain can outlive an earlier host's readiness probe.
+        for name in deadlines:
+            try:
+                if not hand_ready(name):
+                    print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
+                    return "deferred"
+            except (OSError, host.RemoteHostError, DistrictError) as exc:
+                print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
+                return "failed"
         for name, (runner, backend, repos) in contexts.items():
             attempted.append(name)
             try:

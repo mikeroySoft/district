@@ -770,6 +770,109 @@ class OneInstallTest(unittest.TestCase):
         self.backend.pause_timer.assert_not_called()
         self.backend.resume_timer.assert_not_called()
 
+    def hand_work_fleet(self, work, *, phase, blocked="remote", fleet=True):
+        self.install_receipt(OLD)
+        self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
+        self.data["defaults"]["engine_idle_timeout"] = "5s"
+        self.active = {"factory-widgets.timer"}
+        self.calls.clear()
+        self.events.clear()
+        alias = self.root / "tool-link"
+        alias.unlink(missing_ok=True)
+        self.tool = self.root / "tools/factory"
+        runner = self.alias_tool_runner(True)
+        remote_active = {"factory-widgets.timer"}
+        drained = [False]
+        remote_backend = mock.Mock()
+        remote_backend.configuration.return_value = {"platform": "linux", "executable": "systemctl"}
+        remote_backend.factory_units.return_value = set()
+        remote_backend.status.return_value = service.ServiceStatus("not-found", "inactive", "not-found")
+        remote_backend.is_active.side_effect = lambda name, **_: "active" if name in remote_active else "inactive"
+
+        def pause(name, **kwargs):
+            remote_active.discard(name)
+            drained[0] = True
+            self.events.append(("remote-pause", name))
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        def resume(name, **kwargs):
+            remote_active.add(name)
+            self.events.append(("remote-enable", name))
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        remote_backend.pause_timer.side_effect = pause
+        remote_backend.resume_timer.side_effect = resume
+        original_run = self.run_cmd
+        scans = []
+
+        def commands(name, argv, **kwargs):
+            available = phase == "before" or drained[0]
+            if argv[0] == "ps" or argv[:3] == ["systemctl", "--user", "list-units"]:
+                self.assertGreater(kwargs.get("timeout", 0), 0)
+                self.assertLessEqual(kwargs["timeout"], 5)
+                scans.append((name, list(argv)))
+                output = ""
+                if name == blocked and available:
+                    if work in ("active", "activating", "deactivating") and argv[0] == "systemctl":
+                        output = f"handland-4242-merge.service loaded {work} running Hand work\n"
+                    elif work == "gate" and argv[0] == "ps":
+                        output = f"321 {self.cli} gate --base origin/main\n"
+                    elif work == "dispatch" and argv[0] == "ps":
+                        output = f"321 {self.tool.resolve()}/bin/python -uSmfactory dispatch --ticket 42\n"
+                return subprocess.CompletedProcess(argv, 0, output, "")
+            return original_run(argv, **kwargs)
+
+        record = install_state.ApplyRun("", "", OLD)
+        with mock.patch.object(self, "run_cmd", side_effect=lambda argv, **kw: commands("remote", argv, **kw)):
+            if fleet:
+                contexts = {
+                    "local": (lambda argv, **kw: commands("local", argv, **kw), self.backend, self.data["repo"]),
+                    "remote": (runner, remote_backend, self.data["repo"]),
+                }
+                result = apply.reconcile_fleet_engine(self.data, record, contexts)
+            else:
+                result = apply.reconcile_engine(
+                    self.data, record, backend=remote_backend, host_name="remote", run_cmd=runner)
+        self.assertEqual(result, "deferred", self.output.getvalue())
+        self.assertEqual(self.installs(), [])
+        target = "engine" if blocked == "local" else "engine:remote"
+        reason = record.deferred[target]["reason"]
+        self.assertIn("handland-4242-merge.service" if work in ("active", "activating", "deactivating")
+                      else f"pid 321 factory {work}", reason)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(remote_active, {"factory-widgets.timer"})
+        for name in ("local", "remote") if fleet else ("remote",):
+            engine = host.engine(self.data, name)
+            self.assertEqual(engine["sha"], OLD)
+            self.assertFalse(engine.get("paused_timers"))
+        return record, scans
+
+    def test_fleet_hand_work_preflight_precedes_every_pause(self):
+        for work in ("active", "activating", "deactivating", "gate", "dispatch"):
+            for blocked in ("local", "remote"):
+                with self.subTest(work=work, blocked=blocked):
+                    record, scans = self.hand_work_fleet(work, phase="before", blocked=blocked)
+                    self.assertEqual(record.disabled, set())
+                    self.assertFalse(any(event[0] in ("pause", "remote-pause") for event in self.events))
+
+    def test_fleet_rechecks_earlier_host_after_remote_drain(self):
+        for work in ("active", "activating", "deactivating", "gate", "dispatch"):
+            with self.subTest(work=work):
+                record, _ = self.hand_work_fleet(work, phase="after", blocked="local")
+                self.assertEqual(record.disabled, {"factory-widgets.timer"})
+                self.assertEqual(record.reenabled, record.disabled)
+                self.assertIn(("remote-pause", "factory-widgets.timer"), self.events)
+
+    def test_remote_hand_work_defers_before_and_after_window_drain(self):
+        for phase in ("before", "after"):
+            for work in ("active", "activating", "deactivating", "gate", "dispatch"):
+                with self.subTest(phase=phase, work=work):
+                    record, scans = self.hand_work_fleet(work, phase=phase, fleet=False)
+                    self.assertTrue(scans)
+                    self.assertTrue(all(name == "remote" for name, _ in scans))
+                    self.assertEqual(record.disabled, set() if phase == "before" else {"factory-widgets.timer"})
+                    self.assertEqual(record.reenabled, record.disabled)
+
     def test_configured_extras_are_preserved_on_target_and_rollback(self):
         self.data["defaults"]["factory_extras"] = ["atlas", "ops"]
         self.bad_rev = True

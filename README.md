@@ -175,6 +175,9 @@ and again after draining under the same idle deadline. Python options before
 `-m factory`, including attached/grouped forms, are recognized; text merely
 mentioning a command and dashboards do not block swaps. The receipt names the
 busy unit or PID; other repo unit drift still converges and the next apply retries.
+Fleet hand-work preflight covers every changed host before any timer pauses;
+after all windows drain, every changed host is re-checked before the first install.
+Each host retains its original idle deadline through both checks and its drain.
 The idle budget is one deadline including discovery, probes, timer pauses, and
 remote state synchronization. Zero or exhausted time defers before another
 command. Timer/dashboard restoration has a separate 30-second budget after
