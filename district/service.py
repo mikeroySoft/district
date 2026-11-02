@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Callable, Mapping
 from xml.parsers.expat import ExpatError
 
-from . import systemd
+if __package__:
+    from . import systemd
+else:
+    import systemd
 
 Runner = Callable[..., subprocess.CompletedProcess]
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
