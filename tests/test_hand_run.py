@@ -442,6 +442,34 @@ class HandRunTest(unittest.TestCase):
         self.assertIn("outside.sh", result.stderr)
         self.assertFalse(self.launch_log.exists())
 
+    def test_interpreter_executed_fragments_reject_live_dependency(self):
+        for name in ("helper", "helper.txt"):
+            with self.subTest(name=name):
+                helper = self.source / name
+                helper.write_text("bash /tmp/external-live.sh\n")
+                helper.chmod(0o644)
+                self.script.write_text(f"#!/bin/bash\nbash ./{name}\n")
+                result = self.command("launch", "532-chain", self.script)
+                helper.unlink()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("/tmp/external-live.sh", result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
+    def test_source_resolution_cannot_use_live_home_cwd_or_path(self):
+        external = self.home / "external"
+        external.mkdir()
+        (external / "settings.inc").write_text("printf 'live\\n'\n")
+        (self.home / "settings.inc").write_text("printf 'live\\n'\n")
+        for invocation in ("source ~/settings.inc",
+                           f'cd "{external}"; source ./settings.inc',
+                           f'PATH="{external}:$PATH"; source settings.inc'):
+            with self.subTest(invocation=invocation):
+                self.script.write_text(f"#!/bin/bash\n{invocation}\n")
+                result = self.command("launch", "532-chain", self.script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("sourced", result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
