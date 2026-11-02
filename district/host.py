@@ -662,6 +662,8 @@ def sync_remote_config(data: dict, name: str, runner: RemoteRunner, *, deadline:
     try:
         original = config.read_bytes(timeout=service.remaining_timeout(deadline))
         stored = tomllib.loads(original.decode())
+    except UnicodeDecodeError as exc:
+        raise DistrictError(f"{name}: invalid UTF-8 in {config_path}") from exc
     except (OSError, tomllib.TOMLDecodeError):
         original = None
         stored = {}

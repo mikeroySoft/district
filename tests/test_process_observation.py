@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from district import apply, host, install_state
-import test_one_install as fixtures
+from tests import test_one_install as fixtures
 
 
 class ProcessObservationTest(unittest.TestCase):

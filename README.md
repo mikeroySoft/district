@@ -251,7 +251,8 @@ Local and remote cleanup normalize TOML date, time, and datetime settings to ISO
 strings; unsupported scalar types raise before cleanup removes anything.
 A legacy `factory_source` setting is removed through District's config writer
 after a timestamped, byte-for-byte backup, including on remote hosts; other
-files are untouched.
+files are untouched. A remote config that is not valid UTF-8 fails that named
+host before any backup or replacement; apply continues with other selected hosts.
 
 ### One repo on several hosts
 
