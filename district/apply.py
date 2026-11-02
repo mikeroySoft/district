@@ -648,7 +648,7 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, de
 
 
 def _auto_drain(record, target: str) -> bool:
-    if record is None:
+    if record is None or record.drain_stack is None:
         return False
     if record.engine_deferrals.get(target, 0) >= 3:
         return True
