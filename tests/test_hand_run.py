@@ -420,6 +420,28 @@ class HandRunTest(unittest.TestCase):
         self.assertIn("/tmp/external-live.sh", result.stderr)
         self.assertFalse(self.launch_log.exists())
 
+    def test_source_redirections_cannot_hide_literal_dependency(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        for invocation in ("source</dev/null ./settings.inc", "source 3</dev/null ./settings.inc",
+                           "source <<<'' ./settings.inc", "source &>/dev/null ./settings.inc"):
+            with self.subTest(invocation=invocation):
+                self.script.write_text(f"#!/bin/bash\n{invocation}\n")
+                result = self.command("launch", "532-chain", self.script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cannot inspect sourced dependencies", result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
+    def test_relative_source_cannot_escape_frozen_directory(self):
+        outside = self.data / "outside.sh"
+        outside.write_text("printf 'live\\n'\n")
+        self.script.write_text("#!/bin/bash\nsource ../../../../outside.sh\n")
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("live sourced script reference", result.stderr)
+        self.assertIn("outside.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
