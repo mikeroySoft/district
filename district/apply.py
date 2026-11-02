@@ -302,25 +302,63 @@ def _resolved_paths(paths: list[Path], runner, *, timeout: float = SMOKE_TIMEOUT
         raise OSError(f"cannot resolve Factory paths: {exc}") from exc
 
 
-def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> list[str]:
-    deadline = time.monotonic() + timeout
+def _linux_identities(runner, *, deadline: float, pids: list[str] | None = None) -> dict:
+    """Bracket argv/ownership observations with Linux process generations."""
+    script = """
+import json,pathlib,sys
+root = pathlib.Path('/proc/')
+rows = {}
+for pid in sys.argv[1:] or [p.name for p in root.iterdir() if p.name.isdigit()]:
+    try:
+        stat = (root / pid / 'stat').read_text().rsplit(')', 1)[1].split()
+        value = (root / pid / 'cgroup').read_text() if sys.argv[1:] else stat[1]
+        after = (root / pid / 'stat').read_text().rsplit(')', 1)[1].split()
+        if stat[19] == after[19]:
+            rows[pid] = [stat[19], value]
+    except (OSError, IndexError):
+        pass
+print(json.dumps(rows))
+"""
+    proc = runner(["python3", "-c", script, *(pids or [])], timeout=remaining_timeout(deadline))
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or "cannot inspect Factory process identity")
+    return json.loads(proc.stdout)
+
+
+def _ps_identities(output: str) -> tuple[dict, list[tuple[str, str]]]:
+    """Parse one macOS ps observation: PID, PPID, five lstart fields, argv."""
+    identities, commands = {}, []
+    for line in output.splitlines():
+        fields = line.split(maxsplit=7)
+        if len(fields) >= 7 and fields[0].isdigit() and fields[1].isdigit():
+            identities[fields[0]] = [" ".join(fields[2:7]), fields[1]]
+            if len(fields) == 8:
+                commands.append((fields[0], fields[7]))
+    return identities, commands
+
+
+def _factory_processes(tool: Path, cli: Path, run_cmd, *, platform: str, deadline: float) -> tuple[list[str], dict]:
     real_tool, real_cli = _resolved_paths([tool, cli], run_cmd, timeout=remaining_timeout(deadline))
     tool_bins = {tool / "bin", real_tool / "bin"}
     launchers = {str(cli), str(real_cli), *(str(directory / "factory") for directory in tool_bins)}
-    proc = run_cmd(["ps", "-eo", "pid=,args="], timeout=remaining_timeout(deadline))
+    identities = _linux_identities(run_cmd, deadline=deadline) if platform == "linux" else {}
+    columns = "pid=,ppid=,lstart=,args=" if platform == "macos" else "pid=,args="
+    proc = run_cmd(["ps", "-eo", columns], timeout=remaining_timeout(deadline))
     if proc.returncode:
         raise OSError(proc.stderr.strip() or "cannot inspect Factory processes")
-    busy = []
-    for line in proc.stdout.splitlines():
-        fields = line.split(maxsplit=1)
-        if len(fields) == 2 and fields[0].isdigit():
-            if work := _factory_work(fields[1], tool_bins, launchers):
-                busy.append(f"pid {fields[0]} {work}")
-    return busy
+    if platform == "macos":
+        identities, commands = _ps_identities(proc.stdout)
+    else:
+        commands = [fields for line in proc.stdout.splitlines()
+                    if len(fields := line.split(maxsplit=1)) == 2 and fields[0].isdigit()]
+    busy = [f"pid {pid} {work}" for pid, command in commands
+            if (work := _factory_work(command, tool_bins, launchers))]
+    return busy, identities
 
 
-def _managed_processes(processes: list[str], runner, backend, repos: dict, *, deadline: float) -> dict[str, str]:
-    """Map observed PIDs to managed units on their owning host."""
+def _managed_processes(processes: list[str], identities: dict, runner, backend, repos: dict,
+                       *, deadline: float) -> dict[str, str]:
+    """Map only unchanged PID/start-time identities to owning-host units."""
     units = set(backend.factory_units(timeout=remaining_timeout(deadline)))
     units.update(f"{host.unit_name(slug)}{suffix}.service" for slug in repos for suffix in ("", "-dashboard"))
     services = sorted(unit for unit in units if unit.endswith(".service"))
@@ -333,6 +371,11 @@ def _managed_processes(processes: list[str], runner, backend, repos: dict, *, de
         return proc.stdout
 
     pids = [work.split()[1] for work in processes]
+
+    def unchanged(pid, current):
+        if pid not in identities or pid not in current or identities[pid] != current[pid]:
+            raise OSError(f"pid {pid} process identity changed or disappeared")
+
     if config.get("platform") == "linux":
         output = probe([str(config.get("executable", "systemctl")), "--user", "show",
                         "-p", "Id", "-p", "ControlGroup", *services])
@@ -343,14 +386,12 @@ def _managed_processes(processes: list[str], runner, backend, repos: dict, *, de
                 groups[values["ControlGroup"]] = values["Id"]
         if not groups:
             return {}
-        script = (
-            "import json,pathlib,sys; "
-            "print(json.dumps({pid:pathlib.Path('/proc/'+pid+'/cgroup').read_text() for pid in sys.argv[1:]}))"
-        )
-        cgroups = json.loads(probe(["python3", "-c", script, *pids]))
+        current = _linux_identities(runner, deadline=deadline, pids=pids)
         owners = {}
         for pid in pids:
-            paths = [line.split(":", 2)[2] for line in cgroups[pid].splitlines()]
+            if pid not in identities or pid not in current or identities[pid][0] != current[pid][0]:
+                raise OSError(f"pid {pid} process identity changed or disappeared")
+            paths = [line.split(":", 2)[2] for line in current[pid][1].splitlines()]
             for group, unit in groups.items():
                 if any(path == group or path.startswith(group + "/") for path in paths):
                     owners[pid] = unit
@@ -362,28 +403,31 @@ def _managed_processes(processes: list[str], runner, backend, repos: dict, *, de
             fields = line.split()
             if len(fields) == 3 and fields[0].isdigit() and fields[2] in labels:
                 owners[fields[0]] = labels[fields[2]]
-        parents = {}
-        for line in probe(["ps", "-eo", "pid=,ppid="]).splitlines():
-            fields = line.split()
-            if len(fields) == 2 and all(field.isdigit() for field in fields):
-                parents[fields[0]] = fields[1]
+        current, _ = _ps_identities(probe(["ps", "-eo", "pid=,ppid=,lstart="]))
+        anchors = dict(owners)
         for pid in pids:
             ancestor, seen = pid, set()
-            while ancestor not in owners and ancestor in parents and ancestor not in seen:
+            while ancestor not in seen:
                 seen.add(ancestor)
-                ancestor = parents[ancestor]
-            if ancestor in owners:
-                owners[pid] = owners[ancestor]
+                unchanged(ancestor, current)
+                if ancestor in anchors:
+                    owners[pid] = anchors[ancestor]
+                    break
+                parent = identities[ancestor][1]
+                if parent in ("0", "1"):
+                    break
+                ancestor = parent
         return owners
     raise OSError(f"unsupported ownership platform: {config.get('platform')}")
 
 
 def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> tuple[list[str], list[str]]:
-    processes = _factory_processes(tool, cli, runner, timeout=remaining_timeout(deadline))
+    processes, identities = _factory_processes(
+        tool, cli, runner, platform=backend.configuration().get("platform"), deadline=deadline)
     if not processes:
         return [], []
     try:
-        owners = _managed_processes(processes, runner, backend, repos, deadline=deadline)
+        owners = _managed_processes(processes, identities, runner, backend, repos, deadline=deadline)
         remaining_timeout(deadline)
     except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
             host.RemoteHostError) as exc:

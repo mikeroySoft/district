@@ -50,8 +50,11 @@ class FactoryRefTest(unittest.TestCase):
             backend = mock.Mock()
             backend.status.return_value.loaded = False
 
+        backend.configuration.return_value = {"platform": "linux"}
         def run(argv, **kwargs):
             calls.append(argv)
+            if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
+                return self.proc(argv, "{}")
             if argv[:3] == ["git", "ls-remote", "--tags"] and remote_refs is not None:
                 return self.proc(argv, remote_refs)
             if argv[:2] == ["git", "ls-remote"] and pinned_refs is not None:

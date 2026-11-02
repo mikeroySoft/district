@@ -165,6 +165,8 @@ class OneInstallTest(unittest.TestCase):
             self.events.append(("handland", "scan"))
         elif argv[:3] == ["systemctl", "--user", "show"]:
             out = "Id=factory-widgets.service\nControlGroup=\n"
+        elif argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
+            out = "{}"  # Never inspect the real process table from a test.
         elif argv[0] == "ps":
             self.events.append(("processes", "scan"))
             if self.process_busy and ("pause", "factory-widgets.timer") in self.events:
@@ -844,7 +846,7 @@ class OneInstallTest(unittest.TestCase):
             if argv[:2] == ["launchctl", "list"] and work.startswith("dashboard-"):
                 return subprocess.CompletedProcess(argv, 0, "42 0 factory-widgets-dashboard\n", "")
             if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
-                output = ({"321": ["100", "1"]} if "cgroup" not in argv[2] else
+                output = ({"321": ["100", "1"]} if len(argv) == 3 else
                           {"321": ["100", "0::/user/dashboard/child\n"]} if "'stat'" in argv[2] else
                           {"321": "0::/user/dashboard/child\n"})
                 return subprocess.CompletedProcess(argv, 0, json.dumps(output), "")
@@ -1060,6 +1062,8 @@ class OneInstallTest(unittest.TestCase):
                                      "remote commands must never consult the stale checkout")
                     commands.append(parts)
                     if parts[:2] == ["python3", "-c"]:
+                        if "/proc/" in parts[2]:
+                            return subprocess.CompletedProcess(argv, 0, "{}", "")
                         return subprocess.run([sys.executable, *parts[1:]], env=remote_env,
                                               capture_output=True, text=True, check=False,
                                               input=kwargs.get("input"), timeout=kwargs.get("timeout"))
@@ -1352,6 +1356,8 @@ class OneInstallTest(unittest.TestCase):
                 resumed.append(parts[1])
                 return subprocess.CompletedProcess(parts, 0, "", "")
             if parts[:2] == ["python3", "-c"]:
+                if "/proc/" in parts[2]:
+                    return self.run_cmd(parts, **kwargs)
                 if "read_bytes()" in parts[2] and paused and clock[0] < 5:
                     self.assertLessEqual(timeout, 5 - clock[0])
                     clock[0] = 5
@@ -1722,7 +1728,7 @@ class OneInstallTest(unittest.TestCase):
                 (agents / "factory-broken.plist").unlink()
 
     def ownership_case(self, *, remote, fleet, platform, work, dashboard_work=None, phase="before",
-                       identity="same"):
+                       identity="same", proc_files=False):
         self.install_receipt(OLD)
         self.calls.clear()
         self.events.clear()
@@ -1749,20 +1755,35 @@ class OneInstallTest(unittest.TestCase):
         dashboard_live = [dashboard_work is not None]
         identity_probes = [0]
         original = self.run_cmd
+        proc_root = self.root / "proc"
+        if proc_files:
+            for pid, parent, start in (("123", "42", "100"), ("42", "1", "90"), ("456", "1", "80")):
+                directory = proc_root / pid
+                directory.mkdir(parents=True, exist_ok=True)
+                # starttime is field 22, not a whitespace offset in comm.
+                (directory / "stat").write_text(
+                    f"{pid} (worker ( odd ) name)) S {parent} " + "0 " * 17 + f"{start} 0\n")
+                (directory / "cgroup").write_text("0::/user/factory-widgets.service/child\n")
 
         def commands(argv, **kwargs):
             paused = ("pause", "factory-widgets.timer") in self.events
             live = not paused or scans[0] < 2 or work != "managed"
             if argv[0] == "ps":
+                self.assertGreater(kwargs.get("timeout", 0), 0)
+                self.assertLessEqual(kwargs["timeout"], 5 - clock[0] + 1e-9)
                 if "lstart=" in argv[-1]:
                     identity_probes[0] += 1
                     changed = identity_probes[0] > 1
                     rows = []
-                    for pid, parent in (("123", "42"), ("42", "1"), ("456", "1")):
-                        if changed and identity == "missing" and pid == "123":
+                    for pid, parent in (("123", "99"), ("99", "42"), ("42", "1"), ("456", "1")):
+                        if changed and (identity == "missing" and pid == "123" or
+                                        identity == "anchor-missing" and pid == "42"):
                             continue
+                        if changed and identity == "parent-changed" and pid == "123":
+                            parent = "1"
                         start = "Mon Nov  2 00:00:01 2026" if changed and (
                             identity == "reused" and pid == "123" or
+                            identity == "parent-reused" and pid == "99" or
                             identity == "anchor-reused" and pid == "42") else "Mon Nov  2 00:00:00 2026"
                         command = f"{self.tool}/bin/python -m factory dispatch" if pid == "123" and live else ""
                         if pid == "456":
@@ -1786,7 +1807,18 @@ class OneInstallTest(unittest.TestCase):
                 self.assertGreater(kwargs.get("timeout", 0), 0)
                 self.assertLessEqual(kwargs["timeout"], 5 - clock[0] + 1e-9)
                 ownership.append(list(argv))
-                if argv[:2] == ["python3", "-c"] and "cgroup" not in argv[2]:
+                if proc_files:
+                    if argv[0] == "systemctl":
+                        stat = proc_root / "123/stat"
+                        if identity == "reused":
+                            stat.write_text(stat.read_text().replace("100 0\n", "101 0\n"))
+                        elif identity == "missing":
+                            stat.unlink(missing_ok=True)
+                    if argv[:2] == ["python3", "-c"]:
+                        script = argv[2].replace("'/proc/'", repr(str(proc_root) + "/"))
+                        return subprocess.run([sys.executable, "-c", script, *argv[3:]],
+                                              capture_output=True, text=True, timeout=kwargs["timeout"])
+                if argv[:2] == ["python3", "-c"] and len(argv) == 3:
                     return subprocess.CompletedProcess(argv, 0, json.dumps({
                         "123": ["100", "42"], "42": ["90", "1"], "456": ["80", "1"]}), "")
                 if work == "probe-failure":
@@ -1888,6 +1920,21 @@ class OneInstallTest(unittest.TestCase):
                                 self.ownership_case(remote=remote, fleet=fleet, platform=platform,
                                                     work="managed", dashboard_work=command, phase=phase)
 
+    def test_process_identity_change_defers_managed_exemption(self):
+        for platform in ("linux", "macos"):
+            for remote, fleet in ((False, False), (False, True), (True, False), (True, True)):
+                for identity in (("reused", "missing", "parent-reused", "parent-changed",
+                                  "anchor-reused", "anchor-missing") if platform == "macos" else ("reused", "missing")):
+                    with self.subTest(platform=platform, remote=remote, fleet=fleet, identity=identity):
+                        self.ownership_case(remote=remote, fleet=fleet, platform=platform,
+                                            work="managed", identity=identity, proc_files=platform == "linux")
+
+    def test_linux_stat_identity_with_complex_comm_still_drains(self):
+        for remote in (False, True):
+            with self.subTest(remote=remote):
+                self.ownership_case(remote=remote, fleet=False, platform="linux",
+                                    work="managed", proc_files=True)
+
     def test_managed_dispatch_ownership_drains_on_owning_host(self):
         for platform in ("linux", "macos"):
             for remote in (False, True):
@@ -1942,7 +1989,7 @@ class OneInstallTest(unittest.TestCase):
                                     if argv[:2] == ["launchctl", "list"]:
                                         return subprocess.CompletedProcess(argv, 0, "42 0 factory-widgets-dashboard\n", "")
                                     if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
-                                        output = ({"321": ["100", "42"]} if "cgroup" not in argv[2] else
+                                        output = ({"321": ["100", "42"]} if len(argv) == 3 else
                                                   {"321": ["100", "0::/user/dashboard/child\n"]} if "'stat'" in argv[2] else
                                                   {"321": "0::/user/dashboard/child\n"})
                                         return subprocess.CompletedProcess(argv, 0, json.dumps(output), "")

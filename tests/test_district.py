@@ -261,6 +261,10 @@ class DistrictCase(unittest.TestCase):
         self.stub("gh", ("repo view *", json.dumps({"isFork": False, "parent": None})))
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         self.stub("uv")
+        self.stub("ps")
+        # Lifecycle identity probes must never read real /proc, even with fake ps.
+        self.enterContext(mock.patch.object(apply, "_linux_identities",
+                                           return_value={"218269": ["100", "1"]}))
         tool, factory = host.factory_tool_paths()
         (tool / "bin").mkdir(parents=True)
         (tool / "bin/factory").write_text(factory.read_text())

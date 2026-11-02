@@ -179,8 +179,13 @@ launchd label PID and descendants. Their dispatch processes drain after timer
 pause rather than deferring the window. Only actual `factory dashboard`
 commands are exempt: a gate/dispatch inside a dashboard cgroup or launchd job,
 including descendants, is outside work and defers replacement. Dashboard
-services remain excluded from the service wait. Ownership probes share the
-idle deadline; unavailable or timed-out ownership defers with a named reason.
+services remain excluded from the service wait. Managed exemptions require an
+unchanged owning-host `(PID, start time)`: Linux uses `/proc/PID/stat` field 22
+(after the final comm parenthesis), macOS uses `ps` lstart. The argv observation
+is bracketed by identity checks; launchd ancestry also checks every parent and
+label anchor. A reused/disappeared PID or changed parent defers with a named
+identity reason, never a stale managed exemption. All probes share the idle
+deadline; unavailable or timed-out ownership defers with a named reason.
 Plain apply and `--upgrade`, locally and across a fleet, check before pausing
 and again after draining under the same idle deadline. Python options before
 `-m factory`, including attached/grouped forms, are recognized; text merely
