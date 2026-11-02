@@ -1816,6 +1816,79 @@ class OneInstallTest(unittest.TestCase):
                         with self.subTest(platform=platform, remote=remote, fleet=fleet, work=work):
                             self.ownership_case(remote=remote, fleet=fleet, platform=platform, work=work)
 
+    def test_failed_target_rollback_rechecks_owning_host_and_original_deadline(self):
+        for remote in (False, True):
+            for fleet in (False, True):
+                for block in ("dispatch", "handland", "expired"):
+                    for failure in ("install", "verify"):
+                        with self.subTest(remote=remote, fleet=fleet, block=block, failure=failure):
+                            self.install_receipt(OLD)
+                            self.calls.clear()
+                            self.events.clear()
+                            self.active = {"factory-widgets.timer"}
+                            self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
+                            self.data["defaults"]["engine_idle_timeout"] = "5s"
+                            name = "remote" if remote else "local"
+                            runner = None
+                            if remote:
+                                self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                                               "engine": {"sha": OLD, "ref": "main"}}}
+                                self.data["repo"]["acme/widgets"]["host"] = "remote"
+                                runner, _, _ = self.timeout_remote("none")
+                            else:
+                                self.data.pop("hosts", None)
+                                self.data["repo"]["acme/widgets"].pop("host", None)
+                            clock, late, fail = [0.0], [False], [True]
+                            original = self.run_cmd
+
+                            def commands(argv, **kwargs):
+                                if argv[:3] == ["uv", "tool", "install"] and fail[0]:
+                                    self.calls.append((list(argv), kwargs))
+                                    late[0] = True
+                                    if block == "expired":
+                                        clock[0] = 6.0
+                                    # Failed install/verify leaves the previous working tool intact.
+                                    return subprocess.CompletedProcess(
+                                        argv, int(failure == "install"), "", "fake target install failure")
+                                if late[0] and block == "dispatch" and argv[0] == "ps":
+                                    return subprocess.CompletedProcess(
+                                        argv, 0, f"321 {self.tool}/bin/python -m factory dispatch\n", "")
+                                if late[0] and block == "handland" and argv[:3] == ["systemctl", "--user", "list-units"]:
+                                    return subprocess.CompletedProcess(
+                                        argv, 0, "handland-4242-merge.service loaded active running Hand work\n", "")
+                                return original(argv, **kwargs)
+
+                            def reconcile():
+                                context = (runner or apply.run, self.backend, self.data["repo"])
+                                record = install_state.ApplyRun("", "", OLD)
+                                if fleet:
+                                    return apply.reconcile_fleet_engine(self.data, record, {name: context})
+                                return apply.reconcile_engine(
+                                    self.data, record, run_cmd=context[0], backend=self.backend, host_name=name)
+
+                            with mock.patch.object(self, "run_cmd", side_effect=commands), \
+                                 mock.patch.object(apply, "run", side_effect=commands), \
+                                 mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+                                self.assertEqual(reconcile(), "failed", self.output.getvalue())
+                                self.assertEqual(len(self.installs()), 1, "blocked rollback must not invoke uv again")
+                                self.assertIn("rollback FAIL", self.output.getvalue())
+                                reason = ("pid 321 factory dispatch" if block == "dispatch" else
+                                          "handland-4242-merge.service" if block == "handland" else "deadline")
+                                self.assertIn(reason, self.output.getvalue())
+                                self.data = host.load()
+                                engine = host.engine(self.data, name)
+                                self.assertEqual(engine["install_pending"]["target"], TARGET)
+                                self.assertEqual(engine["paused_timers"], ["factory-widgets.timer"])
+                                self.assertEqual(self.active, set())
+                                late[0], fail[0], clock[0] = False, False, 10.0
+                                self.assertIn(reconcile(), ("applied", "unchanged"), self.output.getvalue())
+                                self.assertEqual(len(self.installs()), 2)
+                                engine = host.engine(host.load(), name)
+                                self.assertEqual(engine["sha"], TARGET)
+                                self.assertFalse(engine.get("install_pending"))
+                                self.assertFalse(engine.get("paused_timers"))
+                                self.assertEqual(self.active, {"factory-widgets.timer"})
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -183,9 +183,12 @@ busy unit or PID; other repo unit drift still converges and the next apply retri
 Fleet hand-work preflight covers every changed host before any timer pauses;
 after all windows drain, every changed host is re-checked before the first install.
 Each host retains its original idle deadline through these checks and its drain.
-Fleet installs and rollbacks also re-check immediately before replacement.
-If new hand work or an expired idle deadline blocks rollback, apply names the
-host it could not roll back rather than swapping its in-use engine.
+All rollbacks, including automatic rollback after target install/verification
+failure, re-check the owning host immediately before replacement under its
+original idle deadline. New hand work or an expired deadline names a failed
+rollback instead of replacing in-use code. An automatic rollback blocked this
+way retains `install_pending` and `paused_timers`; timers stay paused until a
+later idle apply recovers and verifies the installation.
 The idle budget is one deadline including discovery, probes, timer pauses, and
 remote state synchronization. Zero or exhausted time defers before another
 command. Timer/dashboard restoration has a separate 30-second budget after

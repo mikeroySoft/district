@@ -405,6 +405,10 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, de
     paused = (host.engine(data, name) or {}).get("paused_timers", [])
     if not paused:
         return
+    blocked = (host.engine(data, name) or {}).get("install_pending", {}).get("rollback_blocked")
+    if blocked:
+        print(f"engine:{name} FAIL keeping timers paused after blocked rollback: {', '.join(paused)}: {blocked}")
+        return
     if deadline is None:
         deadline = time.monotonic() + RESTORE_TIMEOUT
     try:
@@ -481,7 +485,7 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
                     time.sleep(min(1, remaining))
         except subprocess.TimeoutExpired:
             _defer(record, target, ["idle wait timed out"])
-        yield ready
+        yield deadline if ready else None
     finally:
         _restore_engine_timers(data, name, runner, backend, record)
 
@@ -498,7 +502,7 @@ def _finish_dashboards(data: dict, name: str, runner, repos: dict, backend, *, d
 
 
 def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: str,
-                    previous: str | None, tool: Path, cli: Path) -> str:
+                    previous: str | None, tool: Path, cli: Path, *, backend, repos: dict, deadline: float) -> str:
     extras = factory_extras(data)
     install_url = "ssh://" + origin.replace(":", "/", 1) if origin.startswith("git@") else origin
     _save_engine(data, name, runner, install_pending={
@@ -516,6 +520,17 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
     except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as exc:
         print(f"engine failed {previous or 'unknown'} -> {sha}: {exc}")
         if previous:
+            try:
+                busy = _hand_work(tool, cli, runner, backend, repos, deadline=deadline)
+                if busy:
+                    raise OSError(f"outside work blocks rollback: {', '.join(busy)}")
+            except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as rollback:
+                reason = ("original idle deadline expired" if isinstance(rollback, subprocess.TimeoutExpired)
+                          else str(rollback))
+                pending = dict((host.engine(data, name) or {})["install_pending"], rollback_blocked=reason)
+                _save_engine(data, name, runner, install_pending=pending)
+                print(f"engine rollback FAIL {sha} -> {previous} on {name}: {reason}; retaining recovery intent")
+                return "failed"
             try:
                 install(previous)
             except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as rollback:
@@ -549,12 +564,13 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
                 raise OSError("no recorded revision available for recovery")
             previous = (pending.get("previous") if pending else
                         stored if stored != target else engine.get("previous"))
-            with _engine_window(data, name, runner, backend, repos, record) as ready:
-                if not ready:
+            with _engine_window(data, name, runner, backend, repos, record) as window_deadline:
+                if window_deadline is None:
                     return "deferred"
                 result = _replace_engine(data, name, runner, host.default(data, "factory_repo"),
                                          pending.get("ref") or engine.get("target_ref", engine.get("ref", "main")),
-                                         target, previous, tool, cli)
+                                         target, previous, tool, cli, backend=backend, repos=repos,
+                                         deadline=window_deadline)
             _finish_dashboards(data, name, runner, repos, backend)
             return result
         if receipt != stored or pending:
@@ -576,13 +592,14 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
 def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *, backend=None,
                      host_name: str = "local", repos: dict[str, dict] | None = None,
                      run_cmd=None, pin: tuple[str, str] | None = None, verify_ci: bool = True,
-                     allow_downgrade: bool = False, ref: str | None = None, window_open: bool = False) -> str:
+                     allow_downgrade: bool = False, ref: str | None = None,
+                     window_deadline: float | None = None) -> str:
     """Converge this host's one uv tool to its recorded, remote CI-green target."""
     run_cmd = run if run_cmd is None else run_cmd
     backend = backend or host.service_backend()
     repos = _host_repos(data, host_name) if repos is None else repos
     engine_target = "engine" if host_name == "local" else f"engine:{host_name}"
-    if not window_open:
+    if window_deadline is None:
         recovery = _recover_engine(data, host_name, run_cmd, backend, repos, record)
         if recovery is not None:
             return recovery
@@ -615,7 +632,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
             if stored_sha != sha:
                 _save_engine(data, host_name, run_cmd, sha=sha, ref=resolved_ref,
                              installed_at=iso(now()), dashboards_pending=True)
-            if not window_open:
+            if window_deadline is None:
                 _finish_dashboards(data, host_name, run_cmd, repos, backend)
             if record:
                 record.clear_deferred(engine_target)
@@ -632,13 +649,15 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
         print(f"{engine_target} failed ancestry {previous} -> {sha}: {exc}; keeping installed engine")
         return "failed"
     try:
-        if window_open:
-            result = _replace_engine(data, host_name, run_cmd, origin, resolved_ref, sha, previous, tool, cli)
+        if window_deadline is not None:
+            result = _replace_engine(data, host_name, run_cmd, origin, resolved_ref, sha, previous, tool, cli,
+                                     backend=backend, repos=repos, deadline=window_deadline)
         else:
-            with _engine_window(data, host_name, run_cmd, backend, repos, record) as ready:
-                if not ready:
+            with _engine_window(data, host_name, run_cmd, backend, repos, record) as window_deadline:
+                if window_deadline is None:
                     return "deferred"
-                result = _replace_engine(data, host_name, run_cmd, origin, resolved_ref, sha, previous, tool, cli)
+                result = _replace_engine(data, host_name, run_cmd, origin, resolved_ref, sha, previous, tool, cli,
+                                         backend=backend, repos=repos, deadline=window_deadline)
             _finish_dashboards(data, host_name, run_cmd, repos, backend)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"{engine_target} failed {previous or 'unknown'} -> {sha}: {exc}")
@@ -757,7 +776,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                     result = "deferred"
                 else:
                     result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
-                                              run_cmd=runner, pin=pin, verify_ci=False, window_open=name in opened,
+                                              run_cmd=runner, pin=pin, verify_ci=False, window_deadline=deadlines.get(name),
                                               allow_downgrade=allow_downgrade)
                 why = result
             except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
@@ -773,14 +792,16 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                 tool, cli = host.factory_tool_paths(back_cmd)
                 try:
                     if back not in opened:
-                        if not windows.enter_context(_engine_window(
-                                data, back, back_cmd, back_backend, back_repos, record)):
+                        deadlines[back] = windows.enter_context(_engine_window(
+                            data, back, back_cmd, back_backend, back_repos, record))
+                        if deadlines[back] is None:
                             raise OSError("rollback idle wait timed out")
                         opened.add(back)
                     if not hand_ready(back):
                         raise OSError("hand work or expired idle deadline blocks rollback")
                     restored = bool(previous[back]) and _replace_engine(
                         data, back, back_cmd, origin, "previous", previous[back], pin[1], tool, cli,
+                        backend=back_backend, repos=back_repos, deadline=deadlines[back],
                     ) == "applied"
                 except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
                     print(f"engine:{back} rollback FAIL: {exc}")
