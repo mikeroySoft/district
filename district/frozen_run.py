@@ -140,22 +140,22 @@ def _replace_paths(path: Path, replacements: list[tuple[bytes, bytes]]) -> None:
         path.write_bytes(changed)
 
 
-def _source_references(value: bytes) -> Iterator[str]:
-    for line in os.fsdecode(value).replace("\\\n", "").splitlines():
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
-        lexer.whitespace_split = True
+def _source_references(value: bytes, script: Path) -> Iterator[str]:
+    lexer = shlex.shlex(os.fsdecode(value).replace("\\\n", ""), posix=True, punctuation_chars=";&|()<>")
+    lexer.whitespace_split = True
+    while True:
         try:
-            words = list(lexer)
-        except ValueError:
-            # An isolated line of a multiline quote need not be shell syntax.
-            continue
-        for index, word in enumerate(words[:-1]):
+            word = lexer.get_token()
+            if word is None:
+                return
             if word in {"source", "."}:
-                argument = index + 1
-                if words[argument] == "--":
-                    argument += 1
-                if argument < len(words):
-                    yield words[argument]
+                reference = lexer.get_token()
+                if reference == "--":
+                    reference = lexer.get_token()
+                if reference is not None:
+                    yield reference
+        except ValueError as error:
+            raise ValueError(f"cannot inspect sourced dependencies in {script}: {error}") from error
 
 
 def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
@@ -166,15 +166,25 @@ def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
         if path.suffix in {".sh", ".py"} or path.read_bytes().startswith(b"#!"):
             scripts.add(path)
     pending = list(scripts)
+    sourced: set[Path] = set()
+    inspected: set[Path] = set()
     # Scripts can cd before sourcing. Conservatively search every copied
     # directory instead of assuming the entry script's initial working directory.
-    working_dirs = {frozen_root} | {path.parent for path in files}
+    working_dirs = {frozen_root} | {path for path in frozen_root.rglob("*") if path.is_dir()}
     while pending:
         script = pending.pop()
+        if script in inspected:
+            continue
         value = script.read_bytes()
         if b"\0" in value:
             continue
-        for text in _source_references(value):
+        first = value.split(b"\n", 1)[0]
+        if script not in sourced and (
+            script.suffix == ".py" or (first.startswith(b"#!") and b"python" in first.lower())
+        ):
+            continue
+        inspected.add(script)
+        for text in _source_references(value, script):
             if any(part in text for part in ("$", "`")):
                 # Runtime-constructed dependencies cannot be discovered statically.
                 continue
@@ -186,9 +196,11 @@ def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
                 candidate = candidate.resolve()
                 if reference.is_absolute() and not candidate.is_relative_to(frozen_root):
                     raise ValueError(f"cannot relocate live sourced script reference {str(reference)!r} in {script}")
-                if candidate in files and candidate not in scripts:
+                if candidate in files:
                     scripts.add(candidate)
-                    pending.append(candidate)
+                    if candidate not in sourced:
+                        sourced.add(candidate)
+                        pending.append(candidate)
     return scripts
 
 
