@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from district import drain as drain_flag
-from district import host, install_state, postcheck, systemd
+from district import host, install_state, postcheck, preflight, systemd
 from district.engine_cleanup import cleanup
 from district.host import DistrictError, run
 from district.service import remaining_timeout
@@ -43,7 +43,6 @@ EXTRA_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 SHA = re.compile(r"^[0-9a-f]{40}$")
 SEMVER_TAG = re.compile(
     r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$")
-UNIT_HEADER = re.compile(r"(?m)^# ([^\n]+)\n")
 
 
 def factory_extras(data: dict) -> list[str]:
@@ -875,17 +874,10 @@ def policy(data: dict) -> tuple[str, list[str]]:
 # ---------------------------------------------------------------- upgrade
 
 
-def _rendered_units(output: str) -> dict[str, str]:
-    matches = list(UNIT_HEADER.finditer(output))
-    units = {}
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else None
-        units[match.group(1)] = output[match.end():end].removesuffix("\n")
-    return units
 
 
 def _units_changed(slug: str, output: str, backend) -> bool:
-    wanted = _rendered_units(output)
+    wanted = preflight.rendered_units(output)
     unit = host.unit_name(slug)
     if not wanted or any(not name.startswith(unit) for name in wanted):
         return True
@@ -909,7 +901,7 @@ def _argv_error(argv, tool: Path, cli: Path, runner) -> str | None:
 
 
 def _render_errors(output: str, tool: Path, cli: Path, runner) -> list[str]:
-    units = _rendered_units(output)
+    units = preflight.rendered_units(output)
     if not any(name.endswith((".service", ".plist")) for name in units):
         return ["factory install --print: no rendered Factory service"]
     errors = []
@@ -934,17 +926,20 @@ def _render_errors(output: str, tool: Path, cli: Path, runner) -> list[str]:
 
 
 def plan_apply(targets: dict[str, dict], backend, *, run_cmd=None, env=None,
-               errors: dict[str, list[str]] | None = None) -> dict[str, bool]:
+               errors: dict[str, list[str]] | None = None, rendered: dict[str, str] | None = None,
+               include_disabled: bool = False) -> dict[str, bool]:
     run_cmd = run if run_cmd is None else run_cmd
     backend = backend or host.service_backend()
     changes = {}
     tool, cli = host.factory_tool_paths(run_cmd)
     for slug, table in targets.items():
-        if table.get("disabled_at"):
+        if table.get("disabled_at") and not include_disabled:
             changes[slug] = False
             continue
         kwargs = {"env": env} if env is not None else {}
         proc = run_cmd([str(cli), "install", "--print"], cwd=Path(table["path"]), **kwargs)
+        if rendered is not None and proc.returncode == 0:
+            rendered[slug] = proc.stdout
         if errors is not None:
             failures = ([f"factory install --print exited {proc.returncode}: {proc.stderr.strip()}"]
                         if proc.returncode else _render_errors(proc.stdout, tool, cli, run_cmd))
@@ -1197,10 +1192,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     """`context` is the (run_cmd, backend) the fleet engine step already built for this host."""
     all_repos = _host_repos(data, host_name)
     run_cmd, backend = context or _host_context(data, host_name)
-    install_env = None
-    if host_name != "local":
-        facts = run_cmd.facts()
-        install_env = {"PATH": host.service_path(facts["path"], home=Path(facts["home"]))}
+    install_env = preflight.install_environment(run_cmd)
     previous = installed_engine_commit(data, host_name)
 
     rows = []
@@ -1235,11 +1227,24 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
         return rows, 1, (0, [])
 
     record.observe(data)
-    for slug, table in targets.items():
-        if args.reset and host_name not in record.drains and not reset(slug, table, data, record, backend=backend):
-            code = 1
     render_errors = {}
-    changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env, errors=render_errors)
+    rendered = {}
+    changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env, errors=render_errors,
+                         rendered=rendered, include_disabled=bool(args.reset))
+    for slug, table in targets.items():
+        if (engine_result == "failed" or slug in render_errors or host_name in record.drains
+                or (table.get("disabled_at") and not args.reset)):
+            continue
+        timer = f"{host.unit_name(slug)}.timer"
+        if not (args.reset or changes[slug] or backend.is_active(timer) != "active"):
+            continue
+        for item in preflight.check(data, host_name, slug, table, rendered[slug], run_cmd=run_cmd):
+            if item["status"] == "FAIL":
+                render_errors.setdefault(slug, []).append(f"{item['label']}: {item['detail']}")
+            elif item["status"] == "WARN":
+                print(f"WARN {item['label']}: {item['detail']}")
+        if args.reset and slug not in render_errors and not reset(slug, table, data, record, backend=backend):
+            code = 1
     _, factory_cli = host.factory_tool_paths(run_cmd)
     for slug, table in targets.items():
         if engine_result == "failed":

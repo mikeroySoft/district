@@ -20,7 +20,7 @@ from pathlib import Path
 
 import tomli_w
 
-from district import host
+from district import host, preflight
 from district.host import DistrictError, run
 
 CONFIG_NAME = ".factory.toml"
@@ -451,6 +451,26 @@ def dry_run(target: str, args: argparse.Namespace, data: dict) -> int:
     return 0
 
 
+def scheduler_preflight(data: dict, name: str, slug: str, table: dict) -> None:
+    runner = run
+    cli = "factory"
+    if name != "local":
+        runner = host.remote_runner(name, data["hosts"][name])
+        host.sync_remote_config(data, name, runner)
+        _, cli = host.factory_tool_paths(runner)
+    rows = preflight.render(data, name, slug, table, run_cmd=runner,
+                            env=preflight.install_environment(runner), cli=cli)
+    failures = []
+    for item in rows:
+        if item["status"] in ("FAIL", "WARN"):
+            message = f"{item['label']}: {item['detail']}"
+            print(f"{item['status']} {message}")
+            if item["status"] == "FAIL":
+                failures.append(message)
+    if failures:
+        raise DistrictError("scheduler preflight failed; nothing loaded: " + " | ".join(failures))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district add", description=__doc__.split("\n", 1)[0])
     parser.add_argument("target", help="path to a checkout, or a GitHub URL to clone")
@@ -511,8 +531,9 @@ def main(argv: list[str]) -> int:
     table.setdefault("dashboard", {})["port"] = port
     host.save(data)
     print(f"registered {slug} at {root} (dashboard port {port})")
-    if args.host not in (None, "local"):
-        print(f"{slug}: on host {args.host} (remote hosts not supported yet, #96)")
+    if wanted != "local":
+        scheduler_preflight(data, wanted, slug, table)
+        print(f"{slug}: on host {wanted}; run `district apply {slug}` to install")
         return 0
 
     # 2. fork detection
@@ -557,6 +578,7 @@ def main(argv: list[str]) -> int:
         print(f"wrote {repo_file}")
 
     # 3. the factory finishes its own onboarding; any failure leaves the registry entry so `apply` can resume
+    scheduler_preflight(data, "local", slug, table)
     for cmd in (["factory", "init", "--no-labels"], ["factory", "init", "--labels-only"], ["factory", "doctor"], ["factory", "install"]):
         proc = run(cmd, cwd=root)
         sys.stdout.write(proc.stdout)

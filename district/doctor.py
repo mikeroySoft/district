@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 from ipaddress import ip_address
+import io
 import json
 import os
 import re
@@ -15,7 +17,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from district import drain, host, streak
+from district import drain, host, preflight, streak
 from district.add import remote_slug
 from district.apply import POLICY_ENV
 from district.service import SystemdUserBackend
@@ -27,7 +29,6 @@ UNITS = (
     "district-dashboard.service",
 )
 POLICY_TOOLS = {"uv": POLICY_ENV[1], "npm": POLICY_ENV[0]}
-TOOLCHAINS = {"macos-xcode"}
 HOST_COMMAND_TIMEOUT = 30
 SSH_CONNECT_TIMEOUT = 10
 
@@ -83,33 +84,36 @@ def _version_row(name: str, label: str, argv: list[str], runner,
                  env: dict[str, str]) -> dict[str, str]:
     proc = runner(argv, env=env)
     if proc.returncode:
-        return row("FAIL", f"host {name} macos-xcode {label}", _failure(proc, " ".join(argv)))
+        return row("WARN", f"host {name} macos-xcode {label}", _failure(proc, " ".join(argv)))
     detail = (proc.stdout or proc.stderr).strip()
     return row(
-        "PASS" if detail else "FAIL",
+        "PASS" if detail else "WARN",
         f"host {name} macos-xcode {label}",
         detail or f"{' '.join(argv)} returned no version",
     )
 
 
-def macos_xcode_rows(name: str, table: dict) -> list[dict[str, str]]:
-    runner = lambda argv, **kwargs: _host_run(name, table, argv, **kwargs)
-    path_proc = runner(["printenv", "PATH"])
-    if path_proc.returncode:
-        return [row("FAIL", f"host {name} macos-xcode", _failure(path_proc, "printenv PATH"))]
-    raw_path = path_proc.stdout.strip()
-    if not raw_path:
-        return [row("FAIL", f"host {name} macos-xcode", "printenv PATH returned no value")]
-    path = raw_path if "/opt/homebrew/bin" in raw_path.split(":") else f"{raw_path}:/opt/homebrew/bin"
-    env = {"PATH": path}
-    rows = [row("PASS", f"host {name} macos-xcode launchd PATH", f"/opt/homebrew/bin in {path}")]
+def macos_xcode_rows(name: str, table: dict, *, environment: dict[str, str],
+                     run_cmd) -> list[dict[str, str]]:
+    def runner(argv, **_kwargs):
+        try:
+            return run_cmd(["/usr/bin/env", "-i", *(f"{key}={value}" for key, value in environment.items()), *argv],
+                           timeout=HOST_COMMAND_TIMEOUT)
+        except OSError as exc:
+            return subprocess.CompletedProcess(argv, 127, "", str(exc))
+        except subprocess.TimeoutExpired as exc:
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or str(exc)
+            return subprocess.CompletedProcess(argv, 124, "", stderr)
+
+    env = environment
+    rows = []
 
     xcode = runner(["xcodebuild", "-version"], env=env)
     xcode_label = f"host {name} macos-xcode xcodebuild"
     if xcode.returncode:
-        rows.append(row("FAIL", xcode_label, _failure(xcode, "xcodebuild -version")))
+        rows.append(row("WARN", xcode_label, _failure(xcode, "xcodebuild -version")))
     elif not (version := re.search(r"^Xcode\s+(.+)$", xcode.stdout, re.MULTILINE)):
-        rows.append(row("FAIL", xcode_label, "xcodebuild -version returned no Xcode version"))
+        rows.append(row("WARN", xcode_label, "xcodebuild -version returned no Xcode version"))
     elif expected := table.get("xcode_version"):
         actual = version.group(1).strip()
         rows.append(row(
@@ -130,9 +134,9 @@ def macos_xcode_rows(name: str, table: dict) -> list[dict[str, str]]:
         version = runner(["xcodegen", "--version"], env=env)
         detail = (version.stdout or version.stderr).strip()
         if version.returncode:
-            rows.append(row("FAIL", f"host {name} macos-xcode xcodegen", _failure(version, "xcodegen --version")))
+            rows.append(row("WARN", f"host {name} macos-xcode xcodegen", _failure(version, "xcodegen --version")))
         elif not detail:
-            rows.append(row("FAIL", f"host {name} macos-xcode xcodegen", "xcodegen --version returned no version"))
+            rows.append(row("WARN", f"host {name} macos-xcode xcodegen", "xcodegen --version returned no version"))
         else:
             rows.append(row("PASS", f"host {name} macos-xcode xcodegen", f"{detail} ({prefix})"))
 
@@ -169,30 +173,35 @@ def macos_xcode_rows(name: str, table: dict) -> list[dict[str, str]]:
 
 
 def toolchain_rows(data: dict) -> list[dict[str, str]]:
-    requirements: dict[str, set[str]] = {}
+    """Rerun onboarding preflight on every factory's owning host, without installing."""
     rows = []
+    runners = {"local": host.run}
+    profiled = set()
     for slug, table in host.repos(data).items():
-        if "toolchain" not in table:
-            continue
-        profile = table["toolchain"]
-        if not isinstance(profile, str) or not profile:
-            rows.append(row("FAIL", f"repo {slug} toolchain", "must be a non-empty string"))
-            continue
         for name in host.repo_hosts(table, slug):
-            requirements.setdefault(name, set()).add(profile)
-    configured = {"local": {
-        "platform": "macos" if sys.platform == "darwin" else "linux",
-    }, **host.hosts(data)}
-    for name, profiles in sorted(requirements.items()):
-        table = configured[name]
-        for profile in sorted(profiles):
-            if profile not in TOOLCHAINS:
-                rows.append(row("FAIL", f"host {name} toolchain", f"unknown profile {profile!r}"))
-            elif table["platform"] != "macos":
-                rows.append(row("FAIL", f"host {name} macos-xcode",
-                                f"requires platform macos, found {table['platform']}"))
-            else:
-                rows += macos_xcode_rows(name, table)
+            label = f"host {name} repo {slug} scheduler preflight"
+            try:
+                if name not in runners:
+                    runners[name] = host.remote_runner(name, data["hosts"][name])
+                runner = runners[name]
+                cli = "factory" if name == "local" else host.factory_tool_paths(runner)[1]
+                install_env = ({**os.environ, "PATH": host.service_path()} if name == "local"
+                               else preflight.install_environment(runner))
+                proc = runner([str(cli), "install", "--print"], cwd=Path(table["path"]),
+                              env=install_env, timeout=HOST_COMMAND_TIMEOUT)
+                if proc.returncode:
+                    rows.append(row("FAIL", label, _failure(proc, "factory install --print")))
+                    continue
+                checks = preflight.check(data, name, slug, table, proc.stdout, run_cmd=runner)
+                rows += checks
+                if (table.get("toolchain") == "macos-xcode" and name not in profiled
+                        and not any(item["status"] == "FAIL" for item in checks)):
+                    environment = preflight.scheduler_environment(proc.stdout, runner)
+                    target = data.get("hosts", {}).get(name, {})
+                    rows += macos_xcode_rows(name, target, environment=environment, run_cmd=runner)
+                    profiled.add(name)
+            except (OSError, ValueError, subprocess.TimeoutExpired, host.RemoteHostError, host.DistrictError) as exc:
+                rows.append(row("FAIL", label, str(exc)))
     return rows
 
 
@@ -460,7 +469,8 @@ def check() -> list[dict[str, str]]:
 
     rows += factory_rows(data)
     rows.append(gh_auth())
-    rows += toolchain_rows(data)
+    with contextlib.redirect_stdout(io.StringIO()):
+        rows += toolchain_rows(data)
     rows += remote_config_rows(data)
     rows += parity_rows(data)
     if drain_status := drain.status():

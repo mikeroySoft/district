@@ -96,7 +96,8 @@ class SystemdPathsTest(unittest.TestCase):
         os.environ['UV_TOOL_DIR'] = str(case.tool.parent)
         case.install_receipt(fixtures.TARGET)
         escaped = str(case.tool / 'bin/python').replace('Application Support', r'Application\x20Support')
-        case.rendered = lambda: ('factory-widgets.service', f'[Service]\nExecStart="{escaped}" -m factory dispatch\n')
+        case.rendered = lambda: ('factory-widgets.service',
+                                 f'[Service]\nEnvironment=PATH={case.cli.parent}\nExecStart="{escaped}" -m factory dispatch\n')
         case.backend.definitions_changed.return_value = True
         self.assertEqual(case.apply(), 0, case.output.getvalue())
         self.assertTrue((host.unit_dir() / 'factory-widgets.service').exists())

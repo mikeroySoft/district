@@ -43,7 +43,7 @@ only once.
 | `district drain --clear [--host NAME]` | Remove a local or remote host's drain flag while holding the operation lock. Use this for explicit operator recovery; expired flags already stop blocking Factory. |
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table across local and remote hosts. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. An unreachable host keeps its factories visible as unreachable with the last successful observation time and produces unknown exit 2, not fleet failure exit 1. Exit 1 remains operational attention or a failed controller `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row); exit 0 means every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
-| `district doctor` | Check District's own host prerequisites and every toolchain profile declared by a managed repository. `--json`. |
+| `district doctor` | Check District's own host prerequisites, rerun each factory's scheduler toolchain preflight, and check declared toolchain profiles. `--json`. |
 | `district report` | Print a read-only Markdown fleet review across every host; each repository section names its host and unreachable last-seen state. The install section comes from the persisted install-state record. |
 | `district metrics [slug]` | Per-factory `git`/`gh` metrics from the hourly cache. `--refresh`, `--max-age`. |
 | `district dashboard` | Serve the fleet console and host-badged Atlas on `127.0.0.1:8760`. `--install` enables the dashboard, metrics, and apply units; `--host` adds read-only LAN viewing. Remote collection is controller-initiated SSH and opens no listeners. |
@@ -149,15 +149,34 @@ nested tables merge key by key. `defaults_unset` removes inherited dotted keys
 after the merge. List each inherited signing environment key there to disable
 signing on one host. Neither setting changes the controller's local config.
 
-`toolchain = "macos-xcode"` makes `district doctor` check that repository's
-assigned host. Repositories on the same host share one profile check. The profile
-runs each command with the launchd PATH District configures, including
-`/opt/homebrew/bin`, and reports the Xcode version, working `xcodebuild`,
-Homebrew `xcodegen`, `swift`, `cargo`, `rustc`, authenticated `gh`, and an
-available iOS Simulator runtime. Optional host key `xcode_version` pins the
-expected version and reports drift as `WARN`. Missing tools, failed commands,
-unknown profiles, and platform mismatches are `FAIL` rows prefixed with the host
-name.
+Before `district add` finishes onboarding or `district apply` installs scheduler
+jobs or resets a capped factory, District renders `factory install --print` on
+the owning host. No-op and draining applies do not rerun tool probes. It takes
+PATH from the rendered systemd service or launchd plist, and HOME from that
+environment (or the owning user's home when omitted). Resolution runs under
+`env -i` with only those PATH/HOME values; remote checks use `RemoteRunner`, not
+the controller's shell environment. Remote `add --host` preflights registration;
+`district apply <slug>` installs its jobs.
+
+Required tools are `factory`, `gh`, `git`, `uv`, and `python3`, plus the effective
+review/manager command binaries and the first executable of every
+`[[gate.check]]` in the owning checkout's `.factory.toml`. Host defaults,
+overrides, and `defaults_unset` apply to review/manager commands. A missing repo
+config contributes no gates. A missing binary fails before installation, naming
+the host, binary, requiring gate/config/profile, and searched PATH. Known tools
+receive version probes (`xcodebuild -version`, for example); failed probes are
+WARN, not activation blockers. Unknown commands and relative gate scripts are
+resolved without executing them for version discovery. `district doctor` reruns
+the same read-only preflight for already-registered factories.
+
+`toolchain = "macos-xcode"` additionally requires `cargo`, `xcodegen`, `swift`,
+and `xcodebuild` during onboarding and apply. Doctor's supplemental profile
+diagnostics run under that scheduler environment and report Xcode, Homebrew
+`xcodegen`, `swift`, `cargo`, `rustc`, authenticated `gh`, and an available iOS
+Simulator runtime. Repositories on the same host share one supplemental profile
+check. Optional host key `xcode_version` reports version drift as WARN. Unknown
+profiles, platform mismatches, missing required tools, and failed auth/runtime
+checks are FAIL; version-probe failures are WARN.
 
 `platform` selects systemd user units for Linux and
 `~/Library/LaunchAgents/<label>.plist` for macOS. Launchd jobs add
