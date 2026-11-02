@@ -2,6 +2,7 @@
 import os
 import shlex
 import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -16,7 +17,8 @@ class ProcessObservationTest(unittest.TestCase):
         self.addCleanup(self.case.doCleanups)
 
     def observation_case(self, *, remote, platform="macos", mode="localized",
-                         phase="before", command="dispatch", rollback=False, form="module"):
+                         phase="before", command="dispatch", rollback=False, form="module",
+                         argv_override=None, busy=True):
         case = self.case
         if mode == "width":
             case.tool = case.root / ("long-launcher-" + "x" * 120) / "factory"
@@ -26,9 +28,6 @@ class ProcessObservationTest(unittest.TestCase):
             case.cli = case.root / "Tool Bin's Space/factory"
             os.environ["UV_TOOL_DIR"] = str(case.tool.parent)
             os.environ["UV_TOOL_BIN_DIR"] = str(case.cli.parent)
-            if form == "ambiguous":
-                case.cli = case.tool / "bin/python -m/factory"
-                os.environ["UV_TOOL_BIN_DIR"] = str(case.cli.parent)
         case.install_receipt(fixtures.OLD)
         case.calls.clear()
         case.events.clear()
@@ -54,16 +53,44 @@ class ProcessObservationTest(unittest.TestCase):
         probes = []
         original = case.run_cmd
         launcher = case.tool / "bin" / "python"
-        argv_text = (f"{launcher} -m factory {command}" if form in ("module", "unparseable-module") else
-                     f"{case.cli} {command}" if form in ("launcher", "ambiguous", "unparseable") else
-                     f"{launcher} -u {case.cli} {command}")
-        if form in ("unparseable", "unparseable-module"):
-            argv_text = '"' + argv_text
+        exact_argv = ([str(launcher), "-m", "factory", command] if form == "module" else
+                      [str(case.cli), command] if form == "launcher" else
+                      [str(launcher), "-u", str(case.cli), command])
+        if form in ("option-X", "option-W"):
+            flag, value = (("-X", "pycache_prefix=/tmp/Cache Files") if form == "option-X"
+                           else ("-W", "ignore:message with spaces:UserWarning"))
+            exact_argv = [str(launcher), flag, value, "-m", "factory", command]
+        if argv_override is not None:
+            exact_argv = argv_override
+        argv_text = " ".join(exact_argv)
+        if mode == "mention":
+            exact_argv = ["/usr/bin/python3", "-c", f"print({str(case.tool)!r})"]
+            argv_text = " ".join(exact_argv)
 
         def commands(argv, **kwargs):
             raw = list(argv)
             if argv[:2] == ["env", "LC_ALL=C"]:
                 argv = argv[2:]
+            if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
+                live = late[0] if rollback else phase == "before" or ("pause", "factory-widgets.timer") in case.events
+                root = case.root / f"proc-{mode}"
+                directory = root / "321"
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / "stat").write_text("321 (worker ( odd ) name)) S 1 " + "0 " * 17 + "100 0\n")
+                (directory / "cgroup").write_text("0::/user/session.scope\n")
+                cmdline = directory / "cmdline"
+                if mode == "unreadable":
+                    if cmdline.is_file():
+                        cmdline.unlink()
+                    cmdline.mkdir(exist_ok=True)
+                else:
+                    cmdline.write_bytes(b"\0".join(word.encode() for word in exact_argv) + b"\0"
+                                        if live and mode != "empty" else b"")
+                if mode == "vanished":
+                    (directory / "stat").unlink(missing_ok=True)
+                probes.append(raw)
+                return subprocess.run([sys.executable, "-c", argv[2].replace("'/proc/'", repr(str(root) + "/")),
+                                       *argv[3:]], capture_output=True, text=True, timeout=kwargs["timeout"])
             if argv[0] == "ps":
                 self.assertGreater(kwargs.get("timeout", 0), 0)
                 self.assertLessEqual(kwargs["timeout"], 5)
@@ -98,6 +125,8 @@ class ProcessObservationTest(unittest.TestCase):
                 parts = shlex.split(argv[-1])
                 if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                     parts = shlex.split(parts[-1])
+                if parts[:2] == ["python3", "-c"] and "/proc/" in parts[2]:
+                    return commands(parts, **kwargs)
                 if parts[0] == "ps" or parts[:3] == ["env", "LC_ALL=C", "ps"]:
                     return commands(parts, **kwargs)
                 return transport(argv, **kwargs)
@@ -109,12 +138,19 @@ class ProcessObservationTest(unittest.TestCase):
              mock.patch.object(apply, "run", side_effect=commands):
             result = apply.reconcile_engine(case.data, record, run_cmd=runner or apply.run,
                                             backend=case.backend, host_name=name)
+        if not busy:
+            self.assertEqual(result, "applied", case.output.getvalue())
+            self.assertEqual(len(case.installs()), 1)
+            self.assertEqual(case.active, {"factory-widgets.timer", "factory-idle.timer"})
+            self.assertEqual(record.deferred, {})
+            self.assertEqual(apply._receipt_sha(case.tool, case.run_cmd), fixtures.TARGET)
+            return
         self.assertEqual(result, "failed" if rollback else "deferred", case.output.getvalue())
         self.assertEqual(len(case.installs()), int(rollback), "no uv replacement while work is live")
         reason = case.output.getvalue() if rollback else record.deferred[
             "engine:remote" if remote else "engine"]["reason"]
-        self.assertIn("ambiguous Factory command" if form in ("ambiguous", "unparseable", "unparseable-module") else
-                      "invalid C-locale ps row" if mode in ("malformed", "identity-malformed")
+        self.assertIn("invalid C-locale ps row" if mode in ("malformed", "identity-malformed")
+                      else "ambiguous Factory command text" if platform == "macos" or mode in ("empty", "unreadable")
                       else f"pid 321 factory {command}", reason)
         if rollback:
             self.assertIn("rollback FAIL", reason)
@@ -134,7 +170,7 @@ class ProcessObservationTest(unittest.TestCase):
         self.assertTrue(probes)
         if platform == "macos":
             self.assertTrue(all(argv[:3] == ["env", "LC_ALL=C", "ps"] for argv in probes), probes)
-            if mode != "malformed" and form not in ("ambiguous", "unparseable", "unparseable-module"):
+            if mode != "malformed":
                 self.assertTrue(any("args=" not in argv[-1] for argv in probes), probes)
 
     def test_macos_locale_and_malformed_rows_never_hide_work(self):
@@ -159,7 +195,7 @@ class ProcessObservationTest(unittest.TestCase):
                 for blocked in ("local", "remote") if phase == "before" else ("local",) if phase in ("after", "rollback") else ("remote",):
                     for command in ("gate", "dispatch"):
                         with self.subTest(mode=mode, phase=phase, blocked=blocked, command=command):
-                            self.case.hand_work_fleet(f"dashboard-{command}", phase=phase,
+                            self.case.hand_work_fleet(command, phase=phase,
                                                       blocked=blocked, platform="macos", lstart=mode)
 
     def test_malformed_identity_observation_defers_named_work(self):
@@ -194,12 +230,55 @@ class ProcessObservationTest(unittest.TestCase):
                             with self.subTest(platform=platform, form=form, phase=phase,
                                               blocked=blocked, command=command):
                                 self.case.hand_work_fleet(
-                                    f"dashboard-{command}", phase=phase, blocked=blocked,
+                                    f"dashboard-{command}" if platform == "linux" else command, phase=phase, blocked=blocked,
                                     platform=platform, space_paths=True, form=form)
 
-    def test_ambiguous_known_paths_fail_closed_with_named_reason(self):
+    def test_text_only_observations_fail_closed(self):
+        for remote in (False, True):
+            for mode in ("spaces", "mention"):
+                for form in ("option-X", "option-W"):
+                    for command in ("gate", "dispatch"):
+                        with self.subTest(remote=remote, mode=mode, form=form, command=command):
+                            self.observation_case(remote=remote, platform="macos", mode=mode,
+                                                  form=form, command=command)
+
+    def test_missing_exact_cmdline_is_named_busy(self):
+        for remote in (False, True):
+            for mode in ("empty", "unreadable"):
+                with self.subTest(remote=remote, mode=mode):
+                    self.observation_case(remote=remote, platform="linux", mode=mode)
+
+    def test_multiword_python_options_block_replacement_and_automatic_rollback(self):
+        for remote in (False, True):
+            for form in ("option-X", "option-W"):
+                for command in ("gate", "dispatch"):
+                    for phase in ("before", "after", "rollback"):
+                        with self.subTest(remote=remote, form=form, command=command, phase=phase):
+                            self.observation_case(remote=remote, platform="linux", form=form,
+                                                  command=command, phase=phase, rollback=phase == "rollback")
+
+    def test_multiword_python_options_block_fleet_replacement_and_outer_rollback(self):
+        for option in (("-X", "pycache_prefix=/tmp/Cache Files"),
+                       ("-W", "ignore:message with spaces:UserWarning")):
+            for phase, blocked in (("before", "local"), ("before", "remote"), ("after", "local"),
+                                   ("install", "remote"), ("rollback", "local")):
+                for command in ("gate", "dispatch"):
+                    with self.subTest(option=option, phase=phase, blocked=blocked, command=command):
+                        self.case.hand_work_fleet(f"dashboard-{command}", phase=phase, blocked=blocked,
+                                                  python_option=option)
+
+    def test_vanished_process_and_exact_dashboard_do_not_block(self):
+        for remote in (False, True):
+            with self.subTest(remote=remote, work="vanished"):
+                self.observation_case(remote=remote, platform="linux", mode="vanished", busy=False)
+            with self.subTest(remote=remote, work="dashboard"):
+                self.observation_case(remote=remote, platform="linux", form="option-X",
+                                      command="dashboard", busy=False)
+
+    def test_unrelated_python_scripts_without_managed_paths_stay_idle(self):
         for platform in ("linux", "macos"):
             for remote in (False, True):
-                for form in ("ambiguous", "unparseable", "unparseable-module"):
-                    with self.subTest(platform=platform, remote=remote, form=form):
-                        self.observation_case(remote=remote, platform=platform, mode="spaces", form=form)
+                for argv in (["/usr/bin/python3", "-c", "print('factory gate')"],
+                             ["/usr/bin/python3", "/tmp/unrelated.py", "-m", "factory", "dispatch"]):
+                    with self.subTest(platform=platform, remote=remote, argv=argv):
+                        self.observation_case(remote=remote, platform=platform, argv_override=argv, busy=False)

@@ -167,12 +167,18 @@ class OneInstallTest(unittest.TestCase):
             self.events.append(("handland", "scan"))
         elif argv[:3] == ["systemctl", "--user", "show"]:
             out = "Id=factory-widgets.service\nControlGroup=\n"
+        elif argv[:2] == ["python3", "-c"] and "'cmdline'" in argv[2]:
+            rows = {}
+            if self.process_busy and ("pause", "factory-widgets.timer") in self.events:
+                command = [str(self.tool / "bin/python"), "-m", "factory", "install"]
+                rows["123"] = ["100", "1", command, " ".join(command)]
+                self.process_busy -= 1
+            out = json.dumps(rows)
         elif argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
             out = "{}"  # Never inspect the real process table from a test.
         elif argv[0] == "ps":
             self.events.append(("processes", "scan"))
             if self.process_busy and ("pause", "factory-widgets.timer") in self.events:
-                self.process_busy -= 1
                 out = f"123 {self.tool}/bin/python -m factory install\n"
         elif argv[:2] == ["git", "rev-parse"]:
             out = OLD + "\n"  # A stale checkout must never be used by --upgrade.
@@ -286,9 +292,12 @@ class OneInstallTest(unittest.TestCase):
                 real_python = self.tool.resolve() / "bin/python"
 
                 def processes(argv, **kwargs):
+                    command = [str(real_python), "-m", "factory", "dispatch", "--ticket", "12"]
+                    if argv[:2] == ["python3", "-c"] and "'cmdline'" in argv[2]:
+                        rows = {"123": ["100", "1", command, " ".join(command)]} if busy[0] else {}
+                        return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
                     if argv[0] == "ps" and busy[0]:
-                        return subprocess.CompletedProcess(
-                            argv, 0, f"123 {real_python} -m factory dispatch --ticket 12\n", "")
+                        return subprocess.CompletedProcess(argv, 0, f"123 {' '.join(command)}\n", "")
                     return run_cmd(argv, **kwargs)
 
                 stack.enter_context(mock.patch.object(self, "run_cmd", side_effect=processes))
@@ -784,7 +793,7 @@ class OneInstallTest(unittest.TestCase):
         self.backend.resume_timer.assert_not_called()
 
     def hand_work_fleet(self, work, *, phase, blocked="remote", fleet=True, platform="linux", lstart=None,
-                        space_paths=False, form="module"):
+                        space_paths=False, form="module", python_option=None):
         self.install_receipt(OLD)
         self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
         self.data["defaults"]["engine_idle_timeout"] = "5s"
@@ -850,9 +859,14 @@ class OneInstallTest(unittest.TestCase):
         scan_started = {}
         command = work.removeprefix("dashboard-")
         observed_tool = self.tool.resolve() if space_paths else self.tool
-        argv_text = (f"{observed_tool}/bin/python -uSmfactory {command}" if form == "module" else
-                     f"{self.cli} {command}" if form == "launcher" else
-                     f"{observed_tool}/bin/python -u {self.cli} {command}")
+        python = str(observed_tool / "bin/python")
+        option = list(python_option or ())
+        command_args = ["--base", "origin/main"] if command == "gate" else ["--ticket", "42"]
+        observed_argv = ([python, *option, "-uSmfactory", command, *command_args]
+                         if form == "module" else
+                         [str(self.cli), command, *command_args] if form == "launcher" else
+                         [python, *option, "-u", str(self.cli), command, *command_args])
+        argv_text = " ".join(observed_argv)
 
         def commands(name, argv, **kwargs):
             raw = list(argv)
@@ -864,12 +878,21 @@ class OneInstallTest(unittest.TestCase):
             if argv[:3] == ["systemctl", "--user", "show"] and work.startswith("dashboard-"):
                 return subprocess.CompletedProcess(argv, 0,
                     "Id=factory-widgets-dashboard.service\nControlGroup=/user/dashboard\n", "")
-            if argv[:2] == ["launchctl", "list"] and work.startswith("dashboard-"):
-                return subprocess.CompletedProcess(argv, 0, "42 0 factory-widgets-dashboard\n", "")
+            if argv[:2] == ["launchctl", "list"]:
+                output = "42 0 factory-widgets-dashboard\n" if work.startswith("dashboard-") else ""
+                return subprocess.CompletedProcess(argv, 0, output, "")
+            if argv[:2] == ["python3", "-c"] and "'cmdline'" in argv[2]:
+                rows = {}
+                if name == blocked and available and command in ("gate", "dispatch"):
+                    parent = "42" if work.startswith("dashboard-") else "1"
+                    rows["321"] = ["100", parent, observed_argv, argv_text]
+                return subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
             if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
-                output = ({"321": ["100", "1"]} if len(argv) == 3 else
-                          {"321": ["100", "0::/user/dashboard/child\n"]} if "'stat'" in argv[2] else
-                          {"321": "0::/user/dashboard/child\n"})
+                group = ("/user/dashboard/child\n" if work.startswith("dashboard-")
+                         else "/user/session.scope\n")
+                cgroup = f"0::{group}"
+                output = ({"321": ["100", cgroup]} if "'stat'" in argv[2] else
+                          {"321": cgroup})
                 return subprocess.CompletedProcess(argv, 0, json.dumps(output), "")
             if argv[0] == "ps" and "ppid=" in argv[-1]:
                 if "lstart=" in argv[-1]:
@@ -879,7 +902,7 @@ class OneInstallTest(unittest.TestCase):
                                  raw[:3] != ["env", "LC_ALL=C", "ps"] else "Thu Nov 12 00:00:00 2026")
                         output = f"321 42 {start}"
                     if "args=" in argv[-1] and name == blocked and available:
-                        output += f" {argv_text}" if space_paths else f" {self.tool}/bin/python -m factory {command}"
+                        output += f" {argv_text}"
                     return subprocess.CompletedProcess(
                         argv, 0, output + "\n42 1 Mon Nov  2 00:00:00 2026\n", "")
                 return subprocess.CompletedProcess(argv, 0, "321 42\n42 1\n", "")
@@ -893,12 +916,8 @@ class OneInstallTest(unittest.TestCase):
                 if name == blocked and available:
                     if work in ("active", "activating", "deactivating") and argv[0] == "systemctl":
                         output = f"handland-4242-merge.service loaded {work} running Hand work\n"
-                    elif space_paths and argv[0] == "ps":
+                    elif command in ("gate", "dispatch") and argv[0] == "ps":
                         output = f"321 {argv_text}\n"
-                    elif command == "gate" and argv[0] == "ps":
-                        output = f"321 {self.cli} gate --base origin/main\n"
-                    elif command == "dispatch" and argv[0] == "ps":
-                        output = f"321 {self.tool.resolve()}/bin/python -uSmfactory dispatch --ticket 42\n"
                 return subprocess.CompletedProcess(argv, 0, output, "")
             if argv[:3] == ["uv", "tool", "install"]:
                 revision = OLD if f"@{OLD}" in argv[5] else TARGET
@@ -936,6 +955,7 @@ class OneInstallTest(unittest.TestCase):
         reason = record.deferred[target]["reason"]
         self.assertIn("invalid C-locale ps row" if lstart == "malformed" else
                       "handland-4242-merge.service" if work in ("active", "activating", "deactivating")
+                      else "ambiguous Factory command text" if platform == "macos"
                       else f"pid 321 factory {command}", reason)
         self.assertEqual(self.active, {"factory-widgets.timer"})
         self.assertEqual(remote_active, {"factory-widgets.timer"})
@@ -985,14 +1005,13 @@ class OneInstallTest(unittest.TestCase):
                 self.hand_work_fleet(work, phase="rollback", blocked="local")
                 self.assertIn("FAIL could not roll back local", self.output.getvalue())
 
-    def test_dashboard_owned_fleet_work_blocks_replacement_and_rollback(self):
-        for platform in ("linux", "macos"):
-            for phase in ("before", "after", "install", "rollback"):
-                for blocked in ("local", "remote") if phase == "before" else ("local",) if phase in ("after", "rollback") else ("remote",):
-                    for command in ("gate", "dispatch"):
-                        with self.subTest(platform=platform, phase=phase, blocked=blocked, command=command):
-                            self.hand_work_fleet(f"dashboard-{command}", phase=phase,
-                                                 blocked=blocked, platform=platform)
+    def test_exact_dashboard_owned_linux_work_blocks_replacement_and_rollback(self):
+        for phase in ("before", "after", "install", "rollback"):
+            for blocked in ("local", "remote") if phase == "before" else ("local",) if phase in ("after", "rollback") else ("remote",):
+                for command in ("gate", "dispatch"):
+                    with self.subTest(phase=phase, blocked=blocked, command=command):
+                        self.hand_work_fleet(f"dashboard-{command}", phase=phase,
+                                             blocked=blocked, platform="linux")
 
     def test_configured_extras_are_preserved_on_target_and_rollback(self):
         self.data["defaults"]["factory_extras"] = ["atlas", "ops"]
@@ -1787,6 +1806,16 @@ class OneInstallTest(unittest.TestCase):
         identity_probes = [0]
         original = self.run_cmd
         proc_root = self.root / "proc"
+
+        def exact_argv(pid, live, paused):
+            if pid == "123" and live:
+                return [str(self.tool / "bin/python"), "-m", "factory", "dispatch"]
+            if pid == "456":
+                command = (dashboard_work if dashboard_live[0] and (phase == "before" or paused)
+                           else "dashboard")
+                return [str(self.tool / "bin/python"), "-m", "factory", command]
+            return None
+
         if proc_files:
             for pid, parent, start in (("123", "42", "100"), ("42", "1", "90"), ("456", "1", "80")):
                 directory = proc_root / pid
@@ -1794,7 +1823,12 @@ class OneInstallTest(unittest.TestCase):
                 # starttime is field 22, not a whitespace offset in comm.
                 (directory / "stat").write_text(
                     f"{pid} (worker ( odd ) name)) S {parent} " + "0 " * 17 + f"{start} 0\n")
-                (directory / "cgroup").write_text("0::/user/factory-widgets.service/child\n")
+                group = ("factory-widgets-dashboard.service" if pid == "456"
+                         else "factory-widgets.service")
+                (directory / "cgroup").write_text(f"0::/user/{group}/child\n")
+                command = exact_argv(pid, True, False)
+                (directory / "cmdline").write_bytes(
+                    b"\0".join(os.fsencode(arg) for arg in command) + b"\0" if command else b"")
 
         def commands(argv, **kwargs):
             if argv[:3] == ["env", "LC_ALL=C", "ps"]:
@@ -1818,21 +1852,20 @@ class OneInstallTest(unittest.TestCase):
                             identity == "reused" and pid == "123" or
                             identity == "parent-reused" and pid == "99" or
                             identity == "anchor-reused" and pid == "42") else "Mon Nov  2 00:00:00 2026"
-                        command = f"{self.tool}/bin/python -m factory dispatch" if pid == "123" and live else ""
-                        if pid == "456":
-                            command = f"{self.tool}/bin/python -m factory {dashboard_work if dashboard_live[0] and (phase == 'before' or paused) else 'dashboard'}"
-                        rows.append(f"{pid} {parent} {start} {command}")
+                        command = exact_argv(pid, live, paused)
+                        rows.append(" ".join([pid, parent, start, *command]) if command
+                                    else f"{pid} {parent} {start}")
                     scans[0] += int(paused and "args=" in argv[-1])
                     return subprocess.CompletedProcess(argv, 0, "\n".join(rows), "")
                 if "ppid=" in argv[-1]:
                     return subprocess.CompletedProcess(argv, 0, "123 42\n42 1\n456 1\n", "")
-                scans[0] += int(paused)
-                # Only a semantic dashboard command is exempt, not its owner.
-                command = dashboard_work if dashboard_live[0] and (phase == "before" or paused) else "dashboard"
-                rows = f"456 {self.tool}/bin/python -m factory {command}\n"
-                if live:
-                    rows += f"123 {self.tool}/bin/python -m factory dispatch\n"
-                return subprocess.CompletedProcess(argv, 0, rows, "")
+                rows = []
+                for pid in ("456", "123"):
+                    if command := exact_argv(pid, live, paused):
+                        rows.append(f"{pid} {' '.join(command)}")
+                if platform == "macos":
+                    scans[0] += int(paused)
+                return subprocess.CompletedProcess(argv, 0, "\n".join(rows), "")
             probe = (argv[:3] == ["systemctl", "--user", "show"]
                      or argv[:2] == ["launchctl", "list"]
                      or argv[:2] == ["python3", "-c"] and "/proc/" in argv[2])
@@ -1840,6 +1873,25 @@ class OneInstallTest(unittest.TestCase):
                 self.assertGreater(kwargs.get("timeout", 0), 0)
                 self.assertLessEqual(kwargs["timeout"], 5 - clock[0] + 1e-9)
                 ownership.append(list(argv))
+                if argv[:2] == ["python3", "-c"] and "'cmdline'" in argv[2]:
+                    if proc_files:
+                        for pid in ("123", "42", "456"):
+                            command = exact_argv(pid, live, paused)
+                            (proc_root / pid / "cmdline").write_bytes(
+                                b"\0".join(os.fsencode(arg) for arg in command) + b"\0"
+                                if command else b"")
+                        script = argv[2].replace("'/proc/'", repr(str(proc_root) + "/"))
+                        result = subprocess.run(
+                            [sys.executable, "-c", script, *argv[3:]],
+                            capture_output=True, text=True, timeout=kwargs["timeout"])
+                    else:
+                        rows = {}
+                        for pid, start, parent in (("123", "100", "42"), ("456", "80", "1")):
+                            if command := exact_argv(pid, live, paused):
+                                rows[pid] = [start, parent, command, " ".join(command)]
+                        result = subprocess.CompletedProcess(argv, 0, json.dumps(rows), "")
+                    scans[0] += int(paused)
+                    return result
                 if proc_files:
                     if argv[0] == "systemctl":
                         stat = proc_root / "123/stat"
@@ -1851,9 +1903,6 @@ class OneInstallTest(unittest.TestCase):
                         script = argv[2].replace("'/proc/'", repr(str(proc_root) + "/"))
                         return subprocess.run([sys.executable, "-c", script, *argv[3:]],
                                               capture_output=True, text=True, timeout=kwargs["timeout"])
-                if argv[:2] == ["python3", "-c"] and len(argv) == 3:
-                    return subprocess.CompletedProcess(argv, 0, json.dumps({
-                        "123": ["100", "42"], "42": ["90", "1"], "456": ["80", "1"]}), "")
                 if work == "probe-failure":
                     return subprocess.CompletedProcess(argv, 1, "", "fake ownership unavailable")
                 if work == "probe-timeout":
@@ -1869,13 +1918,15 @@ class OneInstallTest(unittest.TestCase):
                         out = out.replace("42 0 factory-widgets\n", "")
                 else:
                     group = "/user/session.scope" if work == "hand" else "/user/factory-widgets.service/child"
-                    out = json.dumps({"123": f"0::{group}\n",
-                                      "456": "0::/user/factory-widgets-dashboard.service/child\n"})
+                    groups = {"123": f"0::{group}\n",
+                              "456": "0::/user/factory-widgets-dashboard.service/child\n"}
                     if "'stat'" in argv[2]:
                         out = json.dumps({pid: [
                             "101" if identity == "reused" and pid == "123" else "100" if pid == "123" else "80",
-                            group] for pid, group in json.loads(out).items()
+                            value] for pid, value in groups.items()
                             if not (identity == "missing" and pid == "123")})
+                    else:
+                        out = json.dumps(groups)
                 return subprocess.CompletedProcess(argv, 0, out, "")
             if argv[:3] == ["systemctl", "--user", "list-units"] and work == "handland":
                 return subprocess.CompletedProcess(
@@ -1914,7 +1965,7 @@ class OneInstallTest(unittest.TestCase):
 
             result = reconcile()
             self.assertEqual(self.active, {"factory-widgets.timer", "factory-idle.timer"})
-            if dashboard_work or identity != "same":
+            if dashboard_work and platform == "linux" or identity != "same":
                 self.assertEqual(result, "deferred", self.output.getvalue())
                 self.assertEqual(self.installs(), [])
                 reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
@@ -1939,10 +1990,12 @@ class OneInstallTest(unittest.TestCase):
                 self.assertEqual(self.installs(), [])
                 reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
                 self.assertIn("handland-4242-merge.service" if work == "handland" else
-                              "ownership" if work.startswith("probe") else "pid 123 factory dispatch", reason)
+                              "ownership" if work.startswith("probe") else
+                              "ambiguous Factory command text" if platform == "macos"
+                              else "pid 123 factory dispatch", reason)
             self.assertFalse(host.engine(self.data, name).get("paused_timers"))
 
-    def test_dashboard_owned_work_defers_until_exit(self):
+    def test_dashboard_owned_exact_linux_work_defers_but_macos_text_is_exempt(self):
         for platform in ("linux", "macos"):
             for remote in (False, True):
                 for fleet in (False, True):
@@ -1989,7 +2042,7 @@ class OneInstallTest(unittest.TestCase):
         for remote in (False, True):
             for fleet in (False, True):
                 for block in ("dispatch", "handland", "expired", "dashboard-gate-linux",
-                              "dashboard-dispatch-linux", "dashboard-gate-macos", "dashboard-dispatch-macos"):
+                              "dashboard-dispatch-linux"):
                     for failure in ("install", "verify"):
                         with self.subTest(remote=remote, fleet=fleet, block=block, failure=failure):
                             self.install_receipt(OLD)
@@ -1998,7 +2051,7 @@ class OneInstallTest(unittest.TestCase):
                             self.active = {"factory-widgets.timer"}
                             self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
                             self.data["defaults"]["engine_idle_timeout"] = "5s"
-                            platform = "macos" if block.endswith("macos") else "linux"
+                            platform = "linux"
                             self.backend.configuration.return_value = {"platform": platform, "uid": 501}
                             name = "remote" if remote else "local"
                             runner = None
@@ -2023,9 +2076,16 @@ class OneInstallTest(unittest.TestCase):
                                             "Id=factory-widgets-dashboard.service\nControlGroup=/user/dashboard\n", "")
                                     if argv[:2] == ["launchctl", "list"]:
                                         return subprocess.CompletedProcess(argv, 0, "42 0 factory-widgets-dashboard\n", "")
+                                    if argv[:2] == ["python3", "-c"] and "'cmdline'" in argv[2]:
+                                        command = [str(self.tool / "bin/python"), "-m", "factory",
+                                                   block.split("-")[1]]
+                                        output = ({"321": ["100", "42", command, " ".join(command)]}
+                                                  if late[0] else {})
+                                        return subprocess.CompletedProcess(
+                                            argv, 0, json.dumps(output), "")
                                     if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
-                                        output = ({"321": ["100", "42"]} if len(argv) == 3 else
-                                                  {"321": ["100", "0::/user/dashboard/child\n"]} if "'stat'" in argv[2] else
+                                        output = ({"321": ["100", "0::/user/dashboard/child\n"]}
+                                                  if "'stat'" in argv[2] else
                                                   {"321": "0::/user/dashboard/child\n"})
                                         return subprocess.CompletedProcess(argv, 0, json.dumps(output), "")
                                     if argv[0] == "ps":
@@ -2039,6 +2099,12 @@ class OneInstallTest(unittest.TestCase):
                                         else:
                                             output = f"321 {self.tool}/bin/python -m factory {block.split('-')[1]}\n" if late[0] else ""
                                         return subprocess.CompletedProcess(argv, 0, output, "")
+                                if (argv[:2] == ["python3", "-c"] and "'cmdline'" in argv[2]
+                                        and late[0] and block == "dispatch"):
+                                    command = [str(self.tool / "bin/python"), "-m", "factory", "dispatch"]
+                                    output = {"321": ["100", "1", command, " ".join(command)]}
+                                    return subprocess.CompletedProcess(
+                                        argv, 0, json.dumps(output), "")
                                 if argv[:3] == ["uv", "tool", "install"] and fail[0]:
                                     self.calls.append((list(argv), kwargs))
                                     late[0] = True

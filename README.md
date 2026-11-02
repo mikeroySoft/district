@@ -191,23 +191,25 @@ commands are exempt: a gate/dispatch inside a dashboard cgroup or launchd job,
 including descendants, is outside work and defers replacement. Dashboard
 services remain excluded from the service wait. Managed exemptions require an
 unchanged owning-host `(PID, start time)`: Linux uses `/proc/PID/stat` field 22
-(after the final comm parenthesis), macOS uses C-locale `ps` lstart for both
-argv and identity observations. An unparseable macOS row defers with a named
-observation/ownership reason rather than dropping a potentially busy process.
-Argv snapshots request unbounded `ps -ww` width on Linux and macOS, so narrow
-`COLUMNS` cannot truncate a launcher or subcommand. Complete configured and
-owning-host-resolved launcher/tool-Python prefixes are matched before splitting
-the remaining arguments, preserving spaces and literal quotes in UV/XDG paths.
-Multiple matching prefixes or an unparseable known path defer as named unknown
-work, including during automatic and fleet rollback. The argv observation
-is bracketed by identity checks; launchd ancestry also checks every parent and
-label anchor. A reused/disappeared PID or changed parent defers with a named
-identity reason, never a stale managed exemption. All probes share the idle
-deadline; unavailable or timed-out ownership defers with a named reason.
+(after the final comm parenthesis). Linux reads NUL-separated `/proc/<pid>/cmdline`
+and brackets it with start-time observations on the owning host. Remote observations
+return JSON argv lists, never whitespace-joined arguments. Python options before
+`-m factory`, including multiword `-X`/`-W` values and attached/grouped forms,
+retain their exact boundaries. A process that vanishes during observation is gone;
+an unreadable or empty cmdline with managed-path command text is ambiguous and busy.
+macOS uses C-locale, unbounded-width `ps -ww` for command text and lstart identity.
+Text cannot prove argv boundaries: any mention of the configured or owning-host-resolved
+tool directory or Factory launcher is named ambiguous work, even in an unrelated
+script. It blocks replacement and rollback rather than guessing a subcommand.
+Only exact argv proving `factory dashboard`, or unchanged ownership by a registered
+dashboard unit for text-only observations, exempts a dashboard process.
+Managed dispatch processes still drain after timer pause. Ownership checks retain
+PID/start-time generations; launchd ancestry checks every parent and label anchor.
+A reused/disappeared PID or changed parent defers with a named identity reason,
+never a stale managed exemption. All probes share the idle deadline; unavailable
+or timed-out observation/ownership cannot authorize replacement.
 Plain apply and `--upgrade`, locally and across a fleet, check before pausing
-and again after draining under the same idle deadline. Python options before
-`-m factory`, including attached/grouped forms, are recognized; text merely
-mentioning a command and actual dashboard commands do not block swaps.
+and again after draining under the same idle deadline.
 The receipt names the busy unit or PID; other repo unit drift still converges
 and the next apply retries.
 Fleet hand-work preflight covers every changed host before any timer pauses;

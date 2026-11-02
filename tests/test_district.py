@@ -72,6 +72,11 @@ if target in config["unreachable"]:
     print(f"ssh: connect to host {target}: Connection refused", file=sys.stderr)
     raise SystemExit(255)
 remote = config["targets"][target]
+command = " ".join(args[split + 1:])
+if "/proc" in command:
+    key = "linux_processes" if "cmdline" in command else "linux_identities"
+    print(json.dumps(remote.get(key, {})))
+    raise SystemExit(0)
 env = dict(os.environ)
 env.update(HOME=remote["home"], XDG_CONFIG_HOME=str(pathlib.Path(remote["home"]) / ".config"),
            XDG_DATA_HOME=str(pathlib.Path(remote["home"]) / ".local/share"),
@@ -262,7 +267,8 @@ class DistrictCase(unittest.TestCase):
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         self.stub("uv")
         self.stub("ps")
-        # Lifecycle identity probes must never read real /proc, even with fake ps.
+        # Lifecycle probes use structured fake Linux observations, locally and remotely.
+        self.enterContext(mock.patch.object(apply, "_linux_processes", return_value={}))
         self.enterContext(mock.patch.object(apply, "_linux_identities",
                                            return_value={"218269": ["100", "1"]}))
         tool, factory = host.factory_tool_paths()
@@ -1522,7 +1528,7 @@ class ApplyTest(DistrictCase):
 
     def timer_state_apply(self, states: dict[str, str], *, engine: bool = False,
                           install_starts_timer: bool = True, handland: str = "",
-                          processes: str = ""):
+                          processes: list[str] | None = None):
         """Apply changed units through a stateful backend and verified fake uv tool."""
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=self.tmp)))
         repos = {}
@@ -1596,11 +1602,14 @@ class ApplyTest(DistrictCase):
                 output = json.dumps(dashboard())
             elif argv[0] == "systemctl" and "list-units" in argv and handland:
                 output = f"handland-4242-pr7-20.service loaded {handland} running Hand gate\n"
-            elif argv[0] == "ps":
-                output = processes
             return subprocess.CompletedProcess(argv, 0, output, "")
 
-        with mock.patch.object(apply, "_resolve_engine", return_value=(
+        observed = {} if processes is None else {
+            "218269": ["100", "1", processes, " ".join(processes)],
+        }
+
+        with mock.patch.object(apply, "_linux_processes", return_value=observed), \
+             mock.patch.object(apply, "_resolve_engine", return_value=(
                  "https://github.com/acme/factory.git", "acme/factory", "main", new)), \
              mock.patch.object(install_state, "timer_states", side_effect=lambda *_: {
                  timer: {"active": state} for timer, state in states.items()}), \
@@ -1698,7 +1707,7 @@ class ApplyTest(DistrictCase):
                 with self.subTest(command=command):
                     states = {"factory-widgets.timer": "inactive"}
                     receipt, _, commands, _ = self.timer_state_apply(
-                        states, engine=True, processes=f"218269 {command}\n",
+                        states, engine=True, processes=shlex.split(command),
                         install_starts_timer=False,
                     )
 
@@ -1716,7 +1725,10 @@ class ApplyTest(DistrictCase):
         cases = (
             ("-u -m factory gate --base origin/main", True),
             ("-X dev -m factory dispatch --ticket 489", True),
+            (["-X", "pycache_prefix=/tmp/Cache Files", "-m", "factory",
+              "dispatch", "--ticket", "489"], True),
             ("-W ignore -m factory gate", True),
+            (["-W", "ignore:some module", "-m", "factory", "gate"], True),
             ("-Xdev -Wignore -m factory dispatch", True),
             ("-S -O -m factory gate", True),
             ("-uS -m factory dispatch", True),
@@ -1735,9 +1747,11 @@ class ApplyTest(DistrictCase):
             for python in (tool / "bin/python", real_tool / "bin/python"):
                 for args, busy in cases:
                     with self.subTest(python=python, args=args):
+                        exact_args = shlex.split(args) if isinstance(args, str) else args
                         receipt, _, commands, _ = self.timer_state_apply(
                             {"factory-widgets.timer": "inactive"}, engine=True,
-                            processes=f"218269 {python} {args}\n", install_starts_timer=False,
+                            processes=[str(python), *exact_args],
+                            install_starts_timer=False,
                         )
                         self.assertEqual(
                             any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
@@ -1769,7 +1783,8 @@ class ApplyTest(DistrictCase):
                     with self.subTest(python=python, args=args):
                         receipt, _, commands, _ = self.timer_state_apply(
                             {"factory-widgets.timer": "inactive"}, engine=True,
-                            processes=f"218269 {python} {args}\n", install_starts_timer=False,
+                            processes=[str(python), *shlex.split(args)],
+                            install_starts_timer=False,
                         )
                         self.assertEqual(
                             any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
@@ -1955,6 +1970,7 @@ class ApplyTest(DistrictCase):
             clock = [0.0]
             def backend(busy: bool):
                 unit = mock.Mock()
+                unit.configuration.return_value = {"platform": "linux"}
                 def active(name, **kwargs):
                     if busy and name.endswith(".service"):
                         clock[0] = 1800
@@ -2083,13 +2099,17 @@ class ApplyTest(DistrictCase):
                 return subprocess.CompletedProcess(argv, 0, json.dumps(checks), "")
             if argv[:2] == ["gh", "api"] and "/compare/" in argv[2]:
                 return subprocess.CompletedProcess(argv, 0, '{"status":"ahead"}', "")
-            if argv[0] == "ps":
-                drained = (self.bin / "factory-widgets.timer.disabled").exists()
-                output = f"218269 {launcher} gate --base origin/main\n" if drained else ""
-                return subprocess.CompletedProcess(argv, 0, output, "")
             return real_run(argv, **kwargs)
 
-        with mock.patch.object(apply, "run", side_effect=process_started_after_drain):
+        def processes_started_after_drain(*_args, **_kwargs):
+            if not (self.bin / "factory-widgets.timer.disabled").exists():
+                return {}
+            exact = [str(launcher), "gate", "--base", "origin/main"]
+            return {"218269": ["100", "1", exact, " ".join(exact)]}
+
+        with mock.patch.object(apply, "run", side_effect=process_started_after_drain), \
+             mock.patch.object(apply, "_linux_processes",
+                               side_effect=processes_started_after_drain):
             result = apply.upgrade(host.load(), record=record)
 
         self.assertEqual(result, "deferred")
