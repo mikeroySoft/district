@@ -779,7 +779,7 @@ class OneInstallTest(unittest.TestCase):
         self.backend.pause_timer.assert_not_called()
         self.backend.resume_timer.assert_not_called()
 
-    def hand_work_fleet(self, work, *, phase, blocked="remote", fleet=True):
+    def hand_work_fleet(self, work, *, phase, blocked="remote", fleet=True, platform="linux"):
         self.install_receipt(OLD)
         self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
         self.data["defaults"]["engine_idle_timeout"] = "5s"
@@ -801,6 +801,8 @@ class OneInstallTest(unittest.TestCase):
             parts = shlex.split(argv[-1])
             if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                 parts = shlex.split(parts[-1])
+            if parts[:2] == ["python3", "-c"] and "/proc/" in parts[2]:
+                return commands("remote", parts, **kwargs)
             if parts[:2] == ["python3", "-c"] and parts[-1].endswith("/uv-receipt.toml"):
                 return subprocess.CompletedProcess(
                     argv, 0, f'[tool]\nrequirements = [{{name="factory", rev="{remote_sha[0]}"}}]\n', "")
@@ -808,7 +810,9 @@ class OneInstallTest(unittest.TestCase):
 
         runner.transport = transport
         remote_backend = mock.Mock()
-        remote_backend.configuration.return_value = {"platform": "linux", "executable": "systemctl"}
+        remote_backend.configuration.return_value = {"platform": platform, "executable":
+                                                     "systemctl" if platform == "linux" else "launchctl"}
+        self.backend.configuration.return_value = remote_backend.configuration.return_value
         remote_backend.factory_units.return_value = set()
         remote_backend.status.return_value = service.ServiceStatus("not-found", "inactive", "not-found")
         remote_backend.is_active.side_effect = lambda name, **_: "active" if name in remote_active else "inactive"
@@ -830,9 +834,28 @@ class OneInstallTest(unittest.TestCase):
         scans = []
         clock = [0.0]
         scan_started = {}
+        command = work.removeprefix("dashboard-")
 
         def commands(name, argv, **kwargs):
             available = phase == "before" or (phase == "after" and drained[0]) or started[0]
+            if argv[:3] == ["systemctl", "--user", "show"] and work.startswith("dashboard-"):
+                return subprocess.CompletedProcess(argv, 0,
+                    "Id=factory-widgets-dashboard.service\nControlGroup=/user/dashboard\n", "")
+            if argv[:2] == ["launchctl", "list"] and work.startswith("dashboard-"):
+                return subprocess.CompletedProcess(argv, 0, "42 0 factory-widgets-dashboard\n", "")
+            if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
+                output = ({"321": ["100", "1"]} if "cgroup" not in argv[2] else
+                          {"321": ["100", "0::/user/dashboard/child\n"]} if "'stat'" in argv[2] else
+                          {"321": "0::/user/dashboard/child\n"})
+                return subprocess.CompletedProcess(argv, 0, json.dumps(output), "")
+            if argv[0] == "ps" and "ppid=" in argv[-1]:
+                if "lstart=" in argv[-1]:
+                    output = "321 42 Mon Nov  2 00:00:00 2026"
+                    if "args=" in argv[-1] and name == blocked and available:
+                        output += f" {self.tool}/bin/python -m factory {command}"
+                    return subprocess.CompletedProcess(
+                        argv, 0, output + "\n42 1 Mon Nov  2 00:00:00 2026\n", "")
+                return subprocess.CompletedProcess(argv, 0, "321 42\n42 1\n", "")
             if argv[0] == "ps" or argv[:3] == ["systemctl", "--user", "list-units"]:
                 self.assertGreater(kwargs.get("timeout", 0), 0)
                 scan_started.setdefault(name, clock[0])
@@ -843,9 +866,9 @@ class OneInstallTest(unittest.TestCase):
                 if name == blocked and available:
                     if work in ("active", "activating", "deactivating") and argv[0] == "systemctl":
                         output = f"handland-4242-merge.service loaded {work} running Hand work\n"
-                    elif work == "gate" and argv[0] == "ps":
+                    elif command == "gate" and argv[0] == "ps":
                         output = f"321 {self.cli} gate --base origin/main\n"
-                    elif work == "dispatch" and argv[0] == "ps":
+                    elif command == "dispatch" and argv[0] == "ps":
                         output = f"321 {self.tool.resolve()}/bin/python -uSmfactory dispatch --ticket 42\n"
                 return subprocess.CompletedProcess(argv, 0, output, "")
             if argv[:3] == ["uv", "tool", "install"]:
@@ -883,7 +906,7 @@ class OneInstallTest(unittest.TestCase):
         target = "engine" if blocked == "local" else "engine:remote"
         reason = record.deferred[target]["reason"]
         self.assertIn("handland-4242-merge.service" if work in ("active", "activating", "deactivating")
-                      else f"pid 321 factory {work}", reason)
+                      else f"pid 321 factory {command}", reason)
         self.assertEqual(self.active, {"factory-widgets.timer"})
         self.assertEqual(remote_active, {"factory-widgets.timer"})
         for name in ("local", "remote") if fleet else ("remote",):
@@ -928,6 +951,15 @@ class OneInstallTest(unittest.TestCase):
             with self.subTest(work=work):
                 self.hand_work_fleet(work, phase="rollback", blocked="local")
                 self.assertIn("FAIL could not roll back local", self.output.getvalue())
+
+    def test_dashboard_owned_fleet_work_blocks_replacement_and_rollback(self):
+        for platform in ("linux", "macos"):
+            for phase in ("before", "after", "install", "rollback"):
+                for blocked in ("local", "remote") if phase == "before" else ("local",) if phase in ("after", "rollback") else ("remote",):
+                    for command in ("gate", "dispatch"):
+                        with self.subTest(platform=platform, phase=phase, blocked=blocked, command=command):
+                            self.hand_work_fleet(f"dashboard-{command}", phase=phase,
+                                                 blocked=blocked, platform=platform)
 
     def test_configured_extras_are_preserved_on_target_and_rollback(self):
         self.data["defaults"]["factory_extras"] = ["atlas", "ops"]
@@ -1452,6 +1484,8 @@ class OneInstallTest(unittest.TestCase):
                     parts = parts[1:]
             commands.append(parts)
             if parts[:2] == ["python3", "-c"]:
+                if "/proc/" in parts[2]:
+                    return self.run_cmd(parts, **kwargs)
                 sync = "os.replace" in parts[2] and parts[-1].endswith("config.toml")
                 if synced and synced[-1].get("target") == TARGET and parts[-1].endswith("uv-receipt.toml"):
                     receipts.append(parts)
@@ -1687,7 +1721,8 @@ class OneInstallTest(unittest.TestCase):
                     self.assertIn("engine", self.output.getvalue())
                 (agents / "factory-broken.plist").unlink()
 
-    def ownership_case(self, *, remote, fleet, platform, work):
+    def ownership_case(self, *, remote, fleet, platform, work, dashboard_work=None, phase="before",
+                       identity="same"):
         self.install_receipt(OLD)
         self.calls.clear()
         self.events.clear()
@@ -1711,17 +1746,36 @@ class OneInstallTest(unittest.TestCase):
         clock = [0.0]
         scans = [0]
         ownership = []
+        dashboard_live = [dashboard_work is not None]
+        identity_probes = [0]
         original = self.run_cmd
 
         def commands(argv, **kwargs):
             paused = ("pause", "factory-widgets.timer") in self.events
             live = not paused or scans[0] < 2 or work != "managed"
             if argv[0] == "ps":
+                if "lstart=" in argv[-1]:
+                    identity_probes[0] += 1
+                    changed = identity_probes[0] > 1
+                    rows = []
+                    for pid, parent in (("123", "42"), ("42", "1"), ("456", "1")):
+                        if changed and identity == "missing" and pid == "123":
+                            continue
+                        start = "Mon Nov  2 00:00:01 2026" if changed and (
+                            identity == "reused" and pid == "123" or
+                            identity == "anchor-reused" and pid == "42") else "Mon Nov  2 00:00:00 2026"
+                        command = f"{self.tool}/bin/python -m factory dispatch" if pid == "123" and live else ""
+                        if pid == "456":
+                            command = f"{self.tool}/bin/python -m factory {dashboard_work if dashboard_live[0] and (phase == 'before' or paused) else 'dashboard'}"
+                        rows.append(f"{pid} {parent} {start} {command}")
+                    scans[0] += int(paused and "args=" in argv[-1])
+                    return subprocess.CompletedProcess(argv, 0, "\n".join(rows), "")
                 if "ppid=" in argv[-1]:
-                    return subprocess.CompletedProcess(argv, 0, "123 42\n42 1\n", "")
+                    return subprocess.CompletedProcess(argv, 0, "123 42\n42 1\n456 1\n", "")
                 scans[0] += int(paused)
-                # Dashboard descendants must not hold the drain open.
-                rows = f"456 {self.tool}/bin/python -m factory dispatch\n"
+                # Only a semantic dashboard command is exempt, not its owner.
+                command = dashboard_work if dashboard_live[0] and (phase == "before" or paused) else "dashboard"
+                rows = f"456 {self.tool}/bin/python -m factory {command}\n"
                 if live:
                     rows += f"123 {self.tool}/bin/python -m factory dispatch\n"
                 return subprocess.CompletedProcess(argv, 0, rows, "")
@@ -1732,6 +1786,9 @@ class OneInstallTest(unittest.TestCase):
                 self.assertGreater(kwargs.get("timeout", 0), 0)
                 self.assertLessEqual(kwargs["timeout"], 5 - clock[0] + 1e-9)
                 ownership.append(list(argv))
+                if argv[:2] == ["python3", "-c"] and "cgroup" not in argv[2]:
+                    return subprocess.CompletedProcess(argv, 0, json.dumps({
+                        "123": ["100", "42"], "42": ["90", "1"], "456": ["80", "1"]}), "")
                 if work == "probe-failure":
                     return subprocess.CompletedProcess(argv, 1, "", "fake ownership unavailable")
                 if work == "probe-timeout":
@@ -1749,6 +1806,11 @@ class OneInstallTest(unittest.TestCase):
                     group = "/user/session.scope" if work == "hand" else "/user/factory-widgets.service/child"
                     out = json.dumps({"123": f"0::{group}\n",
                                       "456": "0::/user/factory-widgets-dashboard.service/child\n"})
+                    if "'stat'" in argv[2]:
+                        out = json.dumps({pid: [
+                            "101" if identity == "reused" and pid == "123" else "100" if pid == "123" else "80",
+                            group] for pid, group in json.loads(out).items()
+                            if not (identity == "missing" and pid == "123")})
                 return subprocess.CompletedProcess(argv, 0, out, "")
             if argv[:3] == ["systemctl", "--user", "list-units"] and work == "handland":
                 return subprocess.CompletedProcess(
@@ -1775,29 +1837,56 @@ class OneInstallTest(unittest.TestCase):
         with mock.patch.object(self, "run_cmd", side_effect=commands), \
              mock.patch.object(apply, "run", side_effect=commands), \
              mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
-            self.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
-            context = (runner or apply.run, self.backend, self.data["repo"])
-            if fleet:
-                result = apply.reconcile_fleet_engine(self.data, record, {name: context})
-            else:
-                result = apply.reconcile_engine(
+            # Real subprocess waits for isolated file scripts may sleep for 1ms.
+            self.sleep.side_effect = lambda seconds: clock.__setitem__(
+                0, clock[0] + seconds if seconds >= 1 else clock[0])
+            def reconcile():
+                context = (runner or apply.run, self.backend, self.data["repo"])
+                if fleet:
+                    return apply.reconcile_fleet_engine(self.data, record, {name: context})
+                return apply.reconcile_engine(
                     self.data, record, run_cmd=context[0], backend=self.backend, host_name=name)
-        self.assertEqual(self.active, {"factory-widgets.timer", "factory-idle.timer"})
-        if work == "managed":
-            self.assertEqual(result, "applied", self.output.getvalue())
-            self.assertEqual(len(self.installs()), 1)
-            self.assertGreaterEqual(scans[0], 2)
-            self.assertTrue(ownership)
-            self.assertEqual(record.disabled, {"factory-widgets.timer", "factory-idle.timer"})
-            self.assertEqual(record.reenabled, record.disabled)
-            self.assertEqual(record.deferred, {})
-        else:
-            self.assertEqual(result, "deferred", self.output.getvalue())
-            self.assertEqual(self.installs(), [])
-            reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
-            self.assertIn("handland-4242-merge.service" if work == "handland" else
-                          "ownership" if work.startswith("probe") else "pid 123 factory dispatch", reason)
-        self.assertFalse(host.engine(self.data, name).get("paused_timers"))
+
+            result = reconcile()
+            self.assertEqual(self.active, {"factory-widgets.timer", "factory-idle.timer"})
+            if dashboard_work or identity != "same":
+                self.assertEqual(result, "deferred", self.output.getvalue())
+                self.assertEqual(self.installs(), [])
+                reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
+                self.assertIn(f"pid 456 factory {dashboard_work}" if dashboard_work else "identity", reason)
+                self.assertEqual(record.disabled, set() if phase == "before" else
+                                 {"factory-widgets.timer", "factory-idle.timer"})
+                self.assertEqual(record.reenabled, record.disabled)
+                if dashboard_work:
+                    dashboard_live[0] = False
+                    self.assertEqual(reconcile(), "applied", self.output.getvalue())
+                    self.assertEqual(len(self.installs()), 1)
+            elif work == "managed":
+                self.assertEqual(result, "applied", self.output.getvalue())
+                self.assertEqual(len(self.installs()), 1)
+                self.assertGreaterEqual(scans[0], 2)
+                self.assertTrue(ownership)
+                self.assertEqual(record.disabled, {"factory-widgets.timer", "factory-idle.timer"})
+                self.assertEqual(record.reenabled, record.disabled)
+                self.assertEqual(record.deferred, {})
+            else:
+                self.assertEqual(result, "deferred", self.output.getvalue())
+                self.assertEqual(self.installs(), [])
+                reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
+                self.assertIn("handland-4242-merge.service" if work == "handland" else
+                              "ownership" if work.startswith("probe") else "pid 123 factory dispatch", reason)
+            self.assertFalse(host.engine(self.data, name).get("paused_timers"))
+
+    def test_dashboard_owned_work_defers_until_exit(self):
+        for platform in ("linux", "macos"):
+            for remote in (False, True):
+                for fleet in (False, True):
+                    for command in ("gate", "dispatch"):
+                        for phase in ("before", "after"):
+                            with self.subTest(platform=platform, remote=remote, fleet=fleet,
+                                              command=command, phase=phase):
+                                self.ownership_case(remote=remote, fleet=fleet, platform=platform,
+                                                    work="managed", dashboard_work=command, phase=phase)
 
     def test_managed_dispatch_ownership_drains_on_owning_host(self):
         for platform in ("linux", "macos"):
@@ -1819,7 +1908,8 @@ class OneInstallTest(unittest.TestCase):
     def test_failed_target_rollback_rechecks_owning_host_and_original_deadline(self):
         for remote in (False, True):
             for fleet in (False, True):
-                for block in ("dispatch", "handland", "expired"):
+                for block in ("dispatch", "handland", "expired", "dashboard-gate-linux",
+                              "dashboard-dispatch-linux", "dashboard-gate-macos", "dashboard-dispatch-macos"):
                     for failure in ("install", "verify"):
                         with self.subTest(remote=remote, fleet=fleet, block=block, failure=failure):
                             self.install_receipt(OLD)
@@ -1828,10 +1918,12 @@ class OneInstallTest(unittest.TestCase):
                             self.active = {"factory-widgets.timer"}
                             self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
                             self.data["defaults"]["engine_idle_timeout"] = "5s"
+                            platform = "macos" if block.endswith("macos") else "linux"
+                            self.backend.configuration.return_value = {"platform": platform, "uid": 501}
                             name = "remote" if remote else "local"
                             runner = None
                             if remote:
-                                self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                self.data["hosts"] = {"remote": {"ssh": "unused", "platform": platform,
                                                                "engine": {"sha": OLD, "ref": "main"}}}
                                 self.data["repo"]["acme/widgets"]["host"] = "remote"
                                 runner, _, _ = self.timeout_remote("none")
@@ -1842,6 +1934,29 @@ class OneInstallTest(unittest.TestCase):
                             original = self.run_cmd
 
                             def commands(argv, **kwargs):
+                                if block.startswith("dashboard-"):
+                                    self.assertGreater(kwargs.get("timeout", 0), 0)
+                                    if argv[:3] == ["systemctl", "--user", "show"]:
+                                        return subprocess.CompletedProcess(argv, 0,
+                                            "Id=factory-widgets-dashboard.service\nControlGroup=/user/dashboard\n", "")
+                                    if argv[:2] == ["launchctl", "list"]:
+                                        return subprocess.CompletedProcess(argv, 0, "42 0 factory-widgets-dashboard\n", "")
+                                    if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
+                                        output = ({"321": ["100", "42"]} if "cgroup" not in argv[2] else
+                                                  {"321": ["100", "0::/user/dashboard/child\n"]} if "'stat'" in argv[2] else
+                                                  {"321": "0::/user/dashboard/child\n"})
+                                        return subprocess.CompletedProcess(argv, 0, json.dumps(output), "")
+                                    if argv[0] == "ps":
+                                        if "lstart=" in argv[-1]:
+                                            output = "321 42 Mon Nov  2 00:00:00 2026"
+                                            if late[0] and "args=" in argv[-1]:
+                                                output += f" {self.tool}/bin/python -m factory {block.split('-')[1]}"
+                                            output += "\n42 1 Mon Nov  2 00:00:00 2026\n"
+                                        elif "ppid=" in argv[-1]:
+                                            output = "321 42\n42 1\n"
+                                        else:
+                                            output = f"321 {self.tool}/bin/python -m factory {block.split('-')[1]}\n" if late[0] else ""
+                                        return subprocess.CompletedProcess(argv, 0, output, "")
                                 if argv[:3] == ["uv", "tool", "install"] and fail[0]:
                                     self.calls.append((list(argv), kwargs))
                                     late[0] = True
@@ -1872,7 +1987,8 @@ class OneInstallTest(unittest.TestCase):
                                 self.assertEqual(reconcile(), "failed", self.output.getvalue())
                                 self.assertEqual(len(self.installs()), 1, "blocked rollback must not invoke uv again")
                                 self.assertIn("rollback FAIL", self.output.getvalue())
-                                reason = ("pid 321 factory dispatch" if block == "dispatch" else
+                                reason = (f"pid 321 factory {block.split('-')[1]}" if block.startswith("dashboard-") else
+                                          "pid 321 factory dispatch" if block == "dispatch" else
                                           "handland-4242-merge.service" if block == "handland" else "deadline")
                                 self.assertIn(reason, self.output.getvalue())
                                 self.data = host.load()

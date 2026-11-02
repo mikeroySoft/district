@@ -388,11 +388,10 @@ def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadli
     except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
             host.RemoteHostError) as exc:
         return [f"Factory process ownership unavailable: {exc}", *processes], processes
-    outside = [work for work in processes if work.split()[1] not in owners
+    outside = [work for work in processes
+               if (work.split()[1] not in owners or owners[work.split()[1]].endswith("-dashboard.service"))
                and work.endswith(("factory gate", "factory dispatch"))]
-    draining = [work for work in processes
-                if not owners.get(work.split()[1], "").endswith("-dashboard.service")]
-    return outside, draining
+    return outside, processes
 
 
 def _hand_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> list[str]:
