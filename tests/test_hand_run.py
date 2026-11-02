@@ -150,6 +150,68 @@ class HandRunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "approved cached helper")
 
+    def test_relative_helpers_execute_frozen_versions(self):
+        helper = self.source / "step.sh"
+        library = self.source / "lib"
+        library.mkdir()
+        python = library / "run.py"
+        for invocation in ('./step.sh', 'dir=.; "$dir/step.sh"',
+                           '"$(dirname "$0")/step.sh"', 'python3 lib/run.py'):
+            with self.subTest(invocation=invocation):
+                helper.write_text("#!/bin/bash\nprintf 'approved shell\\n'\n")
+                helper.chmod(0o755)
+                python.write_text("print('approved Python')\n")
+                self.script.write_text(f"#!/bin/bash\nset -eu\n{invocation}\n")
+                start, stop = self.launch()
+                helper.write_text("#!/bin/bash\nprintf 'live shell\\n'\n")
+                python.write_text("print('live Python')\n")
+                result = subprocess.run([str(start)], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = "approved Python" if invocation.startswith("python3") else "approved shell"
+                self.assertEqual(result.stdout.strip(), expected)
+                result = subprocess.run([str(stop)], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), "stopped")
+
+    def test_unrelated_logs_and_notes_do_not_block_launch(self):
+        unrelated = self.data / "handland-unrelated"
+        unrelated.mkdir()
+        for name in ("traceback.log", "notes.md", "output.txt"):
+            (unrelated / name).write_text(
+                'Traceback: File "/usr/lib/python3.13/subprocess.py", line 1\n'
+                'Operator note: rerun /tmp/old-chain.sh after investigation.\n'
+            )
+        start, stop = self.launch()
+        for wrapper, expected in ((start, "approved"), (stop, "stopped")):
+            result = subprocess.run([str(wrapper)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), expected)
+
+    def test_external_live_script_references_are_refused(self):
+        outside = self.home / "live.sh"
+        outside.write_text("#!/bin/bash\nprintf 'live\\n'\n")
+        outside.chmod(0o755)
+        suffix = outside.relative_to(self.home)
+        for reference in (str(outside), f"$HOME/{suffix}", f"${{HOME}}/{suffix}", f"~/{suffix}"):
+            with self.subTest(reference=reference):
+                self.script.write_text(f"#!/bin/bash\n{reference}\n")
+                result = self.command("launch", "532-chain", self.script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cannot relocate live script reference", result.stderr)
+                self.assertIn(reference, result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
+    def test_nonexecutable_sourced_script_rejects_external_live_dependency(self):
+        sourced = self.source / "sourced.sh"
+        sourced.write_text('# no executable permission or shebang\nbash /tmp/external-live.sh\n')
+        sourced.chmod(0o644)
+        self.script.write_text("#!/bin/bash\nsource ./sourced.sh\n")
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/tmp/external-live.sh", result.stderr)
+        self.assertIn("sourced.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
