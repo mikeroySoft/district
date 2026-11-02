@@ -86,8 +86,13 @@ Use repeatable `--include "$data/other-helpers"` for additional dependency
 directories below District's data directory. Dependencies must be regular files
 and directories, not symlinks.
 
-Absolute source paths and their `$HOME`, `${HOME}`, and `~/` forms are relocated
-to the copies; relative references run from the copied entry script's directory.
+Absolute paths into copied source trees and their `$HOME`, `${HOME}`, and `~/`
+forms are relocated to the copies; relative references run from the copied
+entry script's directory. Paths outside those trees, such as engine virtualenvs
+and repository working directories, remain unchanged. Binary files, including
+cached Python bytecode, are copied without path rewriting. Python entry and stop
+scripts retain their shebang interpreter and options; without a shebang, `.py`
+entries use District's Python.
 Keep script dependencies in these copied trees. Literal external shell/Python
 script paths are rejected; do not construct paths back to live scripts
 dynamically. Script outputs belong outside the read-only snapshot.

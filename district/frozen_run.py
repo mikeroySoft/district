@@ -127,6 +127,8 @@ def _replace_paths(path: Path, replacements: list[tuple[bytes, bytes]]) -> None:
         value = path.read_bytes()
     except OSError as error:
         raise ValueError(f"cannot read copied file: {path}") from error
+    if b"\0" in value:
+        return
     pattern = re.compile(b"|".join(re.escape(old) for old, _ in replacements) + rb"(?![A-Za-z0-9._-])")
     mapping = dict(replacements)
     changed = pattern.sub(lambda match: mapping[match[0]], value)
@@ -164,11 +166,7 @@ def _entry_command(source: Path, frozen: Path, args: list[str]) -> list[str]:
         raise ValueError(f"invalid script shebang: {source}") from error
     lowered = shebang.lower()
     if source.suffix == ".py" or "python" in lowered:
-        command = [str(Path(sys.executable).resolve())]
-        if words:
-            python_at = next((index for index, word in enumerate(words) if "python" in Path(word).name.lower()), None)
-            if python_at is not None:
-                command.extend(words[python_at + 1:])
+        command = words or [str(Path(sys.executable).resolve())]
     elif source.suffix == ".sh" or any(Path(word).name.endswith("sh") for word in words):
         command = words or ["/bin/bash"]
     else:
@@ -273,10 +271,7 @@ def freeze(data: Path, script: Path, stop_post: Path | None, includes: list[Path
             shutil.copytree(root, binary / root.relative_to(data), symlinks=True, copy_function=shutil.copy2)
 
         home = Path.home().resolve()
-        mappings: dict[str, str] = {str(data): str(binary)}
-        if data.is_relative_to(home):
-            suffix = data.relative_to(home).as_posix()
-            mappings.update({f"$HOME/{suffix}": str(binary), f"${{HOME}}/{suffix}": str(binary), f"~/{suffix}": str(binary)})
+        mappings: dict[str, str] = {}
         for root in roots:
             destination = binary / root.relative_to(data)
             mappings[str(root)] = str(destination)
