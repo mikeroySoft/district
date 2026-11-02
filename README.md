@@ -248,6 +248,8 @@ The same service-state guard covers ordinary upgrades, drains, fleet preflight,
 per-host replacement, and rollback. Fleet preflight covers every changed host
 before any install, and every host is re-checked before replacement.
 New active Factory services or an expired deadline prevent replacement.
+Every service probe uses the remaining shared idle budget, so multiple slow
+unit queries cannot each consume a fresh timeout.
 
 An authorized replacement persists `engine.install_pending` (target, previous
 revision when known, and ref) before invoking uv. A failed install or

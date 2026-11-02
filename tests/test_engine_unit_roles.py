@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import unittest
-from unittest import mock
 
 from district import apply, service
 from tests import test_one_install as fixtures
@@ -24,7 +23,7 @@ class EngineUnitRolesTest(unittest.TestCase):
 
         self.case.backend.is_active.side_effect = is_active
         busy = apply._engine_busy(
-            mock.Mock(), self.case.backend, repos, deadline=apply.time.monotonic() + 1
+            self.case.backend, repos, deadline=apply.time.monotonic() + 1
         )
         return busy, observed
 

@@ -735,6 +735,44 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(record.reenabled, record.disabled)
         self.assertEqual(self.active, {"factory-widgets.timer"})
 
+    def test_fleet_busy_preflight_and_peer_window_prevent_all_installs(self):
+        worker = "factory-unregistered-worker.service"
+        timers = {"factory-widgets.timer", "factory-other.timer"}
+        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
+        self.backend.factory_units.return_value = {worker}
+        remote = mock.Mock()
+        remote.factory_units.return_value = set()
+        remote.is_active.side_effect = lambda name, **_: (
+            "active" if name == "factory-other.timer" and name in self.active else "inactive")
+        remote.resume_timer.side_effect = self.enable
+        remote_repos = {"acme/other": {"path": str(self.repo)}}
+        contexts = {
+            "local": (self.run_cmd, self.backend, self.data["repo"]),
+            "remote": (self.run_cmd, remote, remote_repos),
+        }
+
+        for phase in ("preflight", "peer-window"):
+            with self.subTest(phase=phase):
+                self.active = set(timers)
+                self.service_states[worker] = "active" if phase == "preflight" else "inactive"
+                record = install_state.ApplyRun("", "", OLD)
+
+                def pause_peer(name, **kwargs):
+                    result = self.enable(name, False, **kwargs)
+                    self.service_states[worker] = "active"
+                    return result
+
+                remote.pause_timer.side_effect = pause_peer
+                self.assertEqual(apply.reconcile_fleet_engine(
+                    self.data, record, contexts), "deferred", self.output.getvalue())
+                self.assertIn(worker, record.deferred["engine"]["reason"])
+                self.assertEqual(self.installs(), [])
+                self.assertEqual(host.engine(self.data, "local")["sha"], OLD)
+                self.assertEqual(host.engine(self.data, "remote")["sha"], OLD)
+                self.assertEqual(record.disabled, set() if phase == "preflight" else timers)
+                self.assertEqual(record.reenabled, record.disabled)
+                self.assertEqual(self.active, timers)
+
     def test_fleet_rechecks_factory_service_before_each_host_install(self):
         worker = "factory-unregistered-worker.service"
         self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}

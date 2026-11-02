@@ -390,19 +390,19 @@ def _start_drain(record, name: str, runner) -> None:
     record.drain_stack.enter_context(_host_drain(record, name, runner, timeout))
 
 
-def _engine_busy(runner, backend, repos, *, deadline: float) -> list[str]:
+def _engine_busy(backend, repos, *, deadline: float) -> list[str]:
     services, _ = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
-    return busy_units(services, backend, timeout=remaining_timeout(deadline))
+    return busy_units(services, backend, deadline=deadline)
 
 
-def _wait_drained(record, name: str, runner, backend, repos, *, deadline: float) -> None:
+def _wait_drained(record, name: str, backend, repos, *, deadline: float) -> None:
     target = "engine" if name == "local" else f"engine:{name}"
     started = time.monotonic()
     idle = False
     busy = ["idle observation timed out"]
     while True:
         try:
-            observed = _engine_busy(runner, backend, repos, deadline=deadline)
+            observed = _engine_busy(backend, repos, deadline=deadline)
         except subprocess.TimeoutExpired:
             break
         if not observed and idle:
@@ -432,7 +432,7 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
         _start_drain(record, name, runner)
         if deadline is None:
             deadline = record.drain_deadlines[name][0]
-        _wait_drained(record, name, runner, backend, repos, deadline=deadline)
+        _wait_drained(record, name, backend, repos, deadline=deadline)
         yield record.drain_deadlines[name][1]
         return
     if deadline is None:
@@ -441,7 +441,7 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
     try:
         ready = False
         try:
-            busy = _engine_busy(runner, backend, repos, deadline=deadline)
+            busy = _engine_busy(backend, repos, deadline=deadline)
             if busy:
                 _defer(record, target, busy)
             else:
@@ -460,7 +460,7 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
                         record.disabled.add(timer)
                     backend.pause_timer(timer, timeout=remaining)
                 while True:
-                    busy = _engine_busy(runner, backend, repos, deadline=deadline)
+                    busy = _engine_busy(backend, repos, deadline=deadline)
                     if not busy:
                         ready = True
                         break
@@ -508,7 +508,7 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
         print(f"engine failed {previous or 'unknown'} -> {sha}: {exc}")
         if previous:
             try:
-                busy = _engine_busy(runner, backend, repos, deadline=deadline)
+                busy = _engine_busy(backend, repos, deadline=deadline)
                 if busy:
                     raise OSError(f"factory services block rollback: {', '.join(busy)}")
             except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as rollback:
@@ -711,11 +711,11 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         runner, backend, repos = contexts[name]
         try:
             if record is not None and name in record.drains:
-                _wait_drained(record, name, runner, backend, repos,
+                _wait_drained(record, name, backend, repos,
                               deadline=record.drain_deadlines[name][0])
                 busy = []
             else:
-                busy = _engine_busy(runner, backend, repos, deadline=deadlines[name])
+                busy = _engine_busy(backend, repos, deadline=deadlines[name])
         except subprocess.TimeoutExpired:
             busy = ["idle wait timed out"]
         if busy:
@@ -960,11 +960,14 @@ def plan_apply(targets: dict[str, dict], backend, *, run_cmd=None, env=None,
     return changes
 
 
-def busy_units(services: list[str], backend=None, *, timeout: float | None = None) -> list[str]:
+def busy_units(services: list[str], backend=None, *, deadline: float | None = None) -> list[str]:
     backend = backend or host.service_backend()
-    kwargs = {"timeout": timeout} if timeout is not None else {}
-    return [service for service in services
-            if backend.is_active(service, **kwargs) in ("active", "activating", "deactivating")]
+    busy = []
+    for service in services:
+        kwargs = {"timeout": remaining_timeout(deadline)} if deadline is not None else {}
+        if backend.is_active(service, **kwargs) in ("active", "activating", "deactivating"):
+            busy.append(service)
+    return busy
 
 
 
@@ -1412,7 +1415,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                 except (OSError, host.RemoteHostError, subprocess.TimeoutExpired) as exc:
                     raise DistrictError(f"drain preflight failed on {name}: {exc}; nothing applied") from exc
             for name, (runner, backend, repos) in explicit_contexts.items():
-                _wait_drained(record, name, runner, backend, repos,
+                _wait_drained(record, name, backend, repos,
                               deadline=record.drain_deadlines[name][0])
         host.sync_local_claims(data)
         status, warnings = policy(data)
