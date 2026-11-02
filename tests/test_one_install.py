@@ -83,8 +83,10 @@ class OneInstallTest(unittest.TestCase):
     def install_receipt(self, sha):
         self.tool.mkdir(parents=True, exist_ok=True)
         (self.tool / "bin").mkdir(exist_ok=True)
-        (self.tool / "bin" / "factory").touch()
-        (self.tool / "bin" / "python").touch()
+        for name in ("factory", "python"):
+            executable = self.tool / "bin" / name
+            if not executable.exists() and not executable.is_symlink():
+                executable.touch()
         self.cli.parent.mkdir(parents=True, exist_ok=True)
         self.cli.unlink(missing_ok=True)
         self.cli.symlink_to(self.tool / "bin" / "factory")
@@ -299,6 +301,9 @@ class OneInstallTest(unittest.TestCase):
                 self.assertEqual(host.engine(host.load(), "remote" if remote else "local")["sha"], TARGET)
 
     def test_alias_renderer_accepts_tool_bin_but_rejects_outside_argv(self):
+        outside_python = self.root / "system-python"
+        outside_python.touch(mode=0o444)
+        os.utime(outside_python, (1, 1))
         for remote in (False, True):
             with self.subTest(remote=remote), contextlib.ExitStack() as stack:
                 if remote:
@@ -312,7 +317,7 @@ class OneInstallTest(unittest.TestCase):
                 real_bin = self.tool.resolve() / "bin"
                 # Resolving python itself would lose venv identity.
                 (real_bin / "python").unlink()
-                (real_bin / "python").symlink_to(sys.executable)
+                (real_bin / "python").symlink_to(outside_python)
                 resolve = Path.resolve
 
                 def no_controller_resolution(path, *args, **kwargs):
@@ -336,6 +341,8 @@ class OneInstallTest(unittest.TestCase):
                             self.assertIn("acme/widgets  0.4.7", self.output.getvalue())
                             if not accepted:
                                 self.assertIn("Factory argv must use", self.output.getvalue())
+                # Owners can touch read-only files; pin mtime to catch write-through locally too.
+                self.assertEqual(outside_python.stat().st_mtime, 1)
 
     def test_process_path_resolution_failure_fails_engine_and_restores_timers(self):
         runner = self.alias_tool_runner(True)
