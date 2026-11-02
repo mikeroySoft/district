@@ -15,6 +15,8 @@ from pathlib import Path
 
 _MANIFEST = "checksums.txt"
 _LIVE_SCRIPT = re.compile(
+    # A complete token, not the slash suffix of ./x.sh, $dir/x.sh or lib/x.py.
+    rb"(?<![^\s\"'`=|;&(<>])"
     rb"(?P<path>(?:/|\$HOME/|\$\{HOME\}/|~/)[^\x00\r\n\t \"'`|;&()<>]*\.(?:sh|py))(?![A-Za-z0-9._-])"
 )
 _VERIFIER = r'''import hashlib, os, pathlib, stat, sys
@@ -142,6 +144,10 @@ def _reject_live_scripts(path: Path, frozen_root: Path) -> None:
         return
     value = path.read_bytes()
     if b"\0" in value:
+        return
+    # Logs and notes are snapshot data, not dependency declarations. Sourced
+    # .sh files still need inspection even without a shebang or executable bit.
+    if path.suffix not in {".sh", ".py"} and not value.startswith(b"#!"):
         return
     for match in _LIVE_SCRIPT.finditer(value):
         raw = match.group("path")
