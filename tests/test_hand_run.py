@@ -348,6 +348,37 @@ class HandRunTest(unittest.TestCase):
         self.assertIn("chain.sh", result.stderr)
         self.assertFalse(self.launch_log.exists())
 
+    def test_continued_unsupported_quote_cannot_hide_source(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        self.script.write_text(
+            "#!/bin/bash\nprintf '%s\\n' $\\\n'it\\'s ready'\nsource ./settings.inc\n# it's done\n"
+        )
+        syntax = subprocess.run(["/bin/bash", "-n", str(self.script)], text=True, capture_output=True)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("chain.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
+    def test_source_after_parameter_hashes_rejects_live_dependency(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        self.script.write_text("#!/bin/bash\nfile=/tmp/example; name=${file##*/}; source ./settings.inc\n")
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/tmp/external-live.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
+    def test_source_inside_command_substitution_rejects_live_dependency(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        self.script.write_text('#!/bin/bash\nvalue="$(source ./settings.inc)"\n')
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/tmp/external-live.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
