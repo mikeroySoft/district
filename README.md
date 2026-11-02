@@ -234,6 +234,56 @@ The first apply must report the remote engine install and a converged
 probe or apply must name `ultron` without running commands for factories assigned
 to other hosts.
 
+## Hand-build preflight
+
+`district.handbuild` checks bug-repro **packaging**, without running a test or
+gate, changing git state, or touching timers. Run it with the installed Factory
+Python: it reuses `dispatch.gate_flags` and Factory's test-ID parsers, including
+authenticated triage exemptions. No extra District dependency is needed.
+
+```sh
+PY="$HOME/.local/share/uv/tools/factory/bin/python"
+"$PY" -m district.handbuild preflight \
+  --wt "$WT" --ticket "$N" --repo "$REPO" --base origin/main
+```
+
+A bug ticket needs a `Repro test:` handoff line and a commit adding that test
+before the final fix commit on `base..HEAD` (first-parent). Both
+`tests/test_x.py::XTest::test_y` and `tests.test_x.XTest.test_y` are accepted.
+A nonempty `No repro test:` line in the ticket body or an authenticated triage
+account's `Triage: ` comment exempts reproduction; a worker handoff cannot.
+Non-bug tickets pass without packaging checks. Output is `PREFLIGHT PASS` or
+`PREFLIGHT REFUSED: <reason>`; refusal exits 1.
+
+For a frozen hand-run chain, copy `district/handbuild.py` into the run's `bin/`
+alongside **all** executed/sourced scripts and helpers. Include it in the
+read-only copies and verified `checksums.txt`; never edit an existing frozen
+run or a script a running unit has open. Wrap **each ticket step**, before that
+step pauses timers or launches anything:
+
+```sh
+"$PY" "$BIN/handbuild.py" step \
+  --wt "$WT" --ticket "$N" --repo "$REPO" --base origin/main \
+  -- bash "$BIN/ticket-step.sh" || exit $?
+```
+
+Inside `ticket-step.sh`, replace the bare Python gate-runner invocation with:
+
+```sh
+"$PY" "$BIN/handbuild.py" run \
+  --wt "$WT" --ticket "$N" --repo "$REPO" --base origin/main \
+  "$BIN/run.py" || exit $?
+```
+
+`run` executes the existing frozen Python harness with a preflight guard around
+every `dispatch.run_gate` call, including attempt, PR-tier, and review-triggered
+gates. It re-reads the issue and handoff before each launch, uses the gate's base,
+and refuses a different worktree. Existing timeout/review policy stays in the
+runner. `step` refuses before executing its command and propagates its exit
+status, so the chain fail-stops without pausing timers on a packaging refusal.
+Already-running ad-hoc chains are not modified; use these entry points when
+preparing the next frozen run.
+
 ## Agent use
 
 [`skills/district/SKILL.md`](skills/district/SKILL.md) is the agent-facing
@@ -248,6 +298,8 @@ README.
 uv run python -m unittest discover -s tests
 ```
 
-District shells out to the `factory` CLI and never imports `agent_factory`
-internals. If District needs a per-repo fact or action, the fix is a flag on
-`factory`, not a reimplementation here.
+District's normal CLI shells out to `factory`. The optional hand-build harness
+instead runs inside Factory's Python to reuse its authoritative parsers.
+Per-repo facts and actions belong on `factory`, not in a second implementation.
+The hand-build fixture tests require an installed Factory (otherwise skipped);
+all git repos, issue responses, and gate launches in those tests are isolated.

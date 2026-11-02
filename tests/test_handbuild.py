@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +19,21 @@ TEST_ID = "tests/test_x.py::XTest::test_y"
 TEST_SOURCE = "import unittest\nclass XTest(unittest.TestCase):\n    def test_y(self):\n        self.assertEqual(1, 2)\n"
 
 
+def factory_python():
+    if importlib.util.find_spec("factory"):
+        return [sys.executable]
+    executable = shutil.which("factory")
+    if executable:
+        shebang = Path(executable).read_text().splitlines()[0]
+        if shebang.startswith("#!"):
+            return shlex.split(shebang[2:])
+    return None
+
+
+FACTORY_PYTHON = factory_python()
+
+
+@unittest.skipUnless(FACTORY_PYTHON, "hand-build integration requires an installed Factory")
 class HandbuildTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -68,10 +86,10 @@ class HandbuildTest(unittest.TestCase):
         self.commit("fix")
         self.declare()
 
-    def invoke(self, mode="preflight", *extra):
+    def invoke(self, mode="preflight", *extra, launcher=None):
         (self.tmp / "issue.json").write_text(json.dumps(self.issue))
         return subprocess.run(
-            [sys.executable, "-m", "district.handbuild", mode,
+            [*FACTORY_PYTHON, *(["-c", launcher] if launcher else ["-m", "district.handbuild"]), mode,
              "--wt", str(self.wt), "--ticket", "532", "--repo", "acme/widgets",
              "--base", self.base, *extra], env=self.env, text=True, capture_output=True,
         )
@@ -173,18 +191,16 @@ class HandbuildTest(unittest.TestCase):
 
     def test_every_gate_launch_is_checked_including_review(self):
         self.packaged()
-        # A tiny gate backend records actual launches; packaging is always checked
-        # using real git and the issue fixture, not a mocked preflight result.
-        package = self.tmp / "factory"
-        package.mkdir()
-        (package / "__init__.py").write_text("")
+        # Only the gate launch is faked; declarations and test inventory use
+        # Factory's real parsers against throwaway git commits.
         launched = self.tmp / "launched"
-        (package / "dispatch.py").write_text(
-            "from pathlib import Path\n"
-            f"def run_gate(*a, **kw):\n    with Path({str(launched)!r}).open('a') as f: f.write('gate\\n')\n"
+        launcher = (
+            "import sys\nfrom pathlib import Path\nfrom factory import dispatch\n"
+            "from district.handbuild import main\n"
+            f"def launch(*a, **kw):\n    with Path({str(launched)!r}).open('a') as f: f.write('gate\\n')\n"
+            "dispatch.run_gate = launch\nraise SystemExit(main(sys.argv[1:]))\n"
         )
         runner = self.tmp / "runner.py"
-        self.env["PYTHONPATH"] = f"{self.tmp}:{ROOT}"
         for remove_before in (0, 1, 2):
             with self.subTest(remove_before=remove_before):
                 self.declare()
@@ -195,7 +211,7 @@ class HandbuildTest(unittest.TestCase):
                     f"    if i == {remove_before}: Path({str(self.handoff)!r}).unlink()\n"
                     f"    dispatch.run_gate(Path({str(self.wt)!r}), 532)\n"
                 )
-                result = self.invoke("run", str(runner))
+                result = self.invoke("run", str(runner), launcher=launcher)
                 self.assert_refused(result, "Repro test:")
                 self.assertEqual(launched.read_text() if launched.exists() else "",
                                  "gate\n" * remove_before)
