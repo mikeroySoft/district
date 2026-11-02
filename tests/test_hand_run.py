@@ -504,6 +504,27 @@ class HandRunTest(unittest.TestCase):
                 self.assertIn("/tmp/external-live.sh", result.stderr)
                 self.assertFalse(self.launch_log.exists())
 
+    def test_interpreter_redirections_before_filename_are_refused(self):
+        helper = self.source / "helper"
+        helper.write_text("bash /tmp/external-live.sh\n")
+        for invocation in ("bash </dev/null ./helper", "bash -eu </dev/null ./helper",
+                           "python3 </dev/null ./helper", "python3 -u </dev/null ./helper"):
+            with self.subTest(invocation=invocation):
+                self.script.write_text(f"#!/bin/bash\n{invocation}\n")
+                result = self.command("launch", "532-chain", self.script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("cannot inspect sourced dependencies", result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
+    def test_interpreter_redirections_after_filename_remain_supported(self):
+        helper = self.source / "helper"
+        helper.write_text("printf 'approved\\n'\n")
+        self.script.write_text("#!/bin/bash\nbash -euo pipefail ./helper >/dev/null\n")
+        start, _ = self.launch()
+        helper.write_text("exit 91\n")
+        result = subprocess.run([str(start)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
