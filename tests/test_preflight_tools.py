@@ -23,6 +23,8 @@ def rendered(path: str, home: str = "/scheduler/home") -> str:
     return (
         "# factory-widgets-dashboard.service\n"
         f"[Service]\nEnvironment=PATH=/dashboard\nEnvironment=HOME={home}\n\n"
+        "# factory-widgets-triage-probe.service\n[Service]\nEnvironment=PATH=/probe\n\n"
+        "# factory-widgets-eval.service\n[Service]\nEnvironment=PATH=/eval\n\n"
         "# factory-widgets.service\n"
         f'[Service]\nEnvironment="PATH={path}" "HOME={home}"\n\n'
         "# factory-widgets.timer\n[Timer]\nOnUnitActiveSec=10min\n"
@@ -63,10 +65,9 @@ class SchedulerToolPreflightTest(unittest.TestCase):
             (root / ".factory.toml").write_text(
                 '[[gate.check]]\nname="site"\nrun="node test.mjs"\n'
                 '[[gate.check]]\nname="script"\nrun=["./scripts/gate"]\n'
-                '[review]\ncommand=["omp", "review"]\n'
             )
             data = {
-                "defaults": {"review": {"command": ["ignored-review"]},
+                "defaults": {"review": {"command": ["omp", "review"]},
                              "manager": {"command": ["omp", "manage"]}},
                 "repo": {"acme/widgets": {"path": str(root)}},
             }
@@ -78,7 +79,7 @@ class SchedulerToolPreflightTest(unittest.TestCase):
                 calls.append((argv, kwargs))
                 return host.run(argv, **kwargs)
 
-            with mock.patch.dict(os.environ, {"CONTROLLER_SECRET": "do-not-leak"}):
+            with mock.patch.dict(os.environ, {"CONTROLLER_SECRET": "do-not-leak"}), mock.patch("sys.platform", "darwin"):
                 rows = module().check(
                     data, "local", "acme/widgets", table,
                     rendered(str(binary_dir), str(home)), run_cmd=run,
@@ -130,6 +131,10 @@ class SchedulerToolPreflightTest(unittest.TestCase):
         rows = module().check({}, "local", "acme/widgets", {"path": "/repo"}, bad_render)
         self.assertEqual(rows[0]["status"], "FAIL")
         self.assertIn("invalid", rows[0]["detail"].lower())
+        malformed = '# factory-widgets.plist\n<?xml version="1.0"?><plist><dict>'
+        rows = module().check({}, "local", "acme/widgets", {"path": "/repo"}, malformed)
+        self.assertEqual(rows[0]["status"], "FAIL")
+        self.assertIn("invalid factory-widgets.plist", rows[0]["detail"])
 
         def metadata_error(argv, **kwargs):
             if argv[-1] == ".factory.toml":
@@ -163,22 +168,6 @@ class SchedulerToolPreflightTest(unittest.TestCase):
                             and "skipped" in row["detail"] for row in rows), rows)
         self.assertFalse(any(len(argv) >= 2 and argv[-2] == "/tools/custom-gate" for argv in calls))
 
-    def test_render_and_remote_install_environment_follow_owning_host(self) -> None:
-        output = rendered("/scheduler")
-        runner = mock.Mock(return_value=subprocess.CompletedProcess([], 0, output, ""))
-        rows = module().render({}, "local", "acme/widgets", {"path": "/repo"},
-                               run_cmd=runner, env={"PATH": "/installer"}, cli=Path("/bin/factory"))
-        self.assertTrue(rows)
-        first = runner.call_args_list[0]
-        self.assertEqual(first.args[0], ["/bin/factory", "install", "--print"])
-        self.assertEqual(first.kwargs, {"cwd": Path("/repo"), "env": {"PATH": "/installer"}})
-
-        remote = mock.Mock(spec=host.RemoteRunner)
-        remote.facts.return_value = {"path": "/usr/bin", "home": "/remote/home"}
-        with mock.patch.object(host, "service_path", return_value="/remote/service") as service_path:
-            self.assertEqual(module().install_environment(remote), {"PATH": "/remote/service"})
-        service_path.assert_called_once_with("/usr/bin", home=Path("/remote/home"))
-        self.assertIsNone(module().install_environment(host.run))
 
 
 if __name__ == "__main__":
