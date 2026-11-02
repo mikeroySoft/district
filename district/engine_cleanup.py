@@ -292,6 +292,8 @@ def clean(payload):
     references, scan_errors = _reference_scan(payload)
     errors.extend(scan_errors)
     result = {"removed": [], "kept": [], "skipped": [], "scan_errors": errors, "remove_errors": []}
+    result["folders_before"] = sum(identity is not None for _, identity, _ in candidates)
+    result["folders_after"] = result["folders_before"]
     if errors:
         return result
 
@@ -323,6 +325,7 @@ def clean(payload):
                 continue
             shutil.rmtree(path)
             result["removed"].append(str(path))
+            result["folders_after"] -= 1
         except OSError as exc:
             result["remove_errors"].append(f"{path}: {exc}")
     return result
@@ -359,8 +362,8 @@ def _json_default(value: object) -> str:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
-def cleanup(data: dict, *, run_cmd=None) -> None:
-    """Remove legacy directories only after a complete reference scan, including unit drop-ins."""
+def cleanup(data: dict, *, run_cmd=None) -> dict:
+    """Remove legacy directories after a complete scan; return cleanup results and folder counts."""
     if run_cmd is None:
         run_cmd = host.run
     remote = isinstance(run_cmd, host.RemoteRunner)
@@ -393,7 +396,7 @@ def cleanup(data: dict, *, run_cmd=None) -> None:
 
     if result["scan_errors"]:
         print("legacy engine cleanup skipped: reference scan incomplete: " + "; ".join(result["scan_errors"]))
-        return
+        return result
     for path in result["kept"]:
         print(f"kept referenced legacy engine {path}")
     for item in result["skipped"]:
@@ -402,3 +405,4 @@ def cleanup(data: dict, *, run_cmd=None) -> None:
         print(f"removed legacy engine {path}")
     for error in result["remove_errors"]:
         print(f"legacy engine cleanup could not remove {error}")
+    return result

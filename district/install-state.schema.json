@@ -103,6 +103,9 @@
         "disabled": {"$ref": "#/$defs/unitNames"},
         "reenabled": {"$ref": "#/$defs/unitNames"},
         "stopped": {"$ref": "#/$defs/unitNames"},
+        "drain": {"$ref": "#/$defs/drain"},
+        "drains": {"type": "object", "additionalProperties": {"$ref": "#/$defs/drain"}},
+        "engine_deferrals": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
         "deferred": {
           "type": "array",
           "items": {
@@ -145,6 +148,20 @@
     }
   },
   "$defs": {
+    "drain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested_at", "idle_at", "applied_at", "cleared_at", "waited_s"],
+      "properties": {
+        "requested_at": {"type": "string"},
+        "idle_at": {"type": ["string", "null"]},
+        "applied_at": {"type": ["string", "null"]},
+        "cleared_at": {"type": ["string", "null"]},
+        "waited_s": {"type": "number", "minimum": 0},
+        "folders_before": {"type": "integer", "minimum": 0},
+        "folders_after": {"type": "integer", "minimum": 0}
+      }
+    },
     "countOrUnknown": {
       "oneOf": [
         {"type": "integer", "minimum": 0},

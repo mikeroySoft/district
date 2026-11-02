@@ -24,7 +24,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from district import host, install_state, systemd
+from district import drain as drain_flag
+from district import host, install_state, postcheck, systemd
 from district.engine_cleanup import cleanup
 from district.host import DistrictError, run
 from district.service import remaining_timeout
@@ -611,7 +612,7 @@ def _hand_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline:
 
 def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
     paused = (host.engine(data, name) or {}).get("paused_timers", [])
-    if not paused:
+    if not paused or (record is not None and name in record.drains):
         return
     blocked = (host.engine(data, name) or {}).get("install_pending", {}).get("rollback_blocked")
     if blocked:
@@ -643,59 +644,109 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, de
         raise DistrictError(f"could not restore paused timers: {', '.join(remaining)}")
 
 
+def _auto_drain(record, target: str) -> bool:
+    if record is None:
+        return False
+    if record.engine_deferrals.get(target, 0) >= 3:
+        return True
+    since = record.deferred.get(target, {}).get("since")
+    try:
+        return (now() - datetime.fromisoformat(since.replace("Z", "+00:00"))).total_seconds() > 86400
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+@contextmanager
+def _host_drain(record, name: str, runner, timeout: float):
+    started = time.monotonic()
+    entry = {"requested_at": iso(now()), "idle_at": None, "applied_at": None,
+             "cleared_at": None, "waited_s": 0.0}
+    record.drains[name] = entry
+    # Register cleanup before writing: a remote rename may succeed even if SSH disconnects.
+    try:
+        flag = drain_flag.request(runner, timeout=timeout)
+        entry["requested_at"] = flag["created_at"]
+        ttl = (datetime.fromisoformat(flag["expires_at"].replace("Z", "+00:00")) -
+               datetime.fromisoformat(flag["created_at"].replace("Z", "+00:00"))).total_seconds()
+        record.drain_deadlines[name] = (started + timeout, started + ttl)
+        yield entry
+    finally:
+        if entry["idle_at"] is None:
+            entry["waited_s"] = round(time.monotonic() - started, 3)
+        drain_flag.clear(runner)
+        entry["cleared_at"] = iso(now())
+
+
+def _start_drain(record, name: str, runner) -> None:
+    if name in record.drains:
+        return
+    if record.drain_stack is None:
+        raise DistrictError("drain requires the apply lock")
+    timeout = record.drain_timeout if record.drain_timeout is not None else drain_flag.DEFAULT_TIMEOUT
+    record.drain_stack.enter_context(_host_drain(record, name, runner, timeout))
+
+
+def _engine_busy(runner, backend, repos, *, deadline: float) -> list[str]:
+    services, _ = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
+    busy = busy_units(services, backend, timeout=remaining_timeout(deadline))
+    busy += _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
+    tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+    _, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
+    return list(dict.fromkeys(busy + processes))
+
+
+def _wait_drained(record, name: str, runner, backend, repos, *, deadline: float) -> None:
+    target = "engine" if name == "local" else f"engine:{name}"
+    started = time.monotonic()
+    idle = False
+    busy = ["idle observation timed out"]
+    while True:
+        try:
+            observed = _engine_busy(runner, backend, repos, deadline=deadline)
+        except subprocess.TimeoutExpired:
+            break
+        if not observed and idle:
+            entry = record.drains[name]
+            if entry["idle_at"] is None:
+                entry["idle_at"] = iso(now())
+                entry["waited_s"] = round(time.monotonic() - started, 3)
+            return
+        idle = not observed
+        if observed:
+            busy = observed
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(1, remaining))
+    reason = f"drain timeout (busy: {', '.join(busy)})"
+    record.defer(target, reason)
+    raise DistrictError(reason)
+
+
 @contextmanager
 def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, *, deadline: float | None = None):
     target = "engine" if name == "local" else f"engine:{name}"
+    draining = record is not None and (
+        name in record.drains or record.drain_timeout is not None or _auto_drain(record, target))
+    if draining:
+        _start_drain(record, name, runner)
+        if deadline is None:
+            deadline = record.drain_deadlines[name][0]
+        _wait_drained(record, name, runner, backend, repos, deadline=deadline)
+        yield record.drain_deadlines[name][1]
+        return
     if deadline is None:
-        timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + max(
+            SMOKE_TIMEOUT, hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600)
     try:
-        ready = False
-        try:
-            services, timers = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
-            active = [timer for timer in timers
-                      if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
-            tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
-            hand_work = _hand_work(tool, cli, runner, backend, repos, deadline=deadline)
-            if hand_work:
-                _defer(record, target, hand_work)
-            else:
-                if record:
-                    record.observe(data)
-                for timer in active:
-                    remaining_timeout(deadline)
-                    paused = list((host.engine(data, name) or {}).get("paused_timers", []))
-                    _save_engine(data, name, runner, deadline=deadline,
-                                 paused_timers=paused if timer in paused else paused + [timer])
-                    remaining = remaining_timeout(deadline)
-                    if record:
-                        record.disabled.add(timer)
-                    backend.pause_timer(timer, timeout=remaining)
-                while True:
-                    hand_work = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
-                    if hand_work:
-                        _defer(record, target, hand_work)
-                        break
-                    busy = [unit for unit in services if backend.is_active(
-                        unit, timeout=remaining_timeout(deadline)) in ("active", "activating", "deactivating")]
-                    hand_work, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
-                    busy += processes
-                    if hand_work:
-                        _defer(record, target, hand_work)
-                        break
-                    if not busy:
-                        ready = True
-                        break
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        _defer(record, target, busy)
-                        break
-                    time.sleep(min(1, remaining))
-        except subprocess.TimeoutExpired:
-            _defer(record, target, ["idle wait timed out"])
-        yield deadline if ready else None
-    finally:
-        _restore_engine_timers(data, name, runner, backend, record)
+        busy = _engine_busy(runner, backend, repos, deadline=deadline)
+    except subprocess.TimeoutExpired:
+        busy = ["idle observation timed out"]
+    if busy:
+        _defer(record, target, busy)
+        yield None
+    else:
+        yield deadline
 
 def _finish_dashboards(data: dict, name: str, runner, repos: dict, backend, *, deadline: float | None = None) -> None:
     if (host.engine(data, name) or {}).get("dashboards_pending"):
@@ -718,10 +769,11 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
 
     def install(revision):
         source = f"git+{install_url}@{revision}" + (f"[{','.join(extras)}]" if extras else "")
-        proc = runner(["uv", "tool", "install", "--force", "--from", source, "factory"], timeout=DRAIN_TIMEOUT)
+        proc = runner(["uv", "tool", "install", "--force", "--from", source, "factory"],
+                      timeout=min(600, remaining_timeout(deadline)))
         if proc.returncode:
             raise OSError((proc.stderr or proc.stdout).strip() or "uv tool install failed")
-        _verify_engine(revision, tool, cli, runner)
+        _verify_engine(revision, tool, cli, runner, deadline=deadline)
 
     try:
         install(sha)
@@ -931,26 +983,33 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
     def hand_ready(name):
         runner, backend, repos = contexts[name]
         try:
-            tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadlines[name]))
-            busy = _hand_work(tool, cli, runner, backend, repos, deadline=deadlines[name])
+            if record is not None and name in record.drains:
+                _wait_drained(record, name, runner, backend, repos,
+                              deadline=record.drain_deadlines[name][0])
+                busy = []
+            else:
+                busy = _engine_busy(runner, backend, repos, deadline=deadlines[name])
         except subprocess.TimeoutExpired:
             busy = ["idle wait timed out"]
         if busy:
             _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
         return not busy
 
-    # Preflight every changed host before pausing any host's timers.
+    # Discover every changed host before admitting any engine install.
     for name, (runner, backend, _) in contexts.items():
         try:
             tool, cli = host.factory_tool_paths(runner)
             if (_engine_current(pin[1], tool, cli, runner)
                     and not (host.engine(data, name) or {}).get("paused_timers")):
                 continue
-            timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
+            timeout = max(SMOKE_TIMEOUT, hours(
+                host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600)
             deadlines[name] = time.monotonic() + timeout
-            if not hand_ready(name):
-                print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
-                return "deferred"
+            target = "engine" if name == "local" else f"engine:{name}"
+            if record is not None and (
+                    record.drain_timeout is not None or name in record.drains or _auto_drain(record, target)):
+                _start_drain(record, name, runner)
+                deadlines[name] = record.drain_deadlines[name][0]
         except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
             print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
             return "failed"
@@ -967,6 +1026,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
             if not ready:
                 print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
                 return "deferred"
+            deadlines[name] = ready
             opened.add(name)
         # A later host's drain can outlive an earlier host's readiness probe.
         for name in deadlines:
@@ -1325,7 +1385,8 @@ def repo_pass(slug: str, table: dict, data: dict,
             row["fail"].append("dashboard: malformed JSON")
 
     cap = int(host.default(data, "max_failed_passes"))
-    if row["failures"] is not None and row["failures"] >= cap and backend.is_active(f"{unit}.timer") == "active":
+    if (row["failures"] is not None and row["failures"] >= cap
+            and not (record and record.drains) and backend.is_active(f"{unit}.timer") == "active"):
         disable_timers([f"{unit}.timer"], DRAIN_TIMEOUT, backend, check=False, record=record)
         table["disabled_at"] = iso(now())
         table["disabled_reason"] = f"{row['failures']} consecutive failed passes (cap {cap})"
@@ -1420,6 +1481,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     if host_name != "local":
         facts = run_cmd.facts()
         install_env = {"PATH": host.service_path(facts["path"], home=Path(facts["home"]))}
+    previous = (host.engine(data, host_name) or {}).get("previous") if engine_result == "applied" else installed_engine_commit(data, host_name)
 
     rows = []
     completed = {}
@@ -1454,7 +1516,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
 
     record.observe(data)
     for slug, table in targets.items():
-        if args.reset and not reset(slug, table, data, record, backend=backend):
+        if args.reset and host_name not in record.drains and not reset(slug, table, data, record, backend=backend):
             code = 1
     render_errors = {}
     changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env, errors=render_errors)
@@ -1468,6 +1530,14 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
             row["fail"].extend(render_errors[slug])
         elif table.get("disabled_at"):
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+        elif host_name in record.drains:
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            if changes[slug] or args.reset:
+                reason = "unit changes deferred during district drain (timers untouched)"
+                record.defer(slug, reason)
+                row["deferred"] = reason
+            else:
+                record.clear_deferred(slug)
         elif not changes[slug] and backend.is_active(f"{host.unit_name(slug)}.timer") == "active":
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
             record.clear_deferred(slug)
@@ -1483,7 +1553,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
             timer_state = backend.is_active(timer) if changed else None
             if timer_state == "inactive" and backend.status(timer).unit_file_state == "not-found":
                 timer_state = None  # First install has no operator state to preserve.
-            active_timers = [timer] if timer_state == "active" else []
+            active_timers = [timer] if timer_state == "active" and host_name not in record.drains else []
             install_error = None
             try:
                 if changed and (busy := drain(active_timers, [service], data, record, backend=backend)):
@@ -1521,7 +1591,20 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
         host.sync_remote_config(data, host_name, run_cmd)
     tool, cli = host.factory_tool_paths(run_cmd)
     if engine_result in ("applied", "unchanged") and _receipt_sha(tool, run_cmd) and _tool_cli(tool, cli, run_cmd):
-        cleanup(data, run_cmd=run_cmd)
+        cleaned = cleanup(data, run_cmd=run_cmd)
+        if host_name in record.drains:
+            record.drains[host_name].update(
+                folders_before=cleaned["folders_before"], folders_after=cleaned["folders_after"])
+            print(f"legacy factory folders {host_name}: {cleaned['folders_before']} -> {cleaned['folders_after']}")
+    if host_name in record.drains and engine_result in ("applied", "unchanged"):
+        failures = postcheck.check(data, host_name, run_cmd, backend, all_repos, previous=previous,
+                                   deadline=record.drain_deadlines[host_name][1])
+        for failure in failures:
+            print(f"postcheck FAIL {host_name}: {failure}")
+        if failures:
+            code = 1
+        elif code == 0:
+            record.drains[host_name]["applied_at"] = iso(now())
     current_engine = host.engine(data, host_name)
     if current_engine and not args.upgrade and "factory_ref" not in data.get("defaults", {}):
         installed = installed_engine_commit(data, host_name)
@@ -1542,12 +1625,14 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
     os.environ["PATH"] = host.service_path()
     lock_path = host.operation_lock_path()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open("a") as lock:
+    with lock_path.open("a") as lock, ExitStack() as drains:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print(f"district apply: another apply is running ({lock_path})", file=sys.stderr)
             return 1
+        record.drain_stack = drains
+        record.drain_timeout = getattr(args, "drain_timeout", drain_flag.DEFAULT_TIMEOUT) if getattr(args, "drain", False) else None
 
         data = host.load()
         host.hosts(data)
@@ -1577,6 +1662,17 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         ) else []
         if len(engine_hosts) < 2 and not fleet_hosts:
             engine_hosts = []
+        explicit_contexts = {}
+        if record.drain_timeout is not None:
+            # Wait before policy, migrations, unit changes or any install is applied.
+            for name in dict.fromkeys([*fleet_hosts, *groups]):
+                runner, backend = _host_context(data, name)
+                repos = _host_repos(data, name)
+                explicit_contexts[name] = (runner, backend, repos)
+                _start_drain(record, name, runner)
+            for name, (runner, backend, repos) in explicit_contexts.items():
+                _wait_drained(record, name, runner, backend, repos,
+                              deadline=record.drain_deadlines[name][0])
         host.sync_local_claims(data)
         status, warnings = policy(data)
         host.save(data)
@@ -1584,14 +1680,15 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         rows = []
         smokes = []
         code = 0
-        contexts = {}
+        contexts = dict(explicit_contexts)
         fleet_result = None
         context_failures = {}
         if engine_hosts:
             for name in engine_hosts:
                 try:
-                    run_cmd, backend = _host_context(data, name)
-                    contexts[name] = (run_cmd, backend, _host_repos(data, name))
+                    if name not in contexts:
+                        run_cmd, backend = _host_context(data, name)
+                        contexts[name] = (run_cmd, backend, _host_repos(data, name))
                 except (host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
                     context_failures[name] = exc
             try:
@@ -1661,11 +1758,18 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--allow-downgrade", action="store_true",
                         help="allow a target that is an ancestor of the installed engine")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
+    parser.add_argument("--drain", action="store_true", help="request Factory skip new timer passes, then wait for idle")
+    parser.add_argument("--drain-timeout", default="6h", metavar="DURATION",
+                        help="maximum drain wait (default 6h, maximum 7h45min)")
     args = parser.parse_args(argv)
+    args.drain_timeout = hours(args.drain_timeout, "--drain-timeout") * 3600
+    if args.drain_timeout > drain_flag.DRAIN_MAX_TTL - 900:
+        parser.error("--drain-timeout must be at most 7h45min (8h flag cap minus 15min install margin)")
     record = install_state.ApplyRun.start()
     code = 1
     try:
-        code = _run(args, record)
+        with drain_flag.interrupted():
+            code = _run(args, record)
         return code
     except SystemExit as exc:
         code = exc.code if isinstance(exc.code, int) else 1
