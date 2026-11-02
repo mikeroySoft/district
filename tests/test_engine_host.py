@@ -175,6 +175,49 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         self.assertEqual(synced["defaults"]["engine"]["target"], "b" * 40)
         self.assertEqual(synced["defaults"]["engine"]["target_ref"], "main")
 
+    def test_remote_sync_preserves_invalid_toml_before_replacement(self) -> None:
+        for label, original in (
+            ("invalid", b'# original bytes\r\n[defaults\r\nfactory_source = "/old/remote"\r\n'),
+            ("valid", b'[defaults]\nfactory_ref = "old"\n'),
+            ("missing", None),
+        ):
+            with self.subTest(config=label):
+                remote = self.root / label
+                config = remote / "config/factory/config.toml"
+                config.parent.mkdir(parents=True)
+                if original is not None:
+                    config.write_bytes(original)
+                remote_env = {
+                    "HOME": str(remote / "home"), "PATH": os.defpath,
+                    "XDG_CONFIG_HOME": str(remote / "config"),
+                    "XDG_DATA_HOME": str(remote / "data"),
+                    "XDG_STATE_HOME": str(remote / "state"),
+                    "XDG_CACHE_HOME": str(remote / "cache"),
+                    "UV_TOOL_DIR": str(remote / "tools"), "UV_TOOL_BIN_DIR": str(remote / "bin"),
+                }
+                replacements = []
+
+                def transport(argv, **kwargs):
+                    if "t.write_text" in argv[-1]:
+                        backups = list(config.parent.glob("config.toml.*.bak"))
+                        self.assertEqual([p.read_bytes() for p in backups],
+                                         [original] if label == "invalid" else [])
+                        replacements.append(str(config))
+                    return subprocess.run(
+                        ["sh", "-c", argv[-1]], capture_output=True, text=True,
+                        env=remote_env, input=kwargs.get("input"), timeout=kwargs["timeout"])
+
+                runner = host.RemoteRunner("remote", "unused", transport=transport)
+                data = {"defaults": {"factory_ref": "main"},
+                        "hosts": {"remote": {}}, "repo": {"acme/widgets": {"host": "remote"}}}
+                with mock.patch.object(runner, "facts", return_value={"config_home": str(remote / "config")}):
+                    host.sync_remote_config(data, "remote", runner)
+                self.assertEqual(tomllib.loads(config.read_text()), host.remote_config(data, "remote"))
+                self.assertEqual(replacements, [str(config)])
+                backups = list(config.parent.glob("config.toml.*.bak"))
+                self.assertEqual([p.read_bytes() for p in backups],
+                                 [original] if label == "invalid" else [])
+
 
 if __name__ == "__main__":
     unittest.main()

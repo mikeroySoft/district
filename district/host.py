@@ -664,10 +664,12 @@ def sync_remote_config(data: dict, name: str, runner: RemoteRunner, *, deadline:
         stored = tomllib.loads(original.decode())
     except UnicodeDecodeError as exc:
         raise DistrictError(f"{name}: invalid UTF-8 in {config_path}") from exc
-    except (OSError, tomllib.TOMLDecodeError):
+    except OSError:
         original = None
         stored = {}
-    if original is not None and _has_factory_source(stored):
+    except tomllib.TOMLDecodeError:
+        stored = None  # Successfully read bytes still need preservation before replacement.
+    if original is not None and (stored is None or _has_factory_source(stored)):
         runner.path(config_path.with_name(_backup_name(config_path.name))).write_bytes(
             original, timeout=service.remaining_timeout(deadline))
     config.write_text(tomli_w.dumps(remote_config(data, name)), timeout=service.remaining_timeout(deadline))
