@@ -8,7 +8,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-from district import cli
 
 
 SYSTEMCTL = '''#!/usr/bin/env python3
@@ -61,8 +60,9 @@ class HandRunTest(unittest.TestCase):
                               text=True, capture_output=True)
 
     def active(self, start, stop="", state="active"):
+        executable = "/bin/bash" if Path(start).suffix == ".sh" else str(start)
         self.units.write_text(json.dumps({"handland-532-chain.service": {
-            "ActiveState": state, "ExecStart": f"{{ path=/bin/bash ; argv[]=/bin/bash {start} ; }}",
+            "ActiveState": state, "ExecStart": f"{{ path={executable} ; argv[]={executable} {start} ; }}",
             "ExecStopPost": f"{{ path={stop} ; argv[]={stop} ; }}" if stop else "",
         }}))
 
@@ -158,6 +158,7 @@ class HandRunTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("handland-532-chain.service", result.stderr)
         self.assertIn("ExecStart", result.stderr)
+        self.units.write_text("{}")
         start, _ = self.launch()
         self.active(start, self.script)
         result = self.command("check")
@@ -170,6 +171,34 @@ class HandRunTest(unittest.TestCase):
         result = self.command("update", self.script, self.replacement)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("systemctl", result.stderr)
+        self.assertEqual(self.script.read_bytes(), original)
+
+    def test_writable_frozen_helper_fails_active_unit_check(self):
+        start, stop = self.launch()
+        self.active(start, stop)
+        helper = next(start.parent.rglob("chain.sh"))
+        helper.chmod(0o644)
+        result = self.command("check")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("writable", result.stderr)
+
+    def test_symlink_to_live_dependency_is_refused_before_launch(self):
+        outside = self.home / "live.py"
+        outside.write_text("print('live')\n")
+        (self.source / "helper.py").symlink_to(outside)
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink", result.stderr.lower())
+        self.assertFalse(self.launch_log.exists())
+
+    def test_stop_hook_alone_blocks_update(self):
+        other = self.source / "other.sh"
+        other.write_text("#!/bin/bash\ntrue\n")
+        self.active(other, self.script)
+        original = self.script.read_bytes()
+        result = self.command("update", self.script, self.replacement)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("handland-532-chain.service", result.stderr)
         self.assertEqual(self.script.read_bytes(), original)
 
 
