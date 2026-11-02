@@ -4,9 +4,10 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime, time
+from inspect import getsource
 from pathlib import Path
 
-from . import host
+from . import host, systemd
 
 CLEANUP_TIMEOUT = 30
 
@@ -19,7 +20,9 @@ import re
 import shutil
 import stat
 import sys
+import tomllib
 from pathlib import Path
+''' + getsource(systemd.words) + r'''
 
 MAX_REFERENCE_BYTES = 4 * 1024 * 1024
 _PATH = re.compile(r"/(?:\\.|[^\s\"'<>\[\]{},;])+" )
@@ -35,6 +38,13 @@ def _strings(value):
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from _strings(item)
+
+
+def _add_strings(references, value, errors, source):
+    strings = list(_strings(value))
+    if any("\0" in item for item in strings):
+        errors.append(f"{source}: NUL is not allowed")
+    references.extend(strings)
 
 
 def _within(path, directory):
@@ -71,18 +81,67 @@ def _expanded_systemd(value, home):
     return "".join(result)
 
 
+def _systemd_lines(text):
+    current = None
+    start = None
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith(("#", ";")):
+            continue
+        if current is None:
+            current = line
+            start = number
+        else:
+            current += line
+        if line.endswith("\\"):
+            current = current[:-1] + " "
+            continue
+        yield start, current, None
+        current = None
+        start = None
+    if current is not None:
+        yield start, None, "unterminated line continuation"
+
+
+def _systemd_values(text, home):
+    values = []
+    failures = []
+    for line_number, line, failure in _systemd_lines(text):
+        if failure:
+            failures.append((line_number, failure))
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";", "[")):
+            continue
+        _, separator, raw_value = line.partition("=")
+        if not separator:
+            continue
+        try:
+            parsed = words(raw_value.strip())
+            values.append(_expanded_systemd(raw_value.strip(), home))
+            values.extend(_expanded_systemd(word, home) for word in parsed)
+        except ValueError as exc:
+            failures.append((line_number, str(exc)))
+    return values, failures
+
+
 def _references(value, candidate, home):
     value = _expanded(value, home)
     logical, resolved = candidate
     for spelling in {logical, resolved}:
         if re.search(re.escape(spelling) + r"(?=$|[/\s\"'<>\[\]{},;:)])", value):
             return True
+    complete_values = {value}
+    if "=" in value:
+        complete_values.add(value.split("=", 1)[1])
+    complete_values.update(item.lstrip("-@:+!") for item in tuple(complete_values))
+    complete_values.update(part for item in tuple(complete_values) for part in item.split(":"))
+    for complete in complete_values:
+        if complete.startswith("/") and _within(os.path.realpath(complete), resolved):
+            return True
     for match in _PATH.finditer(value):
         token = match.group(0).replace(r"\ ", " ").rstrip(":)")
         if _within(os.path.realpath(token), resolved):
             return True
-    if value.startswith("/") and _within(os.path.realpath(value), resolved):
-        return True
     return False
 
 
@@ -131,7 +190,8 @@ def _reference_scan(payload):
     config_home = Path(payload["config_home"])
     tool = Path(payload["tool"])
     errors = []
-    references = list(_strings(payload.get("data", {})))
+    references = []
+    _add_strings(references, payload.get("data", {}), errors, "host config data")
 
     unit_dir = config_home / "systemd" / "user"
     unit_entries = _scan_directory(
@@ -150,10 +210,9 @@ def _reference_scan(payload):
         text = _read(path, errors)
         if text is not None:
             _source_path(path, references)
-            try:
-                references.append(_expanded_systemd(text, home))
-            except ValueError as exc:
-                errors.append(f"{path}: {exc}")
+            values, failures = _systemd_values(text, home)
+            references.extend(values)
+            errors.extend(f"{path}:{line}: {reason}" for line, reason in failures)
 
     agent_dir = Path(home) / "Library" / "LaunchAgents"
     plists = _scan_directory(agent_dir, lambda path: path.suffix == ".plist", errors)
@@ -172,14 +231,19 @@ def _reference_scan(payload):
         if not named_factory and not (isinstance(label, str) and "factory" in label.casefold()):
             continue
         _source_path(path, references)
-        references.extend(_strings(document))
+        _add_strings(references, document, errors, path)
 
     for path in (config_home / "factory" / "config.toml", tool / "uv-receipt.toml"):
         if _present(path, errors):
             text = _read(path, errors)
             if text is not None:
                 _source_path(path, references)
-                references.append(text)
+                try:
+                    document = tomllib.loads(text)
+                except tomllib.TOMLDecodeError as exc:
+                    errors.append(f"{path}: {exc}")
+                else:
+                    _add_strings(references, document, errors, path)
     return references, errors
 
 

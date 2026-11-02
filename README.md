@@ -124,7 +124,7 @@ name.
 `/opt/homebrew/bin` to the service PATH and write stdout/stderr under the
 factory's `.factory/logs/` directory. `local` is reserved for this machine.
 Remote commands use noninteractive SSH with a ten-second connection timeout.
-Remote hosts need `python3` as well as Factory, `uv`, git, and authenticated `gh`
+Remote hosts need Python >=3.11 as `python3`, plus Factory, `uv`, git, and authenticated `gh`
 on their noninteractive PATH. Commands with execution deadlines also run a
 remote Python watchdog that kills the command's process group on timeout.
 District keeps the authoritative registry and operation lock on the controller,
@@ -248,9 +248,14 @@ are also unknown when the uv receipt and recorded revision do not agree.
 After successful engine reconciliation and unit rendering, apply scans all
 managed systemd units and their named, prefix, and type-wide service/timer
 drop-ins, Factory launchd plists, the host config, and the uv receipt before
-removing unreferenced legacy `factory-*` directories. Systemd `%h` and `%%` are
-expanded; unresolved specifiers or unreadable fragments make the scan incomplete
-and prevent deletion. Referenced directories and symlinks are kept and reported.
+removing unreferenced legacy `factory-*` directories. Complete systemd words are
+decoded using single/double quoting, line continuations and C-style escapes,
+then `%h` and `%%` are expanded before resolving symlink aliases. Malformed
+quotes/escapes, unresolved specifiers or unreadable fragments report the source
+file and line where available, make the scan incomplete, and prevent every deletion.
+Config/receipt TOML and plist values are scanned as complete strings, preserving
+spaces and literal quotes in paths. Referenced directories and symlinks are kept
+and reported.
 Local and remote cleanup normalize TOML date, time, and datetime settings to ISO
 strings; unsupported scalar types raise before cleanup removes anything.
 A legacy `factory_source` setting is removed through District's config writer
