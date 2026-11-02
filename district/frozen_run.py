@@ -20,6 +20,10 @@ _LIVE_SCRIPT = re.compile(
     rb"(?:(?<![^\s\"'`=|;&(<>])|(?<=#!))"
     rb"(?P<path>(?:/|\$HOME/|\$\{HOME\}/|~/)[^\x00\r\n\t \"'`|;&()<>]*\.(?:sh|py))(?![A-Za-z0-9._-])"
 )
+_SOURCE = re.compile(
+    rb"(?:^|[\s;|&()])(?:source|\.|\"source\"|'source'|\"\.\"|'\.')[ \t]+(?:--[ \t]+)?"
+    rb"(?P<path>\"(?:\\.|[^\"\\\r\n])*\"|'[^'\r\n]*'|(?:\\[^\r\n]|[^\s\"'`;|&()<>\\])+)"
+)
 _VERIFIER = r'''import hashlib, os, pathlib, stat, sys
 root = pathlib.Path(sys.argv[1])
 manifest = root / "checksums.txt"
@@ -141,23 +145,24 @@ def _replace_paths(path: Path, replacements: list[tuple[bytes, bytes]]) -> None:
 
 
 def _source_references(value: bytes, script: Path) -> Iterator[str]:
+    value = value.replace(b"\\\n", b"")
     if b"$'" in value or b'$"' in value:
         raise ValueError(f"cannot inspect sourced dependencies in {script}: unsupported Bash quoting")
-    lexer = shlex.shlex(os.fsdecode(value).replace("\\\n", ""), posix=True, punctuation_chars=";&|()<>")
-    lexer.whitespace_split = True
-    while True:
-        try:
-            word = lexer.get_token()
-            if word is None:
-                return
-            if word in {"source", "."}:
-                reference = lexer.get_token()
-                if reference == "--":
-                    reference = lexer.get_token()
-                if reference is not None:
-                    yield reference
-        except ValueError as error:
-            raise ValueError(f"cannot inspect sourced dependencies in {script}: {error}") from error
+    for line in value.splitlines():
+        # Ignore comment prose, but conservatively retain substitutions which
+        # could execute inside a multiline quoted string beginning with '#'.
+        if line.lstrip().startswith(b"#") and b"$(" not in line and b"`" not in line:
+            continue
+        # Extract only the literal source argument. Tokenizing an entire Bash
+        # statement as POSIX sh can hide sources inside substitutions or after
+        # parameter expansions such as ${file##*/}.
+        for match in _SOURCE.finditer(line):
+            try:
+                words = shlex.split(os.fsdecode(match.group("path")), comments=False)
+            except ValueError as error:
+                raise ValueError(f"cannot inspect sourced dependencies in {script}: {error}") from error
+            if len(words) == 1:
+                yield words[0]
 
 
 def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
