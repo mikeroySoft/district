@@ -39,7 +39,7 @@ only once.
 | Command | What one invocation does |
 |---|---|
 | `district add <path\|url>` | Onboard a repo, or adopt one that already has `.factory.toml`. `--dry-run` prints the proposal (slug, clone path, fork parent, port, gate checks); `--host NAME`, `--check NAME=CMD`, `--exclusive a,b`, `--no-edit`. |
-| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: the host's one Factory uv tool, units, labels, `factory doctor`, failure cap, package-age policy, and safe legacy-engine cleanup. Remote commands and config writes use bounded BatchMode SSH. A busy host normally defers a changed engine without touching timers or running passes. `--drain` asks compatible timer-started passes not to begin, waits up to `--drain-timeout` (default 6h) for existing and hand-run work, then installs and post-checks only the CI-green engine path; generated-unit drift and failure-cap actions are deferred so no Factory timer is touched. `--upgrade [REF]` requests an explicit target; `--allow-downgrade` permits an ancestor. `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
+| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: the host's one Factory uv tool, units, labels, `factory doctor`, failure cap, package-age policy, and safe legacy-engine cleanup. Remote commands and config writes use bounded BatchMode SSH. A busy host normally defers a changed engine without touching timers or running passes. `--drain` asks compatible timer-started passes not to begin, waits up to `--drain-timeout` (default 6h) for active non-dashboard Factory services, then installs and post-checks only the CI-green engine path; generated-unit drift and failure-cap actions are deferred so no Factory timer is touched. `--upgrade [REF]` requests an explicit target; `--allow-downgrade` permits an ancestor. `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district drain --clear [--host NAME]` | Remove a local or remote host's drain flag while holding the operation lock. Use this for explicit operator recovery; expired flags already stop blocking Factory. |
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table across local and remote hosts. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. An unreachable host keeps its factories visible as unreachable with the last successful observation time and produces unknown exit 2, not fleet failure exit 1. Exit 1 remains operational attention or a failed controller `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row); exit 0 means every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
@@ -180,7 +180,7 @@ Every host has exactly one Factory installation: the `factory` uv tool, with no
 version in its path. Every managed unit and launchd job uses that tool's Python,
 and District invokes its CLI to render units. A changed engine is replaced only
 after the owning host is confirmed idle. Ordinary apply defers active, activating,
-or deactivating services and observed Factory processes without touching timers.
+or deactivating non-dashboard Factory services without touching timers.
 Once already idle, it retains the bounded timer-pause/recheck/restore window
 that prevents a timer from starting work during replacement. Flag-based drains
 never enter that timer window.
@@ -191,10 +191,10 @@ engine work. Healthy, already-current hosts do not request a flag, wait for idle
 or run drained post-apply checks; they continue ordinary unit reconciliation.
 The UTF-8 JSON flag is written atomically and carries schema version 1,
 requester, reason, PID, creation time, and expiry. Compatible timer-started
-Factory passes see the flag and skip before starting work; already-running and
-hand-run passes are never stopped, killed, disabled, masked, or delayed.
-District waits for them to finish, re-checks idle before replacement, installs,
-migrates, cleans up, and runs post-apply checks. The default wait is 6 hours;
+Factory passes see the flag and skip before starting work. Already-running passes
+are never stopped, killed, disabled, masked, or delayed. District waits for active
+non-dashboard Factory services to finish, re-checks idle before replacement,
+installs, migrates, cleans up, and runs post-apply checks. The default wait is 6 hours;
 `--drain-timeout` accepts at most `465min` (7h45m), reserving 15 minutes for installation.
 While that flag exists, District does not call `factory install` and does not
 apply the failure cap, because Factory exposes no install-without-start option.
@@ -234,38 +234,22 @@ available during a long wait. Install-state schema 3 records local `last_apply.d
 and per-host `last_apply.drains`: `requested_at`, `idle_at`, `applied_at`,
 `cleared_at`, `waited_s`, and legacy folder counts before/after cleanup.
 
-One fail-closed rule handles every launch spelling while deciding whether the
-engine is idle:
+Engine busy checks use the owning host's service manager, not process cwd or argv.
+On Linux, active, activating, or deactivating `factory-*.service` units block an
+engine change, including discovered auxiliary and unregistered workers. On macOS,
+the service backend checks the corresponding Factory launchd jobs.
+Registered main units take precedence over dashboard-looking names.
+Registered long-running dashboard services do not block: apply restarts loaded
+dashboards after the verified engine swap. Non-Factory services and processes,
+including sshd and `handland-*`, never count as Factory work. A hand-run command
+outside a Factory service is not tracked by this check.
 
-- **Path:** argv[0], non-option tokens and values in `--option=value` are compared
-  lexically with the configured and owning-host-resolved tool directory and CLI.
-  Relative paths use the process's own cwd, never the controller's cwd. Paths
-  inside the tool count, including its `bin/python`; Python symlinks are not followed.
-  The tokens `-` and `--` are never paths.
-- **Name:** any token with a `/` component `factory`, or module name `factory`
-  or `factory.*` (including attached `-mfactory.__main__`), counts as Factory work.
-  This intentionally includes arguments after `--` and arguments to `-c`.
-- **Cwd (Linux only):** cwd inside the tool, a registered repository checkout
-  (including `.factory/wt-*`), or `<data_home>/district/roots` counts as work.
-  Unreadable cwd plus a relative path token containing `/` is busy; unreadable cwd
-  alone does not make an absolute-path daemon busy.
-
-Linux reads exact NUL-separated `/proc/<pid>/cmdline` and lexical
-`/proc/<pid>/cwd` on the owning host, bracketed by stat generation checks.
-Remote observations return structured JSON, never reconstructed argv.
-Unreadable/empty cmdline uses conservative path/name matching on fallback `ps`
-text. macOS has no cwd source: it applies absolute-path and name rules to
-C-locale, unbounded-width `ps -ww` whitespace tokens. Whole-text managed-path
-mentions also fail closed, including paths containing spaces.
-
-Only positively owned registered-dashboard processes and the observing probe
-and its ancestor chain are exempt. An unowned `factory dashboard` is busy.
-Ownership uses unchanged `(PID, start time)` with Linux cgroups or macOS
-launchd ancestry, validating every parent and anchor. A reused/disappeared PID,
-changed parent, parse/listing error, unavailable ownership, or active
-`handland-*` unit remains a named deferral. Fleet preflight covers every
-changed host before any install, and every host is re-checked before the first
-replacement. New work or an expired deadline prevents replacement.
+The same service-state guard covers ordinary upgrades, drains, fleet preflight,
+per-host replacement, and rollback. Fleet preflight covers every changed host
+before any install, and every host is re-checked before replacement.
+New active Factory services or an expired deadline prevent replacement.
+Every service probe uses the remaining shared idle budget, so multiple slow
+unit queries cannot each consume a fresh timeout.
 
 An authorized replacement persists `engine.install_pending` (target, previous
 revision when known, and ref) before invoking uv. A failed install or
