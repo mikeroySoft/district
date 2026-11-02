@@ -36,6 +36,20 @@ class SchedulerToolPreflightTest(unittest.TestCase):
         output = "preamble\n# one.service\na\n# two.timer\nb\n"
         self.assertEqual(module().rendered_units(output), {"one.service": "a", "two.timer": "b"})
 
+    def test_dispatch_environment_ignores_auxiliary_jobs_without_rejecting_repo_suffixes(self) -> None:
+        for extension in ("service", "plist"):
+            for stem in ("factory-widgets", "factory-widgets-eval"):
+                with self.subTest(extension=extension, stem=stem):
+                    sections = []
+                    for suffix in ("", "-dashboard", "-triage-probe", "-eval"):
+                        environment = {"PATH": "/auxiliary" if suffix else "/dispatch", "HOME": "/owning/home"}
+                        body = (plistlib.dumps({"EnvironmentVariables": environment}).decode()
+                                if extension == "plist" else
+                                f"[Service]\nEnvironment=PATH={environment['PATH']} HOME={environment['HOME']}\n")
+                        sections.append(f"# {stem}{suffix}.{extension}\n{body}\n")
+                    self.assertEqual(module().scheduler_environment("".join(sections)),
+                                     {"PATH": "/dispatch", "HOME": "/owning/home"})
+
     def test_check_uses_only_dispatch_environment_and_derives_all_sources(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

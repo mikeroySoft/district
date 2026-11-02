@@ -8,6 +8,7 @@ import json
 import os
 import plistlib
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -86,8 +87,12 @@ class OneInstallTest(unittest.TestCase):
         for name in ("factory", "python"):
             executable = self.tool / "bin" / name
             if not executable.exists() and not executable.is_symlink():
-                executable.touch()
+                executable.touch(mode=0o755)
         self.cli.parent.mkdir(parents=True, exist_ok=True)
+        for name in ("gh", "git", "uv", "python3"):
+            executable = self.cli.parent / name
+            if not executable.exists():
+                executable.touch(mode=0o755)
         self.cli.unlink(missing_ok=True)
         self.cli.symlink_to(self.tool / "bin" / "factory")
         (self.tool / "uv-receipt.toml").write_text(
@@ -109,18 +114,65 @@ class OneInstallTest(unittest.TestCase):
         return subprocess.CompletedProcess([], 0, "", "")
 
     def rendered(self):
+        environment = {"PATH": str(self.cli.parent), "HOME": str(Path.home())}
         if self.render_plist:
             name = "factory-widgets.plist"
-            body = plistlib.dumps({"Label": "factory-widgets", "ProgramArguments": [
-                self.render_executable, "-P", "-m", "factory", "dispatch"]}).decode()
+            body = plistlib.dumps({
+                "Label": "factory-widgets",
+                "ProgramArguments": [self.render_executable, "-P", "-m", "factory", "dispatch"],
+                "EnvironmentVariables": environment,
+            }).decode()
         else:
             name = "factory-widgets.service"
-            body = f"[Service]\nExecStart={self.render_executable} -P -m factory dispatch\n"
+            body = (
+                "[Service]\n"
+                f'Environment="PATH={environment["PATH"]}" "HOME={environment["HOME"]}"\n'
+                f"ExecStart={self.render_executable} -P -m factory dispatch\n"
+            )
         return name, body
+
+    def run_isolated(self, argv, **kwargs):
+        environment = {}
+        index = 2
+        while index < len(argv) and "=" in argv[index]:
+            key, value = argv[index].split("=", 1)
+            environment[key] = value
+            index += 1
+        command = argv[index:]
+        if set(environment) != {"PATH", "HOME"}:
+            self.fail(f"invalid isolated environment: {argv}")
+        if command[:2] == ["/bin/sh", "-c"] and command[-1] == ".factory.toml":
+            metadata = Path(kwargs.get("cwd") or ".") / command[-1]
+            if not metadata.exists():
+                return subprocess.CompletedProcess(argv, 44, "", "")
+            try:
+                return subprocess.CompletedProcess(argv, 0, metadata.read_text(), "")
+            except OSError as exc:
+                return subprocess.CompletedProcess(argv, 1, "", str(exc))
+        if command[:2] == ["/bin/sh", "-c"] and command[-2] == "district-preflight":
+            resolved = shutil.which(command[-1], path=environment["PATH"])
+            return subprocess.CompletedProcess(
+                argv, 0 if resolved else 127, f"{resolved}\n" if resolved else "", "")
+        versions = {
+            "factory": "factory 0.4.7",
+            "gh": "gh version 2.65.0",
+            "git": "git version 2.47.0",
+            "uv": "uv 0.5.0",
+            "python3": "Python 3.12.0",
+        }
+        if len(command) == 2 and command[1] in ("--version", "-version"):
+            resolved = shutil.which(command[0], path=environment["PATH"])
+            version = versions.get(Path(command[0]).name)
+            if resolved and version:
+                return subprocess.CompletedProcess(argv, 0, version + "\n", "")
+            return subprocess.CompletedProcess(argv, 127, "", f"{command[0]}: not found")
+        self.fail(f"unexpected isolated command: {argv}")
 
     def run_cmd(self, argv, **kwargs):
         self.calls.append((list(argv), kwargs))
         out, code = "", 0
+        if argv[:2] == ["/usr/bin/env", "-i"]:
+            return self.run_isolated(argv, **kwargs)
         if argv[:4] == ["git", "remote", "get-url", "origin"]:
             out = REPO + "\n"
         elif argv[:2] == ["git", "ls-remote"]:
@@ -888,19 +940,27 @@ class OneInstallTest(unittest.TestCase):
 
                 def receipt(sha):
                     (remote_tool / "bin").mkdir(parents=True, exist_ok=True)
-                    (remote_tool / "bin/factory").touch()
+                    factory = remote_tool / "bin/factory"
+                    if not factory.exists():
+                        factory.touch(mode=0o755)
                     remote_cli.parent.mkdir(parents=True, exist_ok=True)
+                    for name in ("gh", "git", "uv", "python3"):
+                        executable = remote_cli.parent / name
+                        if not executable.exists():
+                            executable.touch(mode=0o755)
                     remote_cli.unlink(missing_ok=True)
-                    remote_cli.symlink_to(remote_tool / "bin/factory")
+                    remote_cli.symlink_to(factory)
                     (remote_tool / "uv-receipt.toml").write_text(
                         f'[tool]\nrequirements = [{{name="factory", rev="{sha}"}}]\n')
 
                 def transport(argv, **kwargs):
                     parts = shlex.split(argv[-1])
+                    command_cwd = None
                     if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                         parts = shlex.split(parts[-1])
                     if parts[:1] == ["cd"]:
-                        self.assertNotEqual(Path(parts[1]), self.checkout)
+                        command_cwd = Path(parts[1])
+                        self.assertNotEqual(command_cwd, self.checkout)
                         self.assertEqual(parts[2], "&&")
                         parts = parts[3:]
                     if parts[:1] == ["env"]:
@@ -910,6 +970,8 @@ class OneInstallTest(unittest.TestCase):
                     self.assertFalse(any(str(self.checkout) in part for part in parts),
                                      "remote commands must never consult the stale checkout")
                     commands.append(parts)
+                    if parts[:2] == ["/usr/bin/env", "-i"]:
+                        return self.run_cmd(parts, cwd=command_cwd, **kwargs)
                     if parts[:2] == ["python3", "-c"]:
                         return subprocess.run([sys.executable, *parts[1:]], env=remote_env,
                                               capture_output=True, text=True, check=False,
@@ -925,7 +987,11 @@ class OneInstallTest(unittest.TestCase):
                         return subprocess.CompletedProcess(parts, 0, "", "")
                     if parts[0] in (str(remote_cli), "factory"):
                         if parts[1:] in (["install", "--print"], ["install"]):
-                            body = f"[Service]\nExecStart={remote_tool}/bin/python -m factory dispatch\n"
+                            body = (
+                                "[Service]\n"
+                                f'Environment="PATH={remote_cli.parent}" "HOME={remote_home}"\n'
+                                f"ExecStart={remote_tool}/bin/python -m factory dispatch\n"
+                            )
                             if parts[1:] == ["install", "--print"]:
                                 return subprocess.CompletedProcess(parts, 0, "# factory-widgets.service\n" + body, "")
                             units = remote / "config/systemd/user"
@@ -1349,15 +1415,19 @@ class OneInstallTest(unittest.TestCase):
 
         def transport(argv, **kwargs):
             parts = shlex.split(argv[-1])
+            command_cwd = None
             if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                 parts = shlex.split(parts[-1])
             if parts[0] == "cd":
+                command_cwd = Path(parts[1])
                 parts = parts[3:]
             if parts[0] == "env" and parts[:3] != ["env", "LC_ALL=C", "ps"]:
                 parts = parts[1:]
                 while "=" in parts[0]:
                     parts = parts[1:]
             commands.append(parts)
+            if parts[:2] == ["/usr/bin/env", "-i"]:
+                return self.run_cmd(parts, cwd=command_cwd, **kwargs)
             if parts[:2] == ["python3", "-c"]:
                 sync = "os.replace" in parts[2] and parts[-1].endswith("config.toml")
                 if synced and synced[-1].get("target") == TARGET and parts[-1].endswith("uv-receipt.toml"):

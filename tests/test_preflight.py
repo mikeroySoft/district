@@ -8,11 +8,28 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-from district import host
+from district import doctor, host
 from tests.test_district import DistrictCase
 
 
 class SchedulerPreflightTest(DistrictCase):
+    def test_local_doctor_renders_the_same_normalized_path_as_onboarding(self) -> None:
+        repo = self.repo(toml="")
+        data = {"repo": {"acme/widgets": {"path": str(repo)}}}
+        self.stub("gh", ("--version", "gh real-install\n"))
+        wrapper = Path.home() / ".local/bin"
+        wrapper.mkdir(parents=True)
+        (wrapper / "gh").write_text("#!/bin/sh\necho wrapper-version\n")
+        (wrapper / "gh").chmod(0o755)
+        tools = Path.home() / ".cargo/bin"
+        tools.mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"PATH": f"{wrapper}:{os.environ['PATH']}:{tools}"}):
+            rows = doctor.toolchain_rows(data)
+        gh = next(item for item in rows if item["label"].endswith("scheduler tool gh"))
+        self.assertEqual(gh["status"], "PASS", gh)
+        self.assertIn(str(self.bin / "gh"), gh["detail"])
+        self.assertIn("gh real-install", gh["detail"])
+
     def test_local_add_checks_local_host_when_triage_is_remote(self) -> None:
         repo = self.repo(toml="")
         host.save({

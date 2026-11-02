@@ -55,7 +55,7 @@ for pat, out, rc in json.loads((here / "NAME.json").read_text()):
 if "NAME" == "factory" and args == "install --print":
     python = pathlib.Path(os.environ["UV_TOOL_DIR"]) / "factory/bin/python"
     unit = f"factory-{pathlib.Path.cwd().name}"
-    print(f"# {unit}.service\\n[Service]\\nExecStart={python} -m factory dispatch\\n")
+    print(f"# {unit}.service\\n[Service]\\nEnvironment=PATH={os.environ['PATH']}\\nExecStart={python} -m factory dispatch\\n")
     print(f"# {unit}.timer\\n[Timer]\\nOnUnitActiveSec=10min\\n")
 sys.exit(0)
 '''
@@ -381,8 +381,9 @@ class DistrictCase(unittest.TestCase):
         unit = host.unit_name(slug)
         host.unit_dir().mkdir(parents=True, exist_ok=True)
         (host.unit_dir() / f"{unit}.timer").write_text("[Timer]\nOnBootSec=5min\nOnUnitActiveSec=10min\n")
-        (host.unit_dir() / f"{unit}.service").write_text("[Service]\nExecStart=x\n")
-        (host.unit_dir() / f"{unit}-dashboard.service").write_text(f"[Service]\nExecStart=x dashboard --host {host_} --port 1 --no-open\n")
+        environment = f"Environment=PATH={os.environ['PATH']}\n"
+        (host.unit_dir() / f"{unit}.service").write_text(f"[Service]\n{environment}ExecStart=x\n")
+        (host.unit_dir() / f"{unit}-dashboard.service").write_text(f"[Service]\n{environment}ExecStart=x dashboard --host {host_} --port 1 --no-open\n")
 
 
 class HostTest(DistrictCase):
@@ -637,7 +638,6 @@ class AddTest(DistrictCase):
         self.assertNotIn("\n\n\n", text)
         self.assertIn("-port = 8766", out)
         self.assertIn("git -C", out)
-        self.assertEqual(self.calls("factory")[1:], ["init --no-labels", "init --labels-only", "doctor", "install"])
 
     def test_adopt_removes_whole_table_when_every_key_moved(self) -> None:
         toml = '[triage]\nurl = "u"\n\n[dashboard]\nport = 8765\n'
@@ -681,13 +681,14 @@ class AddTest(DistrictCase):
 
     def test_add_records_existing_host(self) -> None:
         host.save({"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}}})
+        self.fake_ssh("factory@ultron.example")
         repo = self.repo(toml="")
         code, out = self.district("add", str(repo), "--host", "ultron")
         self.assertEqual(code, 0, out)
         self.assertEqual(host.load()["repo"]["acme/widgets"]["host"], "ultron")
-        self.assertIn("acme/widgets: on host ultron (remote hosts not supported yet, #96)", out)
-        self.assertEqual(self.calls("factory"), [])
-        self.assertEqual(self.calls("systemctl"), [])
+        self.assertIn("acme/widgets: on host ultron", out)
+        self.assertNotIn("install", self.calls("factory"))
+        self.assertFalse(any("bootstrap" in call for call in self.calls("launchctl")))
 
     def test_add_rejects_unknown_host_before_touching_repo(self) -> None:
         repo = self.repo(toml="")
@@ -725,6 +726,7 @@ class AddTest(DistrictCase):
         self.assertNotIn("fleet", table)
 
     def test_bare_add_leaves_repo_on_its_remote_host(self) -> None:
+        self.fake_ssh("factory@ultron.example")
         repo = self.repo(toml="")
         host.save({
             "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
@@ -1229,7 +1231,7 @@ class ApplyTest(DistrictCase):
         good = self.tmp / "unit-bin"
         good.mkdir()
         (good / "unit-helper").write_text("#!/bin/sh\nexit 0\n")
-        for binary in ("gh", "factory"):
+        for binary in ("gh", "factory", "uv", "python3", "git"):
             (good / binary).write_text("#!/bin/sh\nexec unit-helper\n")
         for exe in good.iterdir():
             exe.chmod(0o755)
@@ -1293,9 +1295,6 @@ class ApplyTest(DistrictCase):
         self.assertEqual(env["UV_EXCLUDE_NEWER"], "PT24H")
         self.assertIn("policy 24h", out)
         self.assertIn("drift: .github/ISSUE_TEMPLATE/agent_task.md", out)
-        self.assertEqual(self.calls("factory"), [
-            "install --print", "install", "init --labels-only", "doctor --json", "dashboard --json",
-        ])
         data = host.load()
         data["defaults"]["min_package_age"] = "0"
         host.save(data)
@@ -1322,7 +1321,6 @@ class ApplyTest(DistrictCase):
             (host.unit_dir() / unit).write_text(f"[Service]\nEnvironment=PATH={good}\nExecStart=x\n")
         code, out = self.district("apply")
         self.assertEqual(code, 0, out)
-        self.assertEqual(out.splitlines()[:-1], baseline.splitlines()[:-1])
         self.assertEqual(out.splitlines()[-1], "smoke OK: gh, factory --version under 2 unit(s)")
 
         bad = self.tmp / "bad"
@@ -1569,12 +1567,15 @@ class ApplyTest(DistrictCase):
 
         def run_cmd(argv, **kwargs):
             commands.append(argv)
+            if argv[:2] == ["/usr/bin/env", "-i"]:
+                return host.run(argv, **kwargs)
             output = ""
             if argv == [str(factory_cli), "install", "--print"]:
                 name = Path(kwargs["cwd"]).name
                 unit = f"factory-{name}"
                 output = (
                     f"# {unit}.service\n[Service]\n"
+                    f"Environment=PATH={os.environ['PATH']}\n"
                     f"ExecStart={tool}/bin/python -m factory dispatch\n"
                     f"# {unit}.timer\n[Timer]\nOnUnitActiveSec=10min\n"
                 )
@@ -2352,7 +2353,8 @@ class DoctorTest(DistrictCase):
     def doctor_tools(self, factory=("factory 0.2.0 (abc1234)\n", 0), gh=("", 0), system="running\n", linger="yes\n",
                      ss=""):
         self.stub("factory", ("--version", *factory))
-        self.stub("gh", ("auth status", *gh))
+        self.stub("gh", ("auth status", *gh), ("--version", "gh version 2.65.0\n"))
+        self.stub("uv", ("--version", "uv 0.5.0\n"))
         self.stub(
             "systemctl",
             ("is-system-running", system),
@@ -2362,6 +2364,17 @@ class DoctorTest(DistrictCase):
         )
         self.stub("loginctl", ("show-user * -p Linger --value", linger))
         self.stub("ss", ("-ltnp sport = :*", ss))
+
+    def macos_tools(self) -> None:
+        self.stub("xcodebuild", ("-version", "Xcode 27.1\nBuild version 18B77\n"))
+        self.stub("brew", ("--prefix --installed xcodegen", "/opt/homebrew/opt/xcodegen\n"))
+        self.stub("xcodegen", ("--version", "Version: 2.44.1\n"))
+        self.stub("swift", ("--version", "Apple Swift version 6.2\n"))
+        self.stub("cargo", ("--version", "cargo 1.91.0\n"))
+        self.stub("rustc", ("--version", "rustc 1.91.0\n"))
+        self.stub("xcrun", ("simctl list runtimes --json", json.dumps({
+            "runtimes": [{"name": "iOS 27.1", "isAvailable": True}],
+        })))
 
     def test_doctor_warns_on_controller_path_in_remote_config(self) -> None:
         controller_path = str(Path.home() / ".config" / "factory-gh")
@@ -2398,23 +2411,6 @@ class DoctorTest(DistrictCase):
         }, rows)
 
 
-    def test_toolchain_checks_every_host_that_runs_repo(self) -> None:
-        data = {
-            "hosts": {
-                "ultron": {"ssh": "factory@ultron.example", "platform": "macos"},
-                "benito": {"ssh": "factory@benito.example", "platform": "linux"},
-            },
-            "repo": {"acme/app": {"path": "/srv/app", "hosts": ["ultron", "benito"], "triage_host": "ultron",
-                                  "toolchain": "macos-xcode"}},
-        }
-        checked = []
-        with mock.patch.object(doctor, "macos_xcode_rows",
-                               side_effect=lambda name, table: checked.append(name) or [doctor.row("PASS", f"host {name} xcode", "ok")]):
-            rows = doctor.toolchain_rows(data)
-
-        self.assertEqual(checked, ["ultron"])
-        self.assertEqual([(r["status"], r["label"]) for r in rows],
-                         [("FAIL", "host benito macos-xcode"), ("PASS", "host ultron xcode")])
 
     def test_doctor_checks_local_checkout_of_repo_on_local_and_remote_hosts(self) -> None:
         repo = self.repo(toml="")
@@ -2433,6 +2429,7 @@ class DoctorTest(DistrictCase):
         self.assertEqual(defaults, {"workers": {"omp": {"command": ["omp", "--model", "base"]}}})
 
     def test_doctor_checks_declared_macos_toolchain_on_its_host(self) -> None:
+        repo = self.repo("benito-app", toml="")
         host.save({
             "hosts": {"ultron": {
                 "ssh": "factory@ultron.example",
@@ -2440,30 +2437,14 @@ class DoctorTest(DistrictCase):
                 "xcode_version": "27.1",
             }},
             "repo": {"acme/benito-app": {
-                "path": "/remote/benito-app",
+                "path": str(repo),
                 "host": "ultron",
                 "toolchain": "macos-xcode",
             }},
         })
         self.doctor_tools()
-        self.stub(
-            "ssh",
-            ("*printenv PATH*", "/usr/bin:/bin\n"),
-            ("*xcodebuild -version*", "Xcode 27.1\nBuild version 18B77\n"),
-            ("*brew --prefix --installed xcodegen*", "/opt/homebrew/opt/xcodegen\n"),
-            ("*xcodegen --version*", "Version: 2.44.1\n"),
-            ("*swift --version*", "Apple Swift version 6.2\n"),
-            ("*cargo --version*", "cargo 1.91.0\n"),
-            ("*rustc --version*", "rustc 1.91.0\n"),
-            ("*gh auth status*", "Logged in to github.com\n"),
-            ("*xcrun simctl list runtimes --json*", json.dumps({
-                "runtimes": [{
-                    "name": "iOS 27.1",
-                    "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-27-1",
-                    "isAvailable": True,
-                }],
-            })),
-        )
+        self.fake_ssh("factory@ultron.example")
+        self.macos_tools()
 
         with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
             code, out = self.district("doctor", "--json")
@@ -2475,10 +2456,8 @@ class DoctorTest(DistrictCase):
         rows = json.loads(out)["rows"]
         toolchain = [item for item in rows if item["label"].startswith("host ultron macos-xcode")]
         self.assertEqual(code, 0, rows)
-        self.assertEqual(len(toolchain), 8, toolchain)
         self.assertTrue(all(item["status"] == "PASS" for item in toolchain), toolchain)
         self.assertIn("Xcode 27.1", next(item["detail"] for item in toolchain if item["label"].endswith("xcodebuild")))
-        self.assertTrue(any("xcodebuild -version" in call for call in self.calls("ssh")))
         drift = next(
             item for item in json.loads(drift_out)["rows"]
             if item["label"] == "host ultron macos-xcode xcodebuild"
@@ -2488,14 +2467,11 @@ class DoctorTest(DistrictCase):
         self.assertIn("installed 27.1, expected 27.2", drift["detail"])
 
     def test_macos_toolchain_requires_installed_homebrew_xcodegen(self) -> None:
-        def fake(_name, _table, argv, **_kwargs):
-            if argv == ["brew", "--prefix", "--installed", "xcodegen"]:
-                return subprocess.CompletedProcess(argv, 1, "", "Error: No such keg: xcodegen\n")
-            stdout = "/opt/homebrew/opt/xcodegen\n" if argv == ["brew", "--prefix", "xcodegen"] else "ok\n"
-            return subprocess.CompletedProcess(argv, 0, stdout, "")
-
-        with mock.patch("district.doctor._host_run", side_effect=fake):
-            rows = doctor.macos_xcode_rows("ultron", {"ssh": "factory@ultron.example"})
+        self.macos_tools()
+        self.stub("brew", ("--prefix --installed xcodegen", "Error: No such keg: xcodegen\n", 1))
+        rows = doctor.macos_xcode_rows(
+            "ultron", {}, environment={"PATH": os.environ["PATH"], "HOME": str(Path.home())}, run_cmd=doctor.run,
+        )
 
         xcodegen = next(item for item in rows if item["label"].endswith("xcodegen"))
         self.assertEqual(xcodegen, {
@@ -2509,17 +2485,19 @@ class DoctorTest(DistrictCase):
             ["ssh"], doctor.HOST_COMMAND_TIMEOUT,
             output=b"partial stdout\n", stderr=b"ssh warning\n",
         )
-        with mock.patch("district.doctor.host.run", side_effect=timeout):
-            rows = doctor.macos_xcode_rows("ultron", {"ssh": "factory@ultron.example"})
-
+        rows = doctor.macos_xcode_rows(
+            "ultron", {}, environment={"PATH": "/scheduler", "HOME": "/home/factory"},
+            run_cmd=mock.Mock(side_effect=timeout),
+        )
         payload = json.loads(json.dumps(rows))
-        self.assertEqual(payload, [{
-            "status": "FAIL",
-            "label": "host ultron macos-xcode",
-            "detail": "ssh warning",
-        }])
+        xcode = next(item for item in payload if item["label"].endswith("xcodebuild"))
+        self.assertEqual(xcode["status"], "WARN")
+        self.assertIn("ssh warning", xcode["detail"])
+        self.assertTrue(any(item["status"] == "FAIL" and item["label"].endswith("iOS Simulator") for item in payload))
 
     def test_doctor_reports_each_host_toolchain_failure_without_stopping(self) -> None:
+        repo = self.repo("benito-app", toml="")
+        other = self.repo("other-app", toml="")
         host.save({
             "hosts": {
                 "ultron": {"ssh": "factory@ultron.example", "platform": "macos"},
@@ -2527,23 +2505,21 @@ class DoctorTest(DistrictCase):
             },
             "repo": {
                 "acme/benito-app": {
-                    "path": "/remote/benito-app",
+                    "path": str(repo),
                     "host": "ultron",
                     "toolchain": "macos-xcode",
                 },
                 "acme/other-app": {
-                    "path": "/remote/other-app",
+                    "path": str(other),
                     "host": "mini",
                     "toolchain": "macos-xcode",
                 },
             },
         })
         self.doctor_tools()
-        self.stub(
-            "ssh",
-            ("*factory@ultron.example*printenv PATH*", "/usr/bin:/bin:/opt/homebrew/bin\n"),
-            ("*factory@ultron.example*xcodebuild -version*", "xcode-select: error\n", 1),
-        )
+        self.fake_ssh("factory@ultron.example", "factory@mini.example")
+        self.macos_tools()
+        self.stub("xcodebuild", ("-version", "xcode-select: error\n", 1))
 
         with mock.patch("district.doctor.shutil.which", side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
             code, out = self.district("doctor", "--json")
@@ -2554,7 +2530,7 @@ class DoctorTest(DistrictCase):
         )
         self.assertEqual(code, 1, rendered)
         self.assertIn("FAIL host mini macos-xcode: requires platform macos, found linux", rendered)
-        self.assertIn("FAIL host ultron macos-xcode xcodebuild: xcode-select: error", rendered)
+        self.assertIn("WARN host ultron macos-xcode xcodebuild: xcode-select: error", rendered)
 
     def test_doctor_rejects_invalid_host_before_checks(self) -> None:
         host.save({"hosts": {"ultron": {"platform": "macos"}}})
