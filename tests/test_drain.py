@@ -176,29 +176,36 @@ class DrainTest(unittest.TestCase):
             self.assertTrue(case.installs())
             self.assert_no_timer_changes(case)
 
-    def test_handland_units_count_busy_during_drain(self):
+    def test_handland_units_do_not_count_busy_during_drain(self):
         with self.case() as case:
-            polls = [0]
-
-            def handland(*args, **kwargs):
-                self.assertTrue(drain.path().exists())
-                polls[0] += 1
-                if polls[0] <= 2:
-                    self.assertFalse(case.installs())
-                    return ["handland-137.service"]
-                return []
-
-            with mock.patch.object(apply, "_busy_handland", side_effect=handland):
-                self.assertEqual(self.run_apply(case), 0)
-            self.assertGreaterEqual(polls[0], 4)
+            handland = "handland-137.service"
+            case.active.add(handland)
+            self.assertEqual(self.run_apply(case), 0)
             self.assertTrue(case.installs())
+            self.assertNotIn(("state", handland), case.events)
             self.assert_no_timer_changes(case)
 
-    def test_hand_run_work_is_waited_out(self):
+    def test_drain_waits_for_discovered_active_service(self):
         with self.case() as case:
-            states = iter(((["pid 123 factory gate"], ["pid 123 factory gate"]), ([], []), ([], [])))
-            with mock.patch.object(apply, "_process_work", side_effect=lambda *a, **k: next(states, ([], []))):
-                self.assertEqual(self.run_apply(case), 0)
+            worker = "factory-unregistered-worker.service"
+            case.backend.factory_units.return_value = {worker}
+            states = iter(("active", "inactive", "inactive"))
+            observed = []
+            original = case.is_active
+
+            def state(name, **kwargs):
+                if name == worker:
+                    value = next(states, "inactive")
+                    observed.append(value)
+                    if value == "active":
+                        self.assertTrue(drain.path().exists())
+                        self.assertFalse(case.installs())
+                    return value
+                return original(name, **kwargs)
+
+            case.backend.is_active.side_effect = state
+            self.assertEqual(self.run_apply(case), 0)
+            self.assertEqual(observed[:3], ["active", "inactive", "inactive"])
             self.assertTrue(case.installs())
             self.assertGreaterEqual(case.sleep.call_count, 2)
 
@@ -269,7 +276,6 @@ class DrainTest(unittest.TestCase):
                     self.assertEqual(self.run_apply(case), 0)
                 self.assertNotIn("drain", self.record())
                 self.assertNotIn("drains", self.record())
-                case.sleep.assert_not_called()
                 apply.postcheck.check.assert_not_called()
                 self.assertFalse(case.installs())
                 self.assertFalse(drain.path().exists())

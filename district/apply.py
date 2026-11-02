@@ -20,7 +20,6 @@ import sys
 import tomllib
 import time
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -312,304 +311,6 @@ def _resolved_paths(paths: list[Path], runner, *, timeout: float = SMOKE_TIMEOUT
         raise OSError(f"cannot resolve Factory paths: {exc}") from exc
 
 
-def _linux_identities(runner, *, deadline: float, pids: list[str] | None = None) -> dict:
-    """Bracket argv/ownership observations with Linux process generations."""
-    script = """
-import json,pathlib,sys
-root = pathlib.Path('/proc/')
-rows = {}
-for pid in sys.argv[1:] or [p.name for p in root.iterdir() if p.name.isdigit()]:
-    try:
-        stat = (root / pid / 'stat').read_text().rsplit(')', 1)[1].split()
-        value = (root / pid / 'cgroup').read_text() if sys.argv[1:] else stat[1]
-        after = (root / pid / 'stat').read_text().rsplit(')', 1)[1].split()
-        if stat[19] == after[19]:
-            rows[pid] = [stat[19], value]
-    except (OSError, IndexError):
-        pass
-print(json.dumps(rows))
-"""
-    proc = runner(["python3", "-c", script, *(pids or [])], timeout=remaining_timeout(deadline))
-    if proc.returncode:
-        raise OSError(proc.stderr.strip() or "cannot inspect Factory process identity")
-    return json.loads(proc.stdout)
-
-
-def _linux_processes(runner, *, deadline: float) -> dict:
-    """Read exact argv and its generation on the owning host; ps is fallback text only."""
-    proc = runner(["ps", "-ww", "-eo", "pid=,args="], timeout=remaining_timeout(deadline))
-    if proc.returncode:
-        raise OSError(proc.stderr.strip() or "cannot list Factory processes")
-    commands = {}
-    for line in proc.stdout.splitlines():
-        fields = line.split(maxsplit=1)
-        if fields and fields[0].isdigit():
-            commands[fields[0]] = fields[1] if len(fields) == 2 else ""
-        elif fields:
-            raise ValueError("invalid Linux ps process row")
-    script = r"""
-import json,os,pathlib,sys
-root = pathlib.Path('/proc/')
-commands = json.loads(sys.argv[1])
-rows = {}
-for pid in {p.name for p in root.iterdir() if p.name.isdigit()} | commands.keys():
-    directory = root / pid
-    try:
-        stat = (directory / 'stat').read_text().rsplit(')', 1)[1].split()
-        try:
-            raw = (directory / 'cmdline').read_bytes()
-            argv = [os.fsdecode(word) for word in raw[:-1].split(b'\0')] if raw.endswith(b'\0') else None
-        except OSError:
-            argv = None
-        try:
-            cwd = os.readlink(directory / 'cwd')
-        except OSError:
-            cwd = None
-        after = (directory / 'stat').read_text().rsplit(')', 1)[1].split()
-        if (stat[19], stat[1]) != (after[19], after[1]):
-            raise RuntimeError(f"pid {pid} process identity changed")
-        rows[pid] = [stat[19], stat[1], argv, commands.get(pid, ''), cwd]
-    except FileNotFoundError:
-        continue
-    except (OSError, IndexError):
-        raise RuntimeError(f"pid {pid} process identity unavailable")
-observer = str(os.getpid())
-seen = set()
-while observer in rows:
-    if observer in seen:
-        raise RuntimeError("observer ancestry cycle")
-    seen.add(observer)
-    observer = rows[observer][1]
-if seen and observer not in ('0', '1'):
-    raise RuntimeError("observer ancestry unavailable")
-for pid in seen:
-    del rows[pid]
-print(json.dumps(rows))
-"""
-    proc = runner(["python3", "-c", script, json.dumps(commands)], timeout=remaining_timeout(deadline))
-    if proc.returncode:
-        raise OSError(proc.stderr.strip() or "cannot inspect Factory process argv")
-    rows = json.loads(proc.stdout)
-    if not isinstance(rows, dict):
-        raise ValueError("invalid Linux process observations")
-    for pid, row in rows.items():
-        if (not pid.isdigit() or not isinstance(row, list) or len(row) != 5
-                or not all(isinstance(value, str) for value in (row[0], row[1], row[3]))
-                or not row[0].isdigit() or not row[1].isdigit()
-                or row[4] is not None and (not isinstance(row[4], str) or not row[4].startswith("/"))
-                or row[2] is not None and (not isinstance(row[2], list)
-                                          or not all(isinstance(word, str) for word in row[2]))):
-            raise ValueError("invalid Linux process observation")
-    return rows
-
-
-def _ps_identities(output: str) -> tuple[dict, list[tuple[str, str]]]:
-    """Parse C-locale macOS ps rows; an unknown layout must never hide work."""
-    identities, commands = {}, []
-    for line in output.splitlines():
-        fields = line.split(maxsplit=7)
-        if not fields:
-            continue
-        if (len(fields) < 7 or not fields[0].isdigit() or not fields[1].isdigit()
-                or not re.fullmatch(
-                    r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
-                    r"(0?[1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}",
-                    " ".join(fields[2:7]))):
-            raise ValueError(f"invalid C-locale ps row for pid {fields[0]}")
-        identities[fields[0]] = [" ".join(fields[2:7]), fields[1]]
-        if len(fields) == 8:
-            commands.append((fields[0], fields[7]))
-    return identities, commands
-
-
-@dataclass
-class _ProcessObservation:
-    pid: str
-    argv: list[str] | None
-    text: str
-    cwd: str | None
-    owner: str | None = None
-
-
-def _factory_work(process: _ProcessObservation, tools: set[str], launchers: set[str],
-                  roots: set[str], dashboards: set[str]) -> str | None:
-    """Fail closed on lexical evidence, without interpreting launch grammars."""
-    if process.owner in dashboards:
-        return None
-    words = process.argv or process.text.split()
-    relative = False
-    for index, token in enumerate(words):
-        name = token[2:] if token.startswith("-m") else token
-        paths = ([token] if index == 0 or not token.startswith("-") else
-                 [token.split("=", 1)[1]] if token.startswith("--") and "=" in token else [])
-        for value in paths:
-            if not value or value in ("-", "--"):
-                continue
-            if not os.path.isabs(value):
-                relative |= "/" in value
-                if process.cwd is None:
-                    continue
-                value = os.path.join(process.cwd, value)
-            path = os.path.normpath(value)
-            if path in launchers or any(path == root or path.startswith(root + "/") for root in tools):
-                return f"factory path {path}"
-        if "factory" in name.split("/") or name == "factory" or name.startswith("factory."):
-            return f"factory name {token}"
-    if not process.argv and any(path in process.text for path in tools | launchers):
-        return "factory path in fallback text"
-    if process.cwd is not None:
-        cwd = os.path.normpath(process.cwd)
-        for root in sorted(roots | tools):
-            if cwd == root or cwd.startswith(root + "/"):
-                return f"cwd in {root}"
-    elif process.argv and relative:
-        return "cwd unavailable for relative argv"
-    return None
-
-
-_MACOS_PROCESSES = 'echo "$$"; exec env LC_ALL=C ps -ww -eo pid=,ppid=,lstart=,args='
-
-
-def _factory_processes(run_cmd, *, platform: str, deadline: float) -> tuple[list[_ProcessObservation], dict]:
-    if platform == "linux":
-        rows = _linux_processes(run_cmd, deadline=deadline)
-        return ([_ProcessObservation(pid, row[2], row[3], row[4]) for pid, row in rows.items()],
-                {pid: row[:2] for pid, row in rows.items()})
-    if platform != "macos":
-        raise ValueError(f"unsupported process observation platform: {platform}")
-    # exec preserves the shell PID, so the listing and its observer share an identity.
-    proc = run_cmd(["sh", "-c", _MACOS_PROCESSES],
-                   timeout=remaining_timeout(deadline))
-    if proc.returncode:
-        raise OSError(proc.stderr.strip() or "cannot inspect Factory processes")
-    observer, output = proc.stdout.split("\n", 1)
-    if not observer.isdigit():
-        raise ValueError("invalid macOS observer pid")
-    identities, commands = _ps_identities(output)
-    ancestors = set()
-    while observer in identities:
-        if observer in ancestors:
-            raise ValueError("observer ancestry cycle")
-        ancestors.add(observer)
-        observer = identities[observer][1]
-    if ancestors and observer not in ("0", "1"):
-        raise ValueError("observer ancestry unavailable")
-    return ([_ProcessObservation(pid, None, text, None) for pid, text in commands if pid not in ancestors],
-            identities)
-
-
-def _managed_processes(processes: list[str], identities: dict, runner, backend, repos: dict,
-                       *, deadline: float) -> dict[str, str]:
-    """Map only unchanged PID/start-time identities to owning-host units."""
-    units = set(backend.factory_units(timeout=remaining_timeout(deadline)))
-    units.update(f"{host.unit_name(slug)}{suffix}.service" for slug in repos for suffix in ("", "-dashboard"))
-    services = sorted(unit for unit in units if unit.endswith(".service"))
-    config = backend.configuration()
-
-    def probe(argv):
-        proc = runner(argv, timeout=remaining_timeout(deadline))
-        if proc.returncode:
-            raise OSError(proc.stderr.strip() or f"{argv[0]} ownership probe failed")
-        return proc.stdout
-
-    pids = [work.split()[1] for work in processes]
-
-    def unchanged(pid, current):
-        if pid not in identities or pid not in current or identities[pid] != current[pid]:
-            raise OSError(f"pid {pid} process identity changed or disappeared")
-
-    if config.get("platform") == "linux":
-        output = probe([str(config.get("executable", "systemctl")), "--user", "show",
-                        "-p", "Id", "-p", "ControlGroup", *services])
-        groups = {}
-        for block in output.strip().split("\n\n"):
-            values = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
-            if values.get("Id") in services and values.get("ControlGroup", "").startswith("/"):
-                groups[values["ControlGroup"]] = values["Id"]
-        if not groups:
-            return {}
-        current = _linux_identities(runner, deadline=deadline, pids=pids)
-        owners = {}
-        for pid in pids:
-            if pid not in identities or pid not in current or identities[pid][0] != current[pid][0]:
-                raise OSError(f"pid {pid} process identity changed or disappeared")
-            paths = [line.split(":", 2)[2] for line in current[pid][1].splitlines()]
-            for group, unit in groups.items():
-                if any(path == group or path.startswith(group + "/") for path in paths):
-                    owners[pid] = unit
-        return owners
-    if config.get("platform") == "macos":
-        labels = {unit.removesuffix(".service"): unit for unit in services}
-        owners = {}
-        for line in probe([str(config.get("executable", "launchctl")), "list"]).splitlines():
-            fields = line.split()
-            if len(fields) == 3 and fields[0].isdigit() and fields[2] in labels:
-                owners[fields[0]] = labels[fields[2]]
-        current, _ = _ps_identities(probe(["env", "LC_ALL=C", "ps", "-eo", "pid=,ppid=,lstart="]))
-        anchors = dict(owners)
-        for pid in pids:
-            ancestor, seen = pid, set()
-            while ancestor not in seen:
-                seen.add(ancestor)
-                unchanged(ancestor, current)
-                if ancestor in anchors:
-                    owners[pid] = anchors[ancestor]
-                    break
-                parent = identities[ancestor][1]
-                if parent in ("0", "1"):
-                    break
-                ancestor = parent
-        return owners
-    raise OSError(f"unsupported ownership platform: {config.get('platform')}")
-
-
-def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> tuple[list[str], list[str]]:
-    try:
-        real_tool, real_cli = _resolved_paths([tool, cli], runner, timeout=remaining_timeout(deadline))
-        tools = {os.path.normpath(str(path)) for path in (tool, real_tool)}
-        launchers = {str(cli), str(real_cli)}
-        data_home = (runner.facts(timeout=remaining_timeout(deadline))["data_home"]
-                     if isinstance(runner, host.RemoteRunner) else
-                     os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share"))
-        roots = {os.path.normpath(str(Path(data_home) / "district/roots")),
-                 *(os.path.normpath(str(repo["path"])) for repo in repos.values() if repo.get("path"))}
-        mains, dashboards = _engine_roles(repos)
-        observations, identities = _factory_processes(
-            runner, platform=backend.configuration().get("platform"), deadline=deadline)
-        candidates = [(process, reason) for process in observations
-                      if (reason := _factory_work(process, tools, launchers, roots, dashboards))]
-        processes = [f"pid {process.pid} {reason}" for process, reason in candidates]
-    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
-            host.RemoteHostError) as exc:
-        unknown = [f"Factory process observation unavailable: {exc}"]
-        return unknown, unknown
-    if not processes:
-        return [], []
-    try:
-        owners = _managed_processes(processes, identities, runner, backend, repos, deadline=deadline)
-        remaining_timeout(deadline)
-    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
-            host.RemoteHostError) as exc:
-        return [f"Factory process ownership unavailable: {exc}", *processes], processes
-    processes = []
-    outside = []
-    for process, reason in candidates:
-        process.owner = owners.get(process.pid)
-        if _factory_work(process, tools, launchers, roots, dashboards) is None:
-            continue
-        work = f"pid {process.pid} {reason}"
-        processes.append(work)
-        if process.owner not in mains:
-            outside.append(work)
-    return outside, processes
-
-
-def _hand_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> list[str]:
-    busy = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
-    outside, _ = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
-    return busy + outside
-
-
 def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
     paused = (host.engine(data, name) or {}).get("paused_timers", [])
     if not paused:
@@ -691,11 +392,7 @@ def _start_drain(record, name: str, runner) -> None:
 
 def _engine_busy(runner, backend, repos, *, deadline: float) -> list[str]:
     services, _ = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
-    busy = busy_units(services, backend, timeout=remaining_timeout(deadline))
-    busy += _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
-    tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
-    outside, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
-    return list(dict.fromkeys(busy + outside + processes))
+    return busy_units(services, backend, timeout=remaining_timeout(deadline))
 
 
 def _wait_drained(record, name: str, runner, backend, repos, *, deadline: float) -> None:
@@ -748,10 +445,9 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
             if busy:
                 _defer(record, target, busy)
             else:
-                services, timers = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
+                _, timers = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
                 active = [timer for timer in timers
                           if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
-                tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
                 if record:
                     record.observe(data)
                 for timer in active:
@@ -764,17 +460,7 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
                         record.disabled.add(timer)
                     backend.pause_timer(timer, timeout=remaining)
                 while True:
-                    hand_work = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
-                    if hand_work:
-                        _defer(record, target, hand_work)
-                        break
-                    busy = [unit for unit in services if backend.is_active(
-                        unit, timeout=remaining_timeout(deadline)) in ("active", "activating", "deactivating")]
-                    hand_work, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
-                    busy += processes
-                    if hand_work:
-                        _defer(record, target, hand_work)
-                        break
+                    busy = _engine_busy(runner, backend, repos, deadline=deadline)
                     if not busy:
                         ready = True
                         break
@@ -822,9 +508,9 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
         print(f"engine failed {previous or 'unknown'} -> {sha}: {exc}")
         if previous:
             try:
-                busy = _hand_work(tool, cli, runner, backend, repos, deadline=deadline)
+                busy = _engine_busy(runner, backend, repos, deadline=deadline)
                 if busy:
-                    raise OSError(f"outside work blocks rollback: {', '.join(busy)}")
+                    raise OSError(f"factory services block rollback: {', '.join(busy)}")
             except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as rollback:
                 reason = ("original idle deadline expired" if isinstance(rollback, subprocess.TimeoutExpired)
                           else str(rollback))
@@ -1021,7 +707,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
     opened = set()
     deadlines = {}
 
-    def hand_ready(name):
+    def idle_ready(name):
         runner, backend, repos = contexts[name]
         try:
             if record is not None and name in record.drains:
@@ -1050,7 +736,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                     record.drain_requested or name in record.drains or _auto_drain(record, target)):
                 _start_drain(record, name, runner)
                 deadlines[name] = record.drain_deadlines[name][0]
-            elif not hand_ready(name):
+            elif not idle_ready(name):
                 print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
                 return "deferred"
         except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
@@ -1074,7 +760,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         # A later host's drain can outlive an earlier host's readiness probe.
         for name in deadlines:
             try:
-                if not hand_ready(name):
+                if not idle_ready(name):
                     print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
                     return "deferred"
             except (OSError, host.RemoteHostError, DistrictError) as exc:
@@ -1083,7 +769,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         for name, (runner, backend, repos) in contexts.items():
             attempted.append(name)
             try:
-                if name in opened and not hand_ready(name):
+                if name in opened and not idle_ready(name):
                     result = "deferred"
                 else:
                     result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
@@ -1108,8 +794,8 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                         if deadlines[back] is None:
                             raise OSError("rollback idle wait timed out")
                         opened.add(back)
-                    if not hand_ready(back):
-                        raise OSError("hand work or expired idle deadline blocks rollback")
+                    if not idle_ready(back):
+                        raise OSError("factory services or expired idle deadline block rollback")
                     restored = bool(previous[back]) and _replace_engine(
                         data, back, back_cmd, origin, "previous", previous[back], pin[1], tool, cli,
                         backend=back_backend, repos=back_repos, deadline=deadlines[back],
@@ -1279,20 +965,6 @@ def busy_units(services: list[str], backend=None, *, timeout: float | None = Non
     kwargs = {"timeout": timeout} if timeout is not None else {}
     return [service for service in services
             if backend.is_active(service, **kwargs) in ("active", "activating", "deactivating")]
-
-
-def _busy_handland(backend, run_cmd, *, timeout: float) -> list[str]:
-    config = backend.configuration()
-    if config.get("platform") == "linux":
-        units = run_cmd([
-            str(config.get("executable", "systemctl")), "--user", "list-units", "--no-legend", "--plain",
-            "--state=active,activating,deactivating", "handland-*",
-        ], timeout=timeout)
-        if units.returncode:
-            raise OSError(units.stderr.strip() or "cannot inspect handland user units")
-        return [line.split()[0] for line in units.stdout.splitlines() if line.strip()]
-    return []
-
 
 
 

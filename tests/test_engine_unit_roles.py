@@ -1,241 +1,130 @@
-"""Engine unit roles come from the registry, never a dashboard-looking suffix."""
+"""Engine busy roles come from registered repositories and Factory service discovery."""
 from __future__ import annotations
 
-import contextlib
-import json
-import shlex
-import subprocess
-import sys
 import unittest
 from unittest import mock
 
-from district import apply, host, install_state, service
+from district import apply, service
 from tests import test_one_install as fixtures
 
 
 class EngineUnitRolesTest(unittest.TestCase):
-    @contextlib.contextmanager
-    def fresh_case(self):
-        case = fixtures.OneInstallTest()
-        case.setUp()
-        try:
-            yield case
-        finally:
-            case.doCleanups()
+    def setUp(self):
+        self.case = fixtures.OneInstallTest()
+        self.case.setUp()
+        self.addCleanup(self.case.doCleanups)
 
-    def role_case(self, *, remote: bool, platform: str, unregistered_owner: bool = False) -> None:
-        with self.fresh_case() as case:
-            slug = "acme/ops-dashboard"
-            main = "factory-ops-dashboard.service"
-            timer = "factory-ops-dashboard.timer"
-            dashboard = "factory-ops-dashboard-dashboard.service"
-            idle_timer = "factory-idle.timer"
-            owner = "factory-retired-dashboard.service" if unregistered_owner else main
-            case.data["repo"] = {slug: {"path": str(case.repo)}}
-            case.data["defaults"]["engine"] = {"sha": fixtures.OLD, "ref": "main"}
-            case.data["defaults"]["engine_idle_timeout"] = "5s"
-            case.active = {timer, idle_timer}
-            case.calls.clear()
-            case.events.clear()
-            case.backend.factory_units.return_value = {
-                main, timer, dashboard, owner, idle_timer, "factory-stopped.timer"
-            }
-            case.backend.configuration.return_value = {
-                "platform": platform,
-                "uid": 501,
-                "executable": "systemctl" if platform == "linux" else "launchctl",
-            }
-            case.backend.status.side_effect = lambda name, **_: service.ServiceStatus(
-                "loaded" if name in {main, dashboard} else "not-found",
-                "active" if name in {main, dashboard} else "inactive",
-                "enabled" if name in {main, dashboard} else "disabled",
-                42 if name in {main, dashboard} else 0,
-            )
+    def engine_busy(self, repos, discovered, states):
+        observed = []
+        self.case.backend.factory_units.return_value = set(discovered)
 
-            name = "remote" if remote else "local"
-            runner = None
-            if remote:
-                case.data["hosts"] = {
-                    name: {"ssh": "unused", "platform": platform,
-                           "engine": {"sha": fixtures.OLD, "ref": "main"}}
-                }
-                case.data["repo"][slug]["host"] = name
-                runner, _, _ = case.timeout_remote("none")
+        def is_active(unit, **_):
+            observed.append(unit)
+            return states.get(unit, "inactive")
 
-            proc_root = case.root / f"proc-{platform}-{name}"
-            proc_reader_executions = [0]
-            original = case.run_cmd
+        self.case.backend.is_active.side_effect = is_active
+        busy = apply._engine_busy(
+            mock.Mock(), self.case.backend, repos, deadline=apply.time.monotonic() + 1
+        )
+        return busy, observed
 
+    def test_registered_dashboard_service_is_excluded(self):
+        repos = {"acme/ops": {"path": str(self.case.repo)}}
+        dashboard = "factory-ops-dashboard.service"
 
-            def write_fake_proc(live: bool) -> None:
-                for pid, parent, start in (("42", "1", "90"), ("123", "42", "100")):
-                    directory = proc_root / pid
-                    directory.mkdir(parents=True, exist_ok=True)
-                    (directory / "stat").write_text(
-                        f"{pid} (fake worker) S {parent} " + "0 " * 17 + f"{start} 0\n"
-                    )
-                    (directory / "cgroup").write_text(
-                        f"0::/user/{owner}/child\n" if pid == "123" else "0::/user/session.scope\n"
-                    )
-                    (directory / "cwd").unlink(missing_ok=True)
-                    (directory / "cwd").symlink_to("/tmp", target_is_directory=True)
-                    argv = ([str(case.tool / "bin/python"), "-m", "factory", "dispatch"]
-                            if pid == "123" and live else [])
-                    (directory / "cmdline").write_bytes(
-                        b"\0".join(part.encode() for part in argv) + (b"\0" if argv else b"")
-                    )
+        busy, observed = self.engine_busy(
+            repos, {dashboard}, {dashboard: "active"}
+        )
 
-            def execute_proc_reader(argv, kwargs, live):
-                write_fake_proc(live)
-                script = argv[2]
-                replacement = repr(str(proc_root) + "/")
-                for literal in ("'/proc/'", '"/proc/"'):
-                    script = script.replace(literal, replacement)
-                for literal in ("'/proc'", '"/proc"'):
-                    script = script.replace(literal, repr(str(proc_root)))
-                self.assertNotIn("pathlib.Path('/proc", script)
-                self.assertNotIn('pathlib.Path("/proc', script)
-                proc_reader_executions[0] += 1
-                return subprocess.run(
-                    [sys.executable, "-c", script, *argv[3:]],
-                    capture_output=True,
-                    text=True,
-                    input=kwargs.get("input"),
-                    timeout=kwargs["timeout"],
-                    check=False,
-                )
+        self.assertEqual(busy, [])
+        self.assertNotIn(dashboard, observed)
 
-            def commands(argv, **kwargs):
-                raw = list(argv)
-                macos_observer = argv == ["sh", "-c", apply._MACOS_PROCESSES]
-                if macos_observer:
-                    argv = ["ps", "-ww", "-eo", "pid=,ppid=,lstart=,args="]
-                if argv[:3] == ["env", "LC_ALL=C", "ps"]:
-                    argv = argv[2:]
-                if argv[0] == "ps":
-                    live = True
-                    if "args=" in argv[-1]:
-                        command = (f"{case.tool}/bin/python -m factory dispatch" if live else "")
-                        if platform == "macos":
-                            rows = [f"123 42 Thu Nov 12 00:00:00 2026 {command}".rstrip(),
-                                    "42 1 Thu Nov 12 00:00:00 2026"]
-                        else:
-                            rows = [f"123 {command}".rstrip()] if command else []
-                        output = "\n".join(rows) + ("\n" if rows else "")
-                        return subprocess.CompletedProcess(
-                            raw, 0, ("900\n" if macos_observer else "") + output, "")
-                    return subprocess.CompletedProcess(
-                        raw, 0,
-                        "123 42 Thu Nov 12 00:00:00 2026\n42 1 Thu Nov 12 00:00:00 2026\n", "")
-                if argv[:2] == ["python3", "-c"] and "/proc" in argv[2]:
-                    live = True
-                    if "cmdline" in argv[2]:
-                        result = execute_proc_reader(argv, kwargs, live)
-                        return result
-                    if len(argv) == 3:
-                        return subprocess.CompletedProcess(
-                            raw, 0, json.dumps({"123": ["100", "42"], "42": ["90", "1"]}), "")
-                    return subprocess.CompletedProcess(
-                        raw, 0,
-                        json.dumps({"123": ["100", f"0::/user/{owner}/child\n"]}), "")
-                if argv[:3] == ["systemctl", "--user", "show"]:
-                    return subprocess.CompletedProcess(
-                        raw, 0, f"Id={owner}\nControlGroup=/user/{owner}\n", "")
-                if argv[:2] == ["launchctl", "list"]:
-                    return subprocess.CompletedProcess(raw, 0, f"42 0 {owner.removesuffix('.service')}\n", "")
-                return original(argv, **kwargs)
+    def test_registered_dashboard_looking_main_worker_blocks(self):
+        repos = {
+            "acme/ops": {"path": str(self.case.repo)},
+            "acme/ops-dashboard": {"path": str(self.case.repo)},
+        }
+        main = "factory-ops-dashboard.service"
+        dashboard = "factory-ops-dashboard-dashboard.service"
 
-            if runner:
-                transport = runner.transport
+        busy, observed = self.engine_busy(
+            repos, {main, dashboard}, {main: "active", dashboard: "active"}
+        )
 
-                def remote_transport(argv, **kwargs):
-                    parts = shlex.split(argv[-1])
-                    if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
-                        parts = shlex.split(parts[-1])
-                    if (parts[0] == "ps" or parts[:3] == ["env", "LC_ALL=C", "ps"]
-                            or parts == ["sh", "-c", apply._MACOS_PROCESSES]
-                            or parts[:2] in (["systemctl", "--user"], ["launchctl", "list"])
-                            or parts[:2] == ["python3", "-c"] and "/proc" in parts[2]):
-                        return commands(parts, **kwargs)
-                    return transport(argv, **kwargs)
+        self.assertEqual(busy, [main])
+        self.assertIn(main, observed)
+        self.assertNotIn(dashboard, observed)
 
-                runner.transport = remote_transport
+    def test_unregistered_active_dashboard_looking_worker_blocks(self):
+        repos = {"acme/ops": {"path": str(self.case.repo)}}
+        worker = "factory-retired-dashboard.service"
 
-            def is_active(unit, **_):
-                case.events.append(("state", unit))
-                return "active" if unit == main or unit in case.active else "inactive"
+        for state in ("active", "activating", "deactivating"):
+            with self.subTest(state=state):
+                busy, _ = self.engine_busy(repos, {worker}, {worker: state})
+                self.assertEqual(busy, [worker])
 
-            case.backend.is_active.side_effect = is_active
-            record = install_state.ApplyRun("", "", fixtures.OLD)
-            with mock.patch.object(case, "run_cmd", side_effect=commands), \
-                    mock.patch.object(apply, "run", side_effect=commands):
-                result = apply.reconcile_engine(
-                    case.data, record, backend=case.backend, run_cmd=runner or apply.run,
-                    host_name=name,
-                )
+    def test_non_factory_and_handland_activity_does_not_block_swap(self):
+        ignored = {"sshd.service", "handland-137.service"}
+        self.case.active.update(ignored)
+        observed = []
+        original = self.case.is_active
 
-            self.assertEqual(result, "deferred", case.output.getvalue())
-            self.assertEqual(case.installs(), [])
-            self.assertEqual(case.active, {timer, idle_timer})
-            reason = record.deferred["engine:remote" if remote else "engine"]["reason"]
-            self.assertIn("pid 123" if unregistered_owner else main, reason)
-            self.assertEqual(record.disabled, set())
-            self.assertEqual(record.reenabled, set())
-            case.backend.pause_timer.assert_not_called()
-            case.backend.resume_timer.assert_not_called()
-            case.backend.start.assert_not_called()
-            if platform == "linux":
-                self.assertGreater(
-                    proc_reader_executions[0], 0,
-                    "Linux argv must come from the fake /proc tree",
-                )
+        def is_active(unit, **kwargs):
+            observed.append(unit)
+            return original(unit, **kwargs)
 
-    def test_active_ops_dashboard_main_defers_locally_and_remotely_on_linux_and_macos(self):
-        for platform in ("linux", "macos"):
-            for remote in (False, True):
-                with self.subTest(platform=platform, remote=remote):
-                    self.role_case(remote=remote, platform=platform)
+        self.case.backend.is_active.side_effect = is_active
 
-    def test_unregistered_dashboard_owner_cannot_exempt_work(self):
-        for platform in ("linux", "macos"):
-            for remote in (False, True):
-                with self.subTest(platform=platform, remote=remote):
-                    self.role_case(remote=remote, platform=platform, unregistered_owner=True)
+        self.assertEqual(self.case.reconcile(), "applied", self.case.output.getvalue())
+        self.assertEqual(len(self.case.installs()), 1)
+        self.assertTrue(ignored.isdisjoint(observed))
 
-    def test_unregistered_dashboard_suffix_is_drained_and_not_restarted(self):
-        with self.fresh_case() as case:
-            repos = {"acme/ops-dashboard": {"path": str(case.repo)}}
-            main = "factory-ops-dashboard.service"
-            dashboard = "factory-ops-dashboard-dashboard.service"
-            unregistered = "factory-retired-dashboard.service"
-            case.backend.factory_units.return_value = {
-                main, "factory-ops-dashboard.timer", dashboard, unregistered
-            }
-            services, _ = apply._engine_units(repos, case.backend, timeout=1)
-            self.assertIn(main, services)
-            self.assertIn(unregistered, services)
-            self.assertNotIn(dashboard, services)
+    def test_unregistered_dashboard_suffix_is_service_but_not_restarted(self):
+        repos = {"acme/ops-dashboard": {"path": str(self.case.repo)}}
+        main = "factory-ops-dashboard.service"
+        dashboard = "factory-ops-dashboard-dashboard.service"
+        unregistered = "factory-retired-dashboard.service"
+        self.case.backend.factory_units.return_value = {
+            main, "factory-ops-dashboard.timer", dashboard, unregistered
+        }
+        services, _ = apply._engine_units(repos, self.case.backend, timeout=1)
+        self.assertIn(main, services)
+        self.assertIn(unregistered, services)
+        self.assertNotIn(dashboard, services)
 
-            case.backend.status.return_value = service.ServiceStatus("loaded", "active", "enabled", 42)
-            apply.restart_dashboards(repos, case.backend)
-            self.assertEqual([call.args[0] for call in case.backend.start.call_args_list], [dashboard])
+        self.case.backend.status.return_value = service.ServiceStatus(
+            "loaded", "active", "enabled", 42
+        )
+        apply.restart_dashboards(repos, self.case.backend)
+        self.assertEqual(
+            [call.args[0] for call in self.case.backend.start.call_args_list],
+            [dashboard],
+        )
 
     def test_registered_main_precedes_a_colliding_dashboard_role(self):
-        with self.fresh_case() as case:
-            repos = {
-                "acme/ops": {"path": str(case.repo)},
-                "acme/ops-dashboard": {"path": str(case.repo)},
-            }
-            collision = "factory-ops-dashboard.service"
-            dashboard = "factory-ops-dashboard-dashboard.service"
-            case.backend.factory_units.return_value = {
-                "factory-ops.service", collision, dashboard,
-                "factory-ops.timer", "factory-ops-dashboard.timer",
-            }
-            services, _ = apply._engine_units(repos, case.backend, timeout=1)
-            self.assertIn(collision, services)
-            self.assertNotIn(dashboard, services)
+        repos = {
+            "acme/ops": {"path": str(self.case.repo)},
+            "acme/ops-dashboard": {"path": str(self.case.repo)},
+        }
+        collision = "factory-ops-dashboard.service"
+        dashboard = "factory-ops-dashboard-dashboard.service"
+        self.case.backend.factory_units.return_value = {
+            "factory-ops.service",
+            collision,
+            dashboard,
+            "factory-ops.timer",
+            "factory-ops-dashboard.timer",
+        }
+        services, _ = apply._engine_units(repos, self.case.backend, timeout=1)
+        self.assertIn(collision, services)
+        self.assertNotIn(dashboard, services)
 
-            case.backend.status.return_value = service.ServiceStatus("loaded", "active", "enabled", 42)
-            apply.restart_dashboards(repos, case.backend)
-            self.assertEqual([call.args[0] for call in case.backend.start.call_args_list], [dashboard])
+        self.case.backend.status.return_value = service.ServiceStatus(
+            "loaded", "active", "enabled", 42
+        )
+        apply.restart_dashboards(repos, self.case.backend)
+        self.assertEqual(
+            [call.args[0] for call in self.case.backend.start.call_args_list],
+            [dashboard],
+        )
