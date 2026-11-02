@@ -212,6 +212,31 @@ class HandRunTest(unittest.TestCase):
         self.assertIn("sourced.sh", result.stderr)
         self.assertFalse(self.launch_log.exists())
 
+    def test_nonexecutable_source_fragments_reject_external_live_dependency(self):
+        for name, command in (("settings", "source"), ("settings.txt", "."),
+                              ("helper.bash", "source"), ("helper.inc", ".")):
+            with self.subTest(name=name):
+                sourced = self.source / name
+                sourced.write_text('bash /tmp/external-live.sh\n')
+                sourced.chmod(0o644)
+                self.script.write_text(f'#!/bin/bash\n{command} "./{name}"\n')
+                result = self.command("launch", "532-chain", self.script)
+                sourced.unlink()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("/tmp/external-live.sh", result.stderr)
+                self.assertIn(name, result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
+    def test_external_script_shebang_interpreter_is_refused(self):
+        interpreter = self.home / "interpreter.sh"
+        interpreter.write_text('#!/bin/bash\nexec /bin/bash "$@"\n')
+        interpreter.chmod(0o755)
+        self.script.write_text(f"#!{interpreter}\nprintf 'approved\\n'\n")
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(str(interpreter), result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
