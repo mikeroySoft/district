@@ -10,6 +10,7 @@ COMMANDS = {
     "apply": ("apply", "main", "reconcile the host to the registry; --upgrade reinstalls factory"),
     "install-state": ("install_state", "main", "fast local install, engine, timer, and last-apply state"),
     "doctor": ("doctor", "main", "check District's host prerequisites"),
+    "hand-run": ("hand_run", "main", "launch frozen hand-run scripts, guard updates, check active units"),
     "status": ("status", "main", "fleet operations: exit 1 attention, 2 unknown observation, 0 normal"),
     "report": ("report", "main", "print a read-only Markdown fleet review"),
     "rm": ("rm", "main", "remove a repository's units and registry entry; repo files untouched"),
