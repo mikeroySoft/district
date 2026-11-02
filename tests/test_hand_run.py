@@ -2,12 +2,13 @@
 import json
 import os
 from pathlib import Path
+import py_compile
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
-
+import venv
 
 
 SYSTEMCTL = '''#!/usr/bin/env python3
@@ -136,6 +137,55 @@ class HandRunTest(unittest.TestCase):
         result = self.command("update", self.script, self.replacement)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("handland-532-chain.service", result.stderr)
+
+    def test_cached_python_helper_remains_importable(self):
+        helper = self.source / "helper.py"
+        helper.write_text("value = 'approved cached helper'\n")
+        py_compile.compile(str(helper), doraise=True)
+        self.script.write_text(f'#!/bin/bash\nPYTHONPATH="{self.source}" '
+                               f'{sys.executable} -c "import helper; print(helper.value)"\n')
+        start, _ = self.launch()
+        helper.write_text("value = 'live replacement'\n")
+        result = subprocess.run([str(start)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "approved cached helper")
+
+    def test_uncopied_engine_and_repository_paths_stay_live(self):
+        engine = self.data / "engines/v1/bin"
+        engine.mkdir(parents=True)
+        (engine / "python").symlink_to(sys.executable)
+        repository = self.data / "roots/project"
+        repository.mkdir(parents=True)
+        for prefix in (str(self.data), "$HOME/.local/share/district",
+                       "${HOME}/.local/share/district", "~/.local/share/district"):
+            with self.subTest(prefix=prefix):
+                self.script.write_text(
+                    f"#!/bin/bash\nset -eu\ncd {prefix}/roots/project\n"
+                    f"{prefix}/engines/v1/bin/python -c 'import os; print(os.getcwd())'\n"
+                )
+                start, _ = self.launch()
+                result = subprocess.run([str(start)], text=True, capture_output=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(repository))
+
+    def test_python_start_and_stop_preserve_shebang_interpreter_and_options(self):
+        environment = self.home / "orchestration-venv"
+        venv.EnvBuilder(with_pip=False).create(environment)
+        python = environment / "bin/python"
+        entry = self.source / "entry.py"
+        stop = self.source / "stop.py"
+        for shebang in (f"#!{python} -I", f"#!/usr/bin/env -S {python} -I"):
+            with self.subTest(shebang=shebang):
+                for script, label in ((entry, "start"), (stop, "stop")):
+                    script.write_text(f"{shebang}\nimport sys\n"
+                                      f"print({label!r}, sys.prefix, sys.flags.isolated)\n")
+                result = self.command("launch", "532-chain", entry, "--stop-post", stop)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                run = Path(result.stdout.strip())
+                for label in ("start", "stop"):
+                    result = subprocess.run([str(run / label)], text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), f"{label} {environment} 1")
 
     def test_checksum_mismatch_prevents_start_and_stop_side_effects(self):
         marker = self.home / "side-effect"
