@@ -399,6 +399,27 @@ class HandRunTest(unittest.TestCase):
                 self.assertIn("/tmp/external-live.sh", result.stderr)
                 self.assertFalse(self.launch_log.exists())
 
+    def test_escaped_and_concatenated_source_commands_reject_live_dependency(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        for command in (r"\source", r"\s\o\u\r\c\e", 's"our"ce', r"\."):
+            with self.subTest(command=command):
+                self.script.write_text(f"#!/bin/bash\n{command} ./settings.inc\n")
+                result = self.command("launch", "532-chain", self.script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("/tmp/external-live.sh", result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
+    def test_literal_source_nested_in_dynamic_source_argument_is_checked(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        (self.source / "safe.inc").write_text("true\n")
+        self.script.write_text('#!/bin/bash\nsource "$(source ./settings.inc; printf ./safe.inc)"\n')
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/tmp/external-live.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
