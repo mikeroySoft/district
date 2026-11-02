@@ -155,13 +155,33 @@ Reconcile the host to the registry. Idempotent; safe to run any time.
 
 `district-apply.timer` runs `apply` hourly.
 
-- `--upgrade [REF]`: reinstall agent-factory from an export (`git archive`) of
-  one commit in its source checkout — `REF` (tag, branch, sha) or `HEAD`, which
-  additionally requires a clean working tree — so every timer picks up the new
-  code on its next tick. The install is an explicit snapshot — not editable —
-  so an in-progress edit in the checkout never runs unattended. The host file
-  records `[defaults.engine]` ref / sha / previous / installed_at; the printed
-  `rollback: district apply --upgrade <previous sha>` reverts it.
+- **One engine per host.** Factory is one uv tool with no version in its path;
+  every factory on that host runs its Python. Optional `factory_ref` drives
+  ordinary reconciliation. `--upgrade [REF]` explicitly resolves REF, the
+  configured ref, or `main` against `factory_repo`; it never reads a checkout.
+  Branch resolution selects the newest green commit in bounded remote history;
+  a selected tag commit must itself be green. District records one target under
+  `[defaults.engine]` locally or `[hosts.NAME.engine]` remotely. Installing an
+  ancestor is refused unless `--allow-downgrade` is supplied.
+- **Bounded upgrade window.** Defer with a named reason for outside hand work,
+  then pause only active Factory timers and wait within the configured limit for
+  non-dashboard services and uv-tool Factory processes to become idle. Only
+  semantic dashboard commands are exempt; dashboard-owned gate/dispatch is
+  outside work. Managed exemptions require stable owning-host PID/start-time
+  identities, including launchd parents/anchors. Install the one `factory` tool
+  with `uv tool install --force`; verify the receipt revision and CLI. On install
+  or verification failure, recheck outside work and the original idle deadline
+  before reinstalling and verifying the previous revision. Fleet replacement
+  and rollback use the same guards. Restore exactly the paused timers in
+  `finally`; an unverified tool or blocked automatic rollback retains named
+  paused/recovery intent for the next idle apply. Restart dashboards after a
+  verified change.
+- **Migration and cleanup.** Remove a legacy `factory_source` setting through
+  the host config writer after making a timestamped backup. After a successful
+  engine step and repo render, scan every managed systemd unit, Factory launchd
+  plist, the host config, and uv receipt before deleting an unreferenced
+  `factory-*` directory. Keep and report referenced folders and symlinks; an
+  incomplete scan deletes nothing.
 - Per repo (all, or the one named): `factory install` (re-renders units with the
   current `PATH` and `ExecStart`), ensure labels, `factory doctor --json`.
 - **Failure cap.** Count consecutive failed dispatcher passes from the journal.
@@ -262,17 +282,13 @@ and the `status` operational exit semantics. Fleet totals disclose incomplete
 coverage; rates are pooled only from compatible producer numerators,
 denominators and windows. It does not refresh caches or reconstruct history.
 
-### 5.8 Per-factory engine version
+### 5.8 One host engine version
 
-A factory may pin an engine version: `[repo."owner/name".engine] version =
-"0.2.0"` (git ref or release tag). District keeps one venv per distinct pinned
-version under `~/.local/share/district/engines/<version>/` and `factory
-install` renders `ExecStart` from `[install].python` so each factory's units
-point at the venv for its version. Unpinned factories track
-`[defaults.engine].version`. `district apply --upgrade` upgrades the default;
-`district apply --upgrade <slug>` moves one pin. `district status` shows the
-version spread; a factory more than one release behind the default is an
-`attention` signal. Requires: `[install].python` in agent-factory (S).
+Every factory on a host uses the same versionless Factory uv tool and recorded
+target SHA. Per-factory engine pins and per-version environments contradict this
+invariant and are unsupported. Fleet observations report target and installed
+revision differences between hosts; District converges each configured host to
+the newest green commit selected by its host-wide ref policy.
 
 ### 5.9 Management surfaces
 
@@ -294,8 +310,9 @@ Deliberate, with the condition under which each would be reconsidered.
 - ~~Combined web dashboard~~ — **reversed 2026-09-04**, see §5.6. Three
   factories was enough to make "is the fleet healthy?" a question the terminal
   table answers but an exec view does not.
-- ~~Per-repo version pinning~~ — **reversed 2026-09-04**, see §5.8. A factory
-  with outside contributors may need to lag an engine release.
+- **Per-repo version pinning.** One uv tool and one target SHA per host are the
+  safety invariant; a lagging factory requires a separate host, not a second
+  engine environment.
 - **Cross-repo ticket routing, shared lessons, any plugin system.** No evidence
   of need.
 - **Multi-host or multi-user.** New PRD.
@@ -352,8 +369,7 @@ requirement District missed.
 
 ## 9. Open questions
 
-- Where clones from URLs land (`~/dev/mikeroysoft/<name>` is the current
-  convention; make it `[defaults.clone_dir]`).
+- URL clones land under `[defaults.clone_dir]` (default `~/dev/<name>`).
 - Whether gate-check proposal should call the existing agent skill
   (`skills/agent-factory/SKILL.md` already instructs an agent to derive checks
   from CI) instead of marker-file heuristics. Heuristics first; measure how

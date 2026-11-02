@@ -119,7 +119,7 @@ STATIC_BLOCKS = r"""  // GitHub (back row)
     files:[ ['mikeroySoft/factory@8f9baad/agent_factory/onboard.py',252,'unit templates'], ['mikeroySoft/district@f413e8c/district/apply.py',23,'POLICY_ENV'] ],
     conn:'Rendered by factory install; converged and capped by district apply.' },
   { id:'district', name:'district (add · apply · status · rm)', cat:'district', gx:0.6, gy:15.8, w:2.2, d:2.2, h:21, kind:'mast',
-    blurb:'The control tower: onboards a repo in one command (fork detection, gate proposal, port allocation), converges every factory to the host file, defers a shared-engine install until every Factory service is idle, caps dispatch after 10 consecutive failed passes, and prints the shared operational assessment. Never commits to a factory; never imports the engine.',
+    blurb:'The control tower: onboards a repo in one command (fork detection, gate proposal, port allocation), converges every factory to the host file, pauses timers for a bounded shared-engine upgrade window, caps dispatch after 10 consecutive failed passes, and prints the shared operational assessment. Never commits to a factory; never imports the engine.',
     files:[ ['mikeroySoft/district@f413e8c/district/add.py',299,'add: onboard / adopt'], ['mikeroySoft/district@d6f474c/district/apply.py',68,'engine preflight → drain → install'], ['mikeroySoft/district@d6f474c/district/apply.py',393,'failure cap → timer disabled'], ['mikeroySoft/district@f413e8c/district/status.py',49,'historical fleet row at the cited revision'] ],
     conn:'Writes the host file and drives factory; reads dashboard --json.' },
   { id:'hostcfg', name:'Host file (registry + defaults)', cat:'district', gx:0.4, gy:19.2, w:2.6, d:1.4, h:8, kind:'slab',
@@ -127,9 +127,9 @@ STATIC_BLOCKS = r"""  // GitHub (back row)
     files:[ ['mikeroySoft/district@f413e8c/district/host.py',83,'dedupe(): promote agreed values'], ['mikeroySoft/district@f413e8c/district/host.py',75,'next_port()'], ['mikeroySoft/factory@8f9baad/agent_factory/config.py',218,'read by config.load'] ],
     conn:'Written by district; read by every factory command.' },
   { id:'install', name:'Engine install (uv tool, one snapshot)', cat:'district', gx:0.4, gy:21.2, w:2.6, d:1.2, h:12, kind:'depot',
-    blurb:'One frozen agent-factory install on the host, shared by every factory. Every unit’s ExecStart points at its python. Upgrading is explicit and fleet-wide; per-factory engine pinning is the next surface (PRD §5.8).',
-    files:[ ['mikeroySoft/district@f413e8c/district/apply.py',101,'uv tool install --reinstall'], ['mikeroySoft/factory@8f9baad/agent_factory/onboard.py',246,'ExecStart = sys.executable -m agent_factory'] ],
-    conn:'Replaced by district apply --upgrade; executed by every timer tick.' },
+    blurb:'One versionless Factory uv tool on the host, shared by every factory. Every unit’s ExecStart points at its Python; District resolves one newest-green target, verifies upgrades, rolls back failures, and safely removes unreferenced per-version leftovers.',
+    files:[ ['mikeroySoft/district@f413e8c/district/apply.py',101,'uv tool install --force'], ['mikeroySoft/factory@8f9baad/agent_factory/onboard.py',246,'ExecStart = sys.executable -m agent_factory'] ],
+    conn:'Reconciled by district apply; executed by every timer tick.' },
 """
 
 STATIC_PATHS = r"""  { id:'p1', kind:'control', from:'systemd', to:'dispatch',

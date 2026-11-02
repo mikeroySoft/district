@@ -54,8 +54,13 @@ class ProjectionTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.enterContext(mock.patch.dict(os.environ, {
+            "HOME": str(self.root / "home"),
             "XDG_CONFIG_HOME": str(self.root / "config"),
+            "XDG_STATE_HOME": str(self.root / "state"),
             "XDG_CACHE_HOME": str(self.root / "cache"),
+            "XDG_DATA_HOME": str(self.root / "data"),
+            "UV_TOOL_DIR": str(self.root / "tools"),
+            "UV_TOOL_BIN_DIR": str(self.root / "bin"),
         }))
         self.repo = self.root / "private-checkout"
         self.repo.mkdir()
@@ -113,6 +118,19 @@ class ProjectionTest(unittest.TestCase):
     def assert_state(self, result, expected):
         raw, _, _, code = result
         self.assertEqual((code, *(raw[key] for key in STATES[1:])), expected)
+
+    def test_status_host_state_loader_is_confined_to_fixture(self):
+        paths = []
+
+        def safe_load():
+            paths.append(status._host_state_path())
+            return {}
+
+        with mock.patch.object(status, "_load_host_last_seen", side_effect=safe_load):
+            self.observe([source(scheduled())])
+
+        self.assertTrue(paths)
+        self.assertTrue(all(path.is_relative_to(self.root) for path in paths), paths)
 
     def test_scheduled_idle_cli_public_atlas_agree(self):
         result = self.observe([source(scheduled())])

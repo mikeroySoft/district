@@ -116,18 +116,11 @@ Ensures the six labels, touches no files, exits nonzero on any `gh` failure.
 
 ### 1.6 Ship without breaking the live timers
 
-1. Tests green; commit; version `0.2.0`.
-2. `systemctl --user disable --now factory-rocm-cli.timer factory-gpuflo.timer`.
-3. Wait until both `factory-*.service` are inactive (`systemctl --user is-active`).
-4. `uv tool install --reinstall --from ~/dev/mikeroysoft/factory agent-factory`.
-5. `factory --version` → `0.2.0`; `factory install --host 0.0.0.0` in each
-   repo (**explicit `0.0.0.0`** — matches the running units; a silent switch to
-   loopback would drop LAN access).
-6. `factory doctor` in each repo shows the "host setting committed" WARNs —
-   expected pre-migration.
-
-This same stop → wait → act → restore sequence is what `district apply
---upgrade` automates (§2.3).
+Use `district apply --upgrade [REF]` (§2.3), after the selected remote Factory
+revision passes CI. District owns the pause/drain/install/verify/restore window
+for the one host tool; do not replace it manually under running passes.
+Preserve each repo's registered bind host when re-rendering units, including
+an explicit `0.0.0.0` where LAN access is configured.
 
 ## Phase 2 — District
 
@@ -160,7 +153,7 @@ tests/test_district.py
 ### 2.2 `district add <path|url>`
 
 1. URL → `gh repo clone <url> <clone_dir>/<name>`, `clone_dir` from
-   `[defaults.clone_dir]` (default `~/dev/mikeroysoft`).
+   `[defaults.clone_dir]` (default `~/dev`).
 2. `factory doctor --json` in the repo → resolved `repo` slug (honours a
    committed `[repo].slug`). If doctor cannot run (no git remote), stop.
 3. **Write the registry entry first**: `path`, `dashboard.port = next_port()`.
@@ -198,12 +191,26 @@ Non-interactive: `--exclusive a,b --no-edit --check …`.
 
 ### 2.3 `district apply [slug] [--upgrade [REF]]`
 
-1. `--upgrade [REF]`: source `[defaults].factory_source`; resolve a local
-   commit and install its export. `HEAD` (the default) requires a clean tree.
-   Sequence: disable all managed timers → wait for every managed service to
-   be inactive (timeout → abort with the timer state restored) →
-   `uv tool install --reinstall` → continue to step 3 → re-enable timers.
-   Failure anywhere after disabling re-enables the timers before exiting.
+1. `--upgrade [REF]`: resolve REF, configured `factory_ref`, or `main` against
+   remote `factory_repo`; never use `factory_source`, a checkout, or local HEAD.
+   Select the newest CI-green commit in bounded branch history; a selected tag
+   must itself be green. Record one immutable target per host; fleet hosts agree
+   on the same target. Refuse an ancestor unless `--allow-downgrade` is supplied.
+   Before any pause, defer with a named reason for outside hand work (including
+   gate/dispatch owned by a dashboard). Pause only active managed Factory timers,
+   recording exactly which; wait within `engine_idle_timeout` for non-dashboard
+   services and uv-tool processes to become idle, rechecking outside work and
+   owning-host PID/start-time identities under the same deadline.
+   Replace the one `factory` tool once with
+   `uv tool install --force --from git+<factory_repo>@<sha>[extras] factory`.
+   Verify the receipt revision, CLI ownership, and successful `--version`.
+   On install/verification failure, recheck outside work and the original idle
+   deadline before reinstalling and verifying the previous revision; fleet
+   replacement/rollback uses the same guards. Restore exactly the paused timers
+   in `finally`, including deferral/timeout and verified rollback. If the tool
+   cannot be verified or rollback is blocked, retain named paused/recovery intent
+   for the next idle apply rather than starting unsafe code. Restart dashboards
+   after a verified change, then continue repo reconciliation at step 3.
 2. Supply-chain policy → **host `[install].env`**, not global package-manager
    config: `NPM_CONFIG_MIN_RELEASE_AGE=<days>` (duration → whole days, minimum
    1), `UV_EXCLUDE_NEWER=<age as relative uv duration>` (ISO 8601, whole hours →

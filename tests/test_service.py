@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from district import doctor, host, rm, service, update_transaction as tx
+from district import apply, doctor, host, rm, service, update_transaction as tx
 from district.host import DistrictError
 from district.service import LaunchdBackend, ServiceDefinition, SystemdUserBackend
 
@@ -29,7 +31,7 @@ class FakeRun:
         self.print_code = 0
         self.print_results: list[tuple[int, str, str]] = []
 
-    def __call__(self, argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
+    def __call__(self, argv: list[str], *, check: bool = False, **kwargs) -> subprocess.CompletedProcess:
         self.calls.append(argv)
         if argv[1:2] == ["print"]:
             if self.print_results:
@@ -39,16 +41,18 @@ class FakeRun:
         return subprocess.CompletedProcess(argv, 0, "", "")
 
 class RunningRun:
-    def __init__(self) -> None:
+    def __init__(self, *, loaded: bool = True) -> None:
         self.calls: list[list[str]] = []
-        self.loaded = True
+        self.loaded = loaded
 
-    def __call__(self, argv: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
+    def __call__(self, argv: list[str], *, check: bool = False, **kwargs) -> subprocess.CompletedProcess:
         self.calls.append(argv)
         if argv[1:2] == ["print"]:
             if self.loaded:
                 return subprocess.CompletedProcess(argv, 0, "state = running\npid = 4242\n", "")
             return subprocess.CompletedProcess(argv, 3, "", "not found")
+        if argv[1:2] == ["bootstrap"]:
+            self.loaded = True
         if argv[1:2] == ["bootout"]:
             self.loaded = False
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -68,8 +72,13 @@ class LaunchdBackendTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         env = mock.patch.dict(os.environ, {
+            "HOME": str(Path(tmp.name) / "home"),
             "XDG_CONFIG_HOME": str(Path(tmp.name) / "xdg"),
+            "XDG_STATE_HOME": str(Path(tmp.name) / "state"),
             "XDG_CACHE_HOME": str(Path(tmp.name) / "cache"),
+            "XDG_DATA_HOME": str(Path(tmp.name) / "data"),
+            "UV_TOOL_DIR": str(Path(tmp.name) / "tools"),
+            "UV_TOOL_BIN_DIR": str(Path(tmp.name) / "bin"),
         })
         env.start()
         self.addCleanup(env.stop)
@@ -258,22 +267,135 @@ class LaunchdBackendTest(unittest.TestCase):
             with self.assertRaises(subprocess.TimeoutExpired):
                 backend.start("factory-widgets.service", check=False, timeout=0)
 
-    def test_scheduled_job_deadline_preserves_completed_reads(self) -> None:
-        def run(argv: list[str], *, check: bool = False,
-                timeout: float | None = None) -> subprocess.CompletedProcess:
-            if timeout == 0:
-                raise subprocess.TimeoutExpired(argv, timeout)
-            return subprocess.CompletedProcess(argv, 0, "state = running\npid = 4242\n", "")
+    def test_starting_unloaded_keepalive_job_leaves_it_loaded(self) -> None:
+        for timeout in (0, 0.5):
+            for restart in (False, True):
+                with self.subTest(timeout=timeout, restart=restart):
+                    run = RunningRun(loaded=False)
+                    backend = self.backend(run, Path.home())
+                    path = backend.agent_dir / "factory-widgets-dashboard.plist"
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(backend.render(
+                        self.definition(dashboard=True, root=Path.home() / "factory")))
+                    proc = backend.start("factory-widgets-dashboard.service",
+                                         restart=restart, timeout=timeout)
+                    self.assertEqual(proc.returncode, 0)
+                    self.assertTrue(run.loaded, f"dashboard unloaded: {run.calls}")
+                    self.assertFalse(any(call[1] == "bootout" for call in run.calls))
 
-        with tempfile.TemporaryDirectory() as directory:
-            backend = self.backend(run, Path(directory))
-            with mock.patch.object(service.time, "monotonic", side_effect=[0, 0.5, 2]):
-                states = backend.scheduled_jobs(
-                    {"factory-a.timer", "factory-b.timer"}, timeout=1,
-                )
+    def test_timed_out_temporary_job_is_unloaded_but_existing_job_is_not(self) -> None:
+        for loaded in (False, True):
+            with self.subTest(loaded=loaded):
+                run = RunningRun(loaded=loaded)
+                backend = self.backend(run, Path.home())
+                path = backend.agent_dir / "factory-widgets.plist"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(backend.render(self.definition(root=Path.home() / "factory")))
+                started = time.monotonic()
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    backend.start("factory-widgets.service", check=False, timeout=0.5)
+                self.assertLess(time.monotonic() - started, 4)
+                bootout = ["launchctl", "bootout", "gui/501/factory-widgets"]
+                if loaded:
+                    self.assertNotIn(bootout, run.calls)
+                    self.assertTrue(run.loaded)
+                else:
+                    self.assertIn(bootout, run.calls)
+                    bootstrap = ["launchctl", "bootstrap", "gui/501", str(path)]
+                    self.assertLess(run.calls.index(bootstrap), run.calls.index(bootout))
+                    self.assertFalse(run.loaded)
 
-        self.assertEqual(set(states), {"factory-a.timer"})
-        self.assertEqual(states["factory-a.timer"].service_active_state, "active")
+    def test_reset_timeout_keeps_cap_and_unloads_temporary_job(self) -> None:
+        run = RunningRun(loaded=False)
+        backend = self.backend(run, Path.home())
+        path = backend.agent_dir / "factory-widgets.plist"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(backend.render(self.definition(root=Path.home() / "factory")))
+        table = {"disabled_at": "2026-11-01T12:00:00Z", "disabled_reason": "failure cap"}
+        original = dict(table)
+        with mock.patch.object(apply, "SERVICE_WAIT", 0.5), mock.patch.object(host, "save") as save:
+            self.assertFalse(apply.reset("acme/widgets", table, {"repo": {"acme/widgets": table}},
+                                         backend=backend))
+        self.assertEqual(table, original)
+        save.assert_not_called()
+        self.assertFalse(run.loaded)
+        self.assertIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)
+
+    def test_temporary_bootstrap_is_cleaned_up_on_results_and_exceptions(self) -> None:
+        for outcome in ("success", "nonzero", "bootstrap-error", "poll-error"):
+            with self.subTest(outcome=outcome):
+                run = RunningRun(loaded=False)
+                error = OSError("fake launchctl lost connection")
+
+                def command(argv, *, check=False, **kwargs):
+                    proc = run(argv, check=check, **kwargs)
+                    if argv[1] == "bootstrap":
+                        if outcome == "bootstrap-error":
+                            raise error
+                        if outcome == "nonzero":
+                            return subprocess.CompletedProcess(argv, 7, "", "bootstrap failed")
+                    if argv[1] == "print" and run.loaded:
+                        if outcome == "poll-error":
+                            raise error
+                        return subprocess.CompletedProcess(argv, 0, "state = exited\nlast exit code = 0\n", "")
+                    return proc
+
+                backend = self.backend(command, Path.home())
+                path = backend.agent_dir / "factory-widgets.plist"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(backend.render(self.definition(root=Path.home() / "factory")))
+                if outcome.endswith("error"):
+                    with self.assertRaises(OSError) as caught:
+                        backend.start("factory-widgets.service", check=False, timeout=0.5)
+                    self.assertIs(caught.exception, error)
+                else:
+                    proc = backend.start("factory-widgets.service", check=False, timeout=0.5)
+                    self.assertEqual(proc.returncode, 7 if outcome == "nonzero" else 0)
+                self.assertFalse(run.loaded)
+                self.assertIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)
+
+    def test_cleanup_timeout_is_bounded_and_preserves_original_outcome(self) -> None:
+        for outcome in ("success", "nonzero", "bootstrap-timeout", "print-timeout"):
+            with self.subTest(outcome=outcome):
+                run = RunningRun(loaded=False)
+                error = subprocess.TimeoutExpired(["fake-launchctl", outcome], 0.5)
+
+                def command(argv, *, check=False, **kwargs):
+                    if argv[1] == "bootout":
+                        run.calls.append(argv)
+                        # A real bounded child, never the host's launchctl.
+                        return subprocess.run(
+                            [sys.executable, "-c", "import time; time.sleep(1.5)"],
+                            timeout=kwargs.get("timeout"), capture_output=True, text=True)
+                    proc = run(argv, check=check, **kwargs)
+                    if argv[1] == "bootstrap":
+                        if outcome == "bootstrap-timeout":
+                            raise error
+                        if outcome == "nonzero":
+                            return subprocess.CompletedProcess(argv, 7, "original", "failed")
+                    if argv[1] == "print" and run.loaded:
+                        if outcome == "print-timeout":
+                            raise error
+                        return subprocess.CompletedProcess(argv, 0, "state = exited\nlast exit code = 0\n", "")
+                    return proc
+
+                backend = self.backend(command, Path.home())
+                path = backend.agent_dir / "factory-widgets.plist"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(backend.render(self.definition(root=Path.home() / "factory")))
+                started = time.monotonic()
+                with mock.patch.object(service, "LAUNCHD_CLEANUP_TIMEOUT", 0.1, create=True):
+                    if outcome.endswith("timeout"):
+                        with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                            backend.start("factory-widgets.service", check=False, timeout=0.5)
+                        self.assertIs(caught.exception, error)
+                    else:
+                        proc = backend.start("factory-widgets.service", check=False, timeout=0.5)
+                        self.assertEqual(proc.returncode, 7 if outcome == "nonzero" else 0)
+                        if outcome == "nonzero":
+                            self.assertEqual((proc.stdout, proc.stderr), ("original", "failed"))
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertIn(["launchctl", "bootout", "gui/501/factory-widgets"], run.calls)
 
     def test_doctor_reports_service_manager_failures_instead_of_raising(self) -> None:
         def failed(argv: list[str], *, check: bool = False, **_: object) -> subprocess.CompletedProcess:

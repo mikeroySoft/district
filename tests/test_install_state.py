@@ -61,7 +61,7 @@ class InstallStateTest(DistrictCase):
         self.repo_path = self.repo()
         host.save({
             "defaults": {
-                "factory_source": str(self.repo_path),
+                "factory_repo": "https://github.com/mikeroySoft/factory",
                 "engine": {"ref": "main", "sha": SHA},
             },
             "repo": {
@@ -73,8 +73,17 @@ class InstallStateTest(DistrictCase):
                 },
             },
         })
+
+        self._write_receipt(SHA)
         self.stub("uv", ("tool list --show-version-specifiers", "district v0.1.3\nfactory v0.8.9\n"))
         self.stub("systemctl", ("show *", SHOW), ("is-active *", "active\n"))
+
+    def _write_receipt(self, sha: str) -> None:
+        tool, _ = host.factory_tool_paths()
+        tool.mkdir(parents=True, exist_ok=True)
+        (tool / "uv-receipt.toml").write_text(
+            f'[[tool.requirements]]\nname = "factory"\nrev = "{sha}"\n'
+        )
 
     def test_timer_states_reads_launchd_backend(self) -> None:
         self.stub("launchctl")
@@ -155,8 +164,11 @@ class InstallStateTest(DistrictCase):
     def test_stubbed_local_state_produces_schema_versioned_document(self) -> None:
         with mock.patch.object(install_state, "now", return_value=AT), \
              mock.patch.object(install_state.socket, "gethostname", return_value="tank"), \
-             mock.patch.object(install_state, "commit_counts", return_value=(2, 1)):
+             mock.patch.object(install_state, "commit_counts", return_value=(2, 1)) as compare:
             document = install_state.collect(releases=RELEASES)
+        compare.assert_called_once_with(
+            "https://github.com/mikeroySoft/factory", RELEASE_SHA, SHA,
+        )
 
         schema = json.loads(install_state.SCHEMA_PATH.read_text())
         self.assertEqual(document["schema_version"], schema["properties"]["schema_version"]["const"])
@@ -184,6 +196,51 @@ class InstallStateTest(DistrictCase):
         }])
         self.assertTrue(str(install_state.state_path()).startswith(os.environ["XDG_STATE_HOME"]))
         self.assertEqual(self.calls("uv"), ["tool list --show-version-specifiers"])
+
+
+    def test_interrupted_replacement_reports_installed_identity_unknown(self) -> None:
+        self._write_receipt("d" * 40)
+        with mock.patch.object(install_state, "commit_counts") as compare:
+            engine = install_state.collect(
+                releases=RELEASES, timers={}, last_apply={},
+                versions={"district": "0.1.3", "factory": "0.8.9"},
+            )["engine"]
+
+        compare.assert_not_called()
+        self.assertEqual(engine["installed_sha"], "unknown")
+        self.assertEqual(engine["commits_ahead"], "unknown")
+        self.assertEqual(engine["commits_behind"], "unknown")
+
+    def test_missing_or_unknown_receipt_or_config_reports_identity_unknown(self) -> None:
+        receipt = host.factory_tool_paths()[0] / "uv-receipt.toml"
+        cases = (
+            ("missing receipt", SHA, None),
+            ("unknown receipt", SHA, "unknown"),
+            ("missing config sha", None, SHA),
+            ("unknown config sha", "unknown", SHA),
+        )
+        for name, recorded, installed in cases:
+            with self.subTest(name=name):
+                data = host.load()
+                if recorded is None:
+                    data["defaults"]["engine"].pop("sha")
+                else:
+                    data["defaults"]["engine"]["sha"] = recorded
+                if installed is None:
+                    receipt.unlink(missing_ok=True)
+                else:
+                    self._write_receipt(installed)
+
+                with mock.patch.object(install_state, "commit_counts") as compare:
+                    engine = install_state.collect(
+                        data=data, releases=RELEASES, timers={}, last_apply={},
+                        versions={"district": "0.1.3", "factory": "0.8.9"},
+                    )["engine"]
+
+                compare.assert_not_called()
+                self.assertEqual(engine["installed_sha"], "unknown")
+                self.assertEqual(engine["commits_ahead"], "unknown")
+                self.assertEqual(engine["commits_behind"], "unknown")
 
     def test_engine_policy_reflects_factory_ref_mode(self) -> None:
         versions = {"district": "0.1.4", "factory": "0.4.9"}
@@ -215,6 +272,52 @@ class InstallStateTest(DistrictCase):
         self.assertEqual(document["engine"]["latest_release_sha"], "unknown")
         self.assertEqual(document["engine"]["commits_ahead"], "unknown")
         self.assertEqual(document["engine"]["commits_behind"], "unknown")
+
+    def test_commit_counts_uses_bounded_github_compare(self) -> None:
+        cases = (
+            ("ahead", 2, 0, (2, 0)),
+            ("behind", 0, 3, (0, 3)),
+            ("diverged", 4, 5, (4, 5)),
+            ("identical", 0, 0, (0, 0)),
+        )
+        for status, ahead, behind, expected in cases:
+            response = json.dumps({
+                "status": status, "ahead_by": ahead, "behind_by": behind,
+            })
+            with self.subTest(status=status), mock.patch.object(
+                host, "run",
+                return_value=subprocess.CompletedProcess([], 0, response, ""),
+            ) as run:
+                self.assertEqual(
+                    install_state.commit_counts(
+                        "https://github.com/mikeroySoft/factory", RELEASE_SHA, SHA,
+                    ),
+                    expected,
+                )
+            run.assert_called_once_with(
+                ["gh", "api", f"repos/mikeroySoft/factory/compare/{RELEASE_SHA}...{SHA}"],
+                timeout=install_state.RELEASE_TIMEOUT,
+            )
+
+    def test_commit_counts_reports_unknown_for_failed_or_invalid_compare(self) -> None:
+        invalid = (
+            subprocess.CompletedProcess([], 1, "", "offline"),
+            subprocess.CompletedProcess([], 0, "not json", ""),
+            subprocess.CompletedProcess([], 0, json.dumps({"status": "ahead"}), ""),
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "status": "ahead", "ahead_by": -1, "behind_by": 0,
+            }), ""),
+            subprocess.CompletedProcess([], 0, json.dumps({
+                "status": "identical", "ahead_by": 1, "behind_by": 0,
+            }), ""),
+        )
+        for response in invalid:
+            with self.subTest(response=response), mock.patch.object(
+                host, "run", return_value=response,
+            ):
+                self.assertIsNone(install_state.commit_counts(
+                    "https://github.com/mikeroySoft/factory", RELEASE_SHA, SHA,
+                ))
 
     def test_lock_contended_apply_does_not_claim_timer_reenables(self) -> None:
         states = {"factory-widgets.timer": timer("active"), "district-apply.timer": timer("active")}

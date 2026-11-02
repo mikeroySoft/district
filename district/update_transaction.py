@@ -1,8 +1,8 @@
 """Stdlib-only transaction driver for ``district update``.
 
-This file and ``service.py`` are copied outside the managed environment before
-execution. They use only the standard library because the environment being
-replaced may be absent or broken during recovery.
+This file, ``service.py`` and ``systemd.py`` are copied outside the managed
+environment before execution. The bundle uses only the standard library because
+the managed environment may be absent or broken during recovery.
 """
 
 from __future__ import annotations

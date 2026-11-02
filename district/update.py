@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from district import host, service
+from district import host, service, systemd
 from district import update_transaction as transaction
 
 REPOSITORY = "mikeroySoft/district"
@@ -426,7 +426,8 @@ def operation_lock():
 
 def install_helper(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
-    for source, name in ((Path(transaction.__file__), "transaction.py"), (Path(service.__file__), "service.py")):
+    for source, name in ((Path(transaction.__file__), "transaction.py"),
+                         (Path(service.__file__), "service.py"), (Path(systemd.__file__), "systemd.py")):
         target = root / name
         temp = root / f".{name}.{os.getpid()}.tmp"
         shutil.copy2(source, temp)
