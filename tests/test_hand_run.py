@@ -289,6 +289,29 @@ class HandRunTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "approved")
 
+    def test_source_from_empty_directory_rejects_live_dependency(self):
+        (self.source / "empty").mkdir()
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        fragment.chmod(0o644)
+        self.script.write_text("#!/bin/bash\ncd empty; source ../settings.inc\n")
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/tmp/external-live.sh", result.stderr)
+        self.assertIn("settings.inc", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
+    def test_source_before_multiline_quote_rejects_live_dependency(self):
+        fragment = self.source / "settings.inc"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        fragment.chmod(0o644)
+        self.script.write_text("#!/bin/bash\nsource ./settings.inc; printf '%s\\n' 'starting\ntasks'\n")
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("/tmp/external-live.sh", result.stderr)
+        self.assertIn("settings.inc", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
