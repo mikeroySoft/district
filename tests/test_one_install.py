@@ -1135,6 +1135,34 @@ class OneInstallTest(unittest.TestCase):
                 self.assertEqual(observed[-1], exhausted_at)
                 self.assertEqual(host.engine(self.data, "local").get("paused_timers", []), [])
 
+    def test_slow_service_probes_share_the_idle_deadline(self):
+        self.data["defaults"]["engine_idle_timeout"] = "5s"
+        self.backend.factory_units.return_value = {
+            "factory-first.service", "factory-second.service", "factory-widgets.timer",
+        }
+        clock = [0.0]
+        original_active = self.is_active
+
+        def slow_service(name, **kwargs):
+            if name.endswith(".service") and "factory-widgets.timer" not in self.active:
+                duration = 3
+                timeout = kwargs["timeout"]
+                clock[0] += min(duration, timeout)
+                if timeout <= duration:
+                    raise subprocess.TimeoutExpired(name, timeout)
+            return original_active(name, **kwargs)
+
+        self.backend.is_active.side_effect = slow_service
+        record = install_state.ApplyRun("", "", OLD)
+        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+            result = self.reconcile(record=record)
+        self.assertLessEqual(clock[0], 5)
+        self.assertEqual(result, "deferred")
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(host.engine(host.load(), "local")["sha"], OLD)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(record.reenabled, record.disabled)
+
     def test_remote_window_sync_and_restoration_stalls_are_bounded_and_recoverable(self):
         self.data["hosts"] = {"remote": {"ssh": "fake"}}
         self.data["defaults"]["engine_idle_timeout"] = "5s"
