@@ -540,6 +540,14 @@ class RemoteRunner:
             # the controller's deadline. The remote watchdog must expire first.
             limit = max(0, timeout - min(SSH_CONNECT_TIMEOUT, timeout / 2))
             command = shlex.join(["python3", "-c", REMOTE_DEADLINE, str(limit), marker, command])
+        # Only fixed syntax and base64 reach the login shell; even fish preserves
+        # them. Exec keeps stdin available to the command (including config writes).
+        payload = base64.b64encode(command.encode()).decode("ascii")
+        command = (
+            'python3 -c "import base64,os,sys;'
+            'os.execv(sys.argv[1],[sys.argv[1],sys.argv[2],base64.b64decode(sys.argv[3])])" '
+            f"/bin/sh -c {payload}"
+        )
         ssh = [
             "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
             self.target, "--", command,

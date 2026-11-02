@@ -191,6 +191,10 @@ an unverifiable executable rather than guessing from a potentially stale unit fi
 The retained self-update/recovery bundle includes that decoder and remains
 stdlib-only, independent of the managed environment being replaced.
 Remote commands use noninteractive SSH with a ten-second connection timeout.
+The complete POSIX command script (including environment, working directory, and
+deadline wrapper) is base64-encoded and executed by `/bin/sh` through Python.
+The SSH login shell sees only a fixed launcher and encoded data, so fish and
+POSIX login shells preserve argument quotes, backslashes, and stdin identically.
 Remote hosts need Python >=3.11 as `python3`, plus Factory, `uv`, git, and authenticated `gh`
 on their noninteractive PATH. Commands with execution deadlines also run a
 remote Python watchdog that kills the command's process group on timeout.

@@ -8,6 +8,7 @@ import unittest
 
 from district import host, service, systemd, update_transaction
 from tests import test_one_install as fixtures
+from tests.remote_transport import remote_command
 
 
 class SystemdPathsTest(unittest.TestCase):
@@ -77,7 +78,7 @@ class SystemdPathsTest(unittest.TestCase):
             with self.subTest(remote=remote):
                 if remote:
                     def transport(argv, **kwargs):
-                        parts = shlex.split(argv[-1])
+                        parts = shlex.split(remote_command(argv))
                         if parts[:2] == ['python3', '-c'] and parts[2] == host.REMOTE_DEADLINE:
                             parts = shlex.split(parts[-1])
                         return manager(parts, **kwargs)

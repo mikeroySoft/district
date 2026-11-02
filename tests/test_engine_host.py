@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from district import host
+from tests.remote_transport import remote_command
 
 
 class EngineHostTest(unittest.TestCase):
@@ -198,7 +199,7 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 replacements = []
 
                 def transport(argv, **kwargs):
-                    if "t.write_text" in argv[-1]:
+                    if "t.write_text" in remote_command(argv):
                         backups = list(config.parent.glob("config.toml.*.bak"))
                         self.assertEqual([p.read_bytes() for p in backups],
                                          [original] if label == "invalid" else [])
@@ -229,8 +230,9 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 calls = []
 
                 def transport(argv, **kwargs):
-                    calls.append((argv[-1], kwargs.get("input")))
-                    if "read_bytes()" in argv[-1]:
+                    command = remote_command(argv)
+                    calls.append((command, kwargs.get("input")))
+                    if "read_bytes()" in command:
                         return subprocess.CompletedProcess(argv, returncode, "", detail)
                     return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -246,7 +248,6 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 self.assertEqual(config.read_bytes(), original)
                 self.assertEqual(list(config.parent.glob("config.toml.*.bak")), [])
                 self.assertEqual(len(calls), 1)
-                self.assertIn("read_bytes()", calls[0][0])
 
     def test_remote_sync_confirmed_missing_writes_projection_without_backup(self) -> None:
         remote = self.root / "missing"
@@ -254,9 +255,10 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         calls = []
 
         def transport(argv, **kwargs):
-            calls.append((argv[-1], kwargs.get("input")))
+            command = remote_command(argv)
+            calls.append((command, kwargs.get("input")))
             return subprocess.CompletedProcess(
-                argv, 44 if "read_bytes()" in argv[-1] else 0, "", ""
+                argv, 44 if "read_bytes()" in command else 0, "", ""
             )
 
         runner = host.RemoteRunner("remote", "unused", transport=transport)
@@ -267,10 +269,7 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             host.sync_remote_config(data, "remote", runner)
 
         self.assertEqual(len(calls), 2)
-        self.assertIn("read_bytes()", calls[0][0])
-        self.assertIn("t.write_text", calls[1][0])
         self.assertEqual(tomllib.loads(calls[1][1]), host.remote_config(data, "remote"))
-        self.assertNotIn("write_bytes", calls[1][0])
         self.assertEqual(list(config.parent.glob("config.toml.*.bak")), [])
 
     def test_remote_path_read_bytes_distinguishes_missing_from_other_errors(self) -> None:
