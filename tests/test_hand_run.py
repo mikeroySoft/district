@@ -470,6 +470,28 @@ class HandRunTest(unittest.TestCase):
                 self.assertIn("sourced", result.stderr)
                 self.assertFalse(self.launch_log.exists())
 
+    def test_sourced_directory_change_rechecks_other_sources(self):
+        external = self.home / "external"
+        external.mkdir()
+        (external / "settings.inc").write_text("printf 'live\\n'\n")
+        (self.source / "jump.inc").write_text(f'cd "{external}"\n')
+        self.script.write_text("#!/bin/bash\nsource ./jump.inc; source ./settings.inc\n")
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("settings.inc", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
+    def test_interpreter_option_operands_do_not_hide_scripts(self):
+        helper = self.source / "helper"
+        for invocation in ("bash -O extglob ./helper", "python3 -X dev ./helper"):
+            with self.subTest(invocation=invocation):
+                helper.write_text("import subprocess\nsubprocess.run(['bash', '/tmp/external-live.sh'])\n"
+                                  if invocation.startswith("python") else "bash /tmp/external-live.sh\n")
+                self.script.write_text(f"#!/bin/bash\n{invocation}\n")
+                result = self.command("launch", "532-chain", self.script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
