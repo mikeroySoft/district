@@ -1,0 +1,13 @@
+; Factory 0.4.6 Tank-style pass unit from issue #160.
+; Host paths are templated; environment is reduced for isolated tests.
+[Unit]
+Description=factory triage + dispatcher for mikeroySoft/district (one pass)
+
+[Service]
+Type=oneshot
+WorkingDirectory={repo}
+Environment=PATH={cli_bin}
+Environment=HOME={home}
+ExecStart=-{tool}/bin/python -P -m factory triage
+ExecStart={tool}/bin/python -P -m factory dispatch
+ExecStopPost=-{tool}/bin/python -P -m factory watch

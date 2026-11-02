@@ -351,6 +351,78 @@ class OneInstallTest(unittest.TestCase):
                 # Owners can touch read-only files; pin mtime to catch write-through locally too.
                 self.assertEqual(outside_python.stat().st_mtime, 1)
 
+    def tank_rendered(self):
+        body = (Path(__file__).parent / "fixtures/factory-district.service").read_text()
+        return "factory-widgets.service", body.format(
+            repo=self.repo, cli_bin=self.cli.parent, home=Path.home(), tool=self.tool)
+
+    def test_tank_oneshot_render_checks_allow_install(self):
+        self.rendered = self.tank_rendered
+        name, body = self.rendered()
+        output = f"# {name}\n{body}"
+        self.assertEqual(apply._render_errors(output, self.tool, self.cli, None), [])
+        errors = {}
+        self.assertEqual(apply.plan_apply(
+            self.data["repo"], self.backend, run_cmd=self.run_cmd, errors=errors),
+            {"acme/widgets": True})
+        self.assertEqual(errors, {})
+
+    def test_tank_oneshot_apply_runs_factory_install(self):
+        self.rendered = self.tank_rendered
+        self.assertEqual(self.apply(), 0, self.output.getvalue())
+        self.assertIn(([str(self.cli), "install"], self.repo),
+                      [(argv, kwargs.get("cwd")) for argv, kwargs in self.calls])
+        self.assertNotIn("missing Factory argv", self.output.getvalue())
+
+    def test_tank_oneshot_rollback_runs_factory_install(self):
+        self.rendered = self.tank_rendered
+        self.install_receipt(TARGET)
+        self.data["defaults"]["engine"] = {"sha": TARGET, "ref": "main"}
+        self.compare_status = "behind"
+        host.save(self.data)
+        args = argparse.Namespace(slug=None, reset=None, upgrade=OLD, allow_downgrade=True)
+        self.assertEqual(apply._run(args, install_state.ApplyRun("", "", TARGET)), 0,
+                         self.output.getvalue())
+        self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
+        self.assertIn(([str(self.cli), "install"], self.repo),
+                      [(argv, kwargs.get("cwd")) for argv, kwargs in self.calls])
+        self.assertNotIn("missing Factory argv", self.output.getvalue())
+
+    def test_tank_oneshot_rejects_each_outside_execstart(self):
+        name, body = self.tank_rendered()
+        for verb in ("triage", "dispatch"):
+            for executable in ("/outside/bin/python", "/usr/bin/env factory"):
+                with self.subTest(verb=verb, executable=executable):
+                    offending = f"{executable} -P -m factory {verb}"
+                    invalid = body.replace(f"{self.tool}/bin/python -P -m factory {verb}", offending)
+                    errors = apply._render_errors(f"# {name}\n{invalid}", self.tool, self.cli, None)
+                    self.assertEqual(len(errors), 1)
+                    self.assertIn(name, errors[0])
+                    self.assertIn(offending, errors[0])
+        invalid = body.replace(f"{self.tool}/bin/python", "/outside/bin/python")
+        errors = apply._render_errors(f"# {name}\n{invalid}", self.tool, self.cli, None)
+        self.assertEqual(len(errors), 2)
+        self.assertIn("/outside/bin/python -P -m factory triage", errors[0])
+        self.assertIn("/outside/bin/python -P -m factory dispatch", errors[1])
+
+    def test_tank_oneshot_accepts_systemd_exec_prefixes(self):
+        name, body = self.tank_rendered()
+        for prefix in ("", "-", "@", ":", "+", "!", "!!", "-@:", "-+"):
+            for command in (f"{self.tool}/bin/python -P -m factory",
+                            f"{self.tool}/bin/python -m factory", str(self.cli)):
+                with self.subTest(prefix=prefix, command=command):
+                    prefixed = body.replace("ExecStart=-", "ExecStart=")
+                    prefixed = prefixed.replace(
+                        f"ExecStart={self.tool}/bin/python -P -m factory", f"ExecStart={prefix}{command}")
+                    self.assertEqual(apply._render_errors(
+                        f"# {name}\n{prefixed}", self.tool, self.cli, None), [])
+
+    def test_tank_oneshot_without_execstart_reports_missing_argv(self):
+        name, body = self.tank_rendered()
+        body = "\n".join(line for line in body.splitlines() if not line.startswith("ExecStart="))
+        self.assertEqual(apply._render_errors(f"# {name}\n{body}", self.tool, self.cli, None),
+                         [f"{name}: missing Factory argv"])
+
     def test_restore_verification_failure_names_paused_timers_and_retries_on_next_apply(self):
         for fleet in (False, True):
             for failure in ("unreadable-receipt", "mismatched-receipt", "cli-ownership", "version", "timeout"):
