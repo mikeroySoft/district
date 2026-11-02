@@ -218,6 +218,76 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 self.assertEqual([p.read_bytes() for p in backups],
                                  [original] if label == "invalid" else [])
 
+    def test_remote_sync_read_failures_preserve_config_without_writes(self) -> None:
+        for returncode, detail in ((13, "Permission denied"), (5, "Input/output error")):
+            with self.subTest(detail=detail):
+                remote = self.root / f"read-error-{returncode}"
+                config = remote / "config/factory/config.toml"
+                config.parent.mkdir(parents=True)
+                original = b'[defaults]\nfactory_ref = "keep-me"\n'
+                config.write_bytes(original)
+                calls = []
+
+                def transport(argv, **kwargs):
+                    calls.append((argv[-1], kwargs.get("input")))
+                    if "read_bytes()" in argv[-1]:
+                        return subprocess.CompletedProcess(argv, returncode, "", detail)
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+
+                runner = host.RemoteRunner("remote", "unused", transport=transport)
+                data = {"defaults": {"factory_ref": "main"}, "hosts": {"remote": {}}}
+                with mock.patch.object(
+                    runner, "facts", return_value={"config_home": str(remote / "config")}
+                ), self.assertRaises(host.DistrictError) as raised:
+                    host.sync_remote_config(data, "remote", runner)
+
+                self.assertIn("remote", str(raised.exception))
+                self.assertIn(str(config), str(raised.exception))
+                self.assertEqual(config.read_bytes(), original)
+                self.assertEqual(list(config.parent.glob("config.toml.*.bak")), [])
+                self.assertEqual(len(calls), 1)
+                self.assertIn("read_bytes()", calls[0][0])
+
+    def test_remote_sync_confirmed_missing_writes_projection_without_backup(self) -> None:
+        remote = self.root / "missing"
+        config = remote / "config/factory/config.toml"
+        calls = []
+
+        def transport(argv, **kwargs):
+            calls.append((argv[-1], kwargs.get("input")))
+            return subprocess.CompletedProcess(
+                argv, 44 if "read_bytes()" in argv[-1] else 0, "", ""
+            )
+
+        runner = host.RemoteRunner("remote", "unused", transport=transport)
+        data = {"defaults": {"factory_ref": "main"}, "hosts": {"remote": {}}}
+        with mock.patch.object(
+            runner, "facts", return_value={"config_home": str(remote / "config")}
+        ):
+            host.sync_remote_config(data, "remote", runner)
+
+        self.assertEqual(len(calls), 2)
+        self.assertIn("read_bytes()", calls[0][0])
+        self.assertIn("t.write_text", calls[1][0])
+        self.assertEqual(tomllib.loads(calls[1][1]), host.remote_config(data, "remote"))
+        self.assertNotIn("write_bytes", calls[1][0])
+        self.assertEqual(list(config.parent.glob("config.toml.*.bak")), [])
+
+    def test_remote_path_read_bytes_distinguishes_missing_from_other_errors(self) -> None:
+        def local_runner(argv, **kwargs):
+            return subprocess.run(
+                argv, capture_output=True, text=True, timeout=kwargs.get("timeout"), check=False
+            )
+
+        missing = host.RemotePath(local_runner, self.root / "absent")
+        with self.assertRaises(FileNotFoundError):
+            missing.read_bytes()
+
+        directory = host.RemotePath(local_runner, self.root)
+        with self.assertRaises(OSError) as raised:
+            directory.read_bytes()
+        self.assertNotIsInstance(raised.exception, FileNotFoundError)
+
 
 if __name__ == "__main__":
     unittest.main()

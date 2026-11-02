@@ -478,8 +478,15 @@ class RemotePath:
         return proc.stdout
 
     def read_bytes(self, *, timeout: float = 10) -> bytes:
-        script = "import base64,pathlib,sys; print(base64.b64encode(pathlib.Path(sys.argv[1]).read_bytes()).decode())"
+        script = (
+            "import base64,pathlib,sys\n"
+            "try:\n data=pathlib.Path(sys.argv[1]).read_bytes()\n"
+            "except FileNotFoundError:\n raise SystemExit(44)\n"
+            "print(base64.b64encode(data).decode())"
+        )
         proc = self.runner(["python3", "-c", script, str(self)], timeout=timeout)
+        if proc.returncode == 44:
+            raise FileNotFoundError(f"cannot read {self}: no such file")
         if proc.returncode:
             raise OSError(proc.stderr.strip() or f"cannot read {self}")
         return base64.b64decode(proc.stdout)
@@ -664,9 +671,11 @@ def sync_remote_config(data: dict, name: str, runner: RemoteRunner, *, deadline:
         stored = tomllib.loads(original.decode())
     except UnicodeDecodeError as exc:
         raise DistrictError(f"{name}: invalid UTF-8 in {config_path}") from exc
-    except OSError:
+    except FileNotFoundError:
         original = None
         stored = {}
+    except OSError as exc:
+        raise DistrictError(f"{name}: cannot read {config_path}: {exc}") from exc
     except tomllib.TOMLDecodeError:
         stored = None  # Successfully read bytes still need preservation before replacement.
     if original is not None and (stored is None or _has_factory_source(stored)):
