@@ -23,8 +23,6 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Iterable
-from typing import Literal
 
 from district import host, install_state, systemd
 from district.engine_cleanup import cleanup
@@ -362,14 +360,29 @@ for pid in {p.name for p in root.iterdir() if p.name.isdigit()} | commands.keys(
             argv = [os.fsdecode(word) for word in raw[:-1].split(b'\0')] if raw.endswith(b'\0') else None
         except OSError:
             argv = None
+        try:
+            cwd = os.readlink(directory / 'cwd')
+        except OSError:
+            cwd = None
         after = (directory / 'stat').read_text().rsplit(')', 1)[1].split()
-        if stat[19] != after[19]:
+        if (stat[19], stat[1]) != (after[19], after[1]):
             raise RuntimeError(f"pid {pid} process identity changed")
-        rows[pid] = [stat[19], stat[1], argv, commands.get(pid, '')]
+        rows[pid] = [stat[19], stat[1], argv, commands.get(pid, ''), cwd]
     except FileNotFoundError:
         continue
     except (OSError, IndexError):
-        rows[pid] = ['', '', None, commands.get(pid, '')]
+        raise RuntimeError(f"pid {pid} process identity unavailable")
+observer = str(os.getpid())
+seen = set()
+while observer in rows:
+    if observer in seen:
+        raise RuntimeError("observer ancestry cycle")
+    seen.add(observer)
+    observer = rows[observer][1]
+if seen and observer not in ('0', '1'):
+    raise RuntimeError("observer ancestry unavailable")
+for pid in seen:
+    del rows[pid]
 print(json.dumps(rows))
 """
     proc = runner(["python3", "-c", script, json.dumps(commands)], timeout=remaining_timeout(deadline))
@@ -379,8 +392,10 @@ print(json.dumps(rows))
     if not isinstance(rows, dict):
         raise ValueError("invalid Linux process observations")
     for pid, row in rows.items():
-        if (not pid.isdigit() or not isinstance(row, list) or len(row) != 4
+        if (not pid.isdigit() or not isinstance(row, list) or len(row) != 5
                 or not all(isinstance(value, str) for value in (row[0], row[1], row[3]))
+                or not row[0].isdigit() or not row[1].isdigit()
+                or row[4] is not None and (not isinstance(row[4], str) or not row[4].startswith("/"))
                 or row[2] is not None and (not isinstance(row[2], list)
                                           or not all(isinstance(word, str) for word in row[2]))):
             raise ValueError("invalid Linux process observation")
@@ -406,30 +421,80 @@ def _ps_identities(output: str) -> tuple[dict, list[tuple[str, str]]]:
     return identities, commands
 
 
-def _factory_processes(tool: Path, cli: Path, run_cmd, *, platform: str, deadline: float) -> tuple[list[str], dict]:
-    real_tool, real_cli = _resolved_paths([tool, cli], run_cmd, timeout=remaining_timeout(deadline))
-    tool_bins = {tool / "bin", real_tool / "bin"}
-    launchers = {str(cli), str(real_cli), *(str(directory / "factory") for directory in tool_bins)}
-    paths = {str(tool), str(real_tool), *launchers}
-    busy = []
+@dataclass
+class _ProcessObservation:
+    pid: str
+    argv: list[str] | None
+    text: str
+    cwd: str | None
+    owner: str | None = None
+
+
+def _factory_work(process: _ProcessObservation, tools: set[str], launchers: set[str],
+                  roots: set[str], dashboards: set[str]) -> str | None:
+    """Fail closed on lexical evidence, without interpreting launch grammars."""
+    if process.owner in dashboards:
+        return None
+    words = process.argv or process.text.split()
+    relative = False
+    for index, token in enumerate(words):
+        name = token[2:] if token.startswith("-m") else token
+        paths = ([token] if index == 0 or not token.startswith("-") else
+                 [token.split("=", 1)[1]] if token.startswith("--") and "=" in token else [])
+        for value in paths:
+            if not value or value in ("-", "--"):
+                continue
+            if not os.path.isabs(value):
+                relative |= "/" in value
+                if process.cwd is None:
+                    continue
+                value = os.path.join(process.cwd, value)
+            path = os.path.normpath(value)
+            if path in launchers or any(path == root or path.startswith(root + "/") for root in tools):
+                return f"factory path {path}"
+        if "factory" in name.split("/") or name == "factory" or name.startswith("factory."):
+            return f"factory name {token}"
+    if not process.argv and any(path in process.text for path in tools | launchers):
+        return "factory path in fallback text"
+    if process.cwd is not None:
+        cwd = os.path.normpath(process.cwd)
+        for root in sorted(roots | tools):
+            if cwd == root or cwd.startswith(root + "/"):
+                return f"cwd in {root}"
+    elif process.argv and relative:
+        return "cwd unavailable for relative argv"
+    return None
+
+
+_MACOS_PROCESSES = 'echo "$$"; exec env LC_ALL=C ps -ww -eo pid=,ppid=,lstart=,args='
+
+
+def _factory_processes(run_cmd, *, platform: str, deadline: float) -> tuple[list[_ProcessObservation], dict]:
     if platform == "linux":
         rows = _linux_processes(run_cmd, deadline=deadline)
-        identities = {pid: row[:2] for pid, row in rows.items()}
-        for pid, (_, _, argv, text) in rows.items():
-            work = (_factory_work(argv, tool_bins, launchers) if argv
-                    else "ambiguous Factory command text" if any(path in text for path in paths) else None)
-            if work:
-                busy.append(f"pid {pid} {work}")
-        return busy, identities
+        return ([_ProcessObservation(pid, row[2], row[3], row[4]) for pid, row in rows.items()],
+                {pid: row[:2] for pid, row in rows.items()})
     if platform != "macos":
         raise ValueError(f"unsupported process observation platform: {platform}")
-    proc = run_cmd(["env", "LC_ALL=C", "ps", "-ww", "-eo", "pid=,ppid=,lstart=,args="],
+    # exec preserves the shell PID, so the listing and its observer share an identity.
+    proc = run_cmd(["sh", "-c", _MACOS_PROCESSES],
                    timeout=remaining_timeout(deadline))
     if proc.returncode:
         raise OSError(proc.stderr.strip() or "cannot inspect Factory processes")
-    identities, commands = _ps_identities(proc.stdout)
-    return [f"pid {pid} ambiguous Factory command text" for pid, text in commands
-            if any(path in text for path in paths)], identities
+    observer, output = proc.stdout.split("\n", 1)
+    if not observer.isdigit():
+        raise ValueError("invalid macOS observer pid")
+    identities, commands = _ps_identities(output)
+    ancestors = set()
+    while observer in identities:
+        if observer in ancestors:
+            raise ValueError("observer ancestry cycle")
+        ancestors.add(observer)
+        observer = identities[observer][1]
+    if ancestors and observer not in ("0", "1"):
+        raise ValueError("observer ancestry unavailable")
+    return ([_ProcessObservation(pid, None, text, None) for pid, text in commands if pid not in ancestors],
+            identities)
 
 
 def _managed_processes(processes: list[str], identities: dict, runner, backend, repos: dict,
@@ -499,9 +564,22 @@ def _managed_processes(processes: list[str], identities: dict, runner, backend, 
 
 def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> tuple[list[str], list[str]]:
     try:
-        processes, identities = _factory_processes(
-            tool, cli, runner, platform=backend.configuration().get("platform"), deadline=deadline)
-    except ValueError as exc:
+        real_tool, real_cli = _resolved_paths([tool, cli], runner, timeout=remaining_timeout(deadline))
+        tools = {os.path.normpath(str(path)) for path in (tool, real_tool)}
+        launchers = {str(cli), str(real_cli)}
+        data_home = (runner.facts(timeout=remaining_timeout(deadline))["data_home"]
+                     if isinstance(runner, host.RemoteRunner) else
+                     os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share"))
+        roots = {os.path.normpath(str(Path(data_home) / "district/roots")),
+                 *(os.path.normpath(str(repo["path"])) for repo in repos.values() if repo.get("path"))}
+        mains, dashboards = _engine_roles(repos)
+        observations, identities = _factory_processes(
+            runner, platform=backend.configuration().get("platform"), deadline=deadline)
+        candidates = [(process, reason) for process in observations
+                      if (reason := _factory_work(process, tools, launchers, roots, dashboards))]
+        processes = [f"pid {process.pid} {reason}" for process, reason in candidates]
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
+            host.RemoteHostError) as exc:
         unknown = [f"Factory process observation unavailable: {exc}"]
         return unknown, unknown
     if not processes:
@@ -512,12 +590,16 @@ def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadli
     except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
             host.RemoteHostError) as exc:
         return [f"Factory process ownership unavailable: {exc}", *processes], processes
-    mains, dashboards = _engine_roles(repos)
-    processes = [work for work in processes if not (
-        work.endswith("ambiguous Factory command text") and owners.get(work.split()[1]) in dashboards)]
-    outside = [work for work in processes
-               if owners.get(work.split()[1]) not in mains
-               and work.endswith(("factory gate", "factory dispatch", "ambiguous Factory command text"))]
+    processes = []
+    outside = []
+    for process, reason in candidates:
+        process.owner = owners.get(process.pid)
+        if _factory_work(process, tools, launchers, roots, dashboards) is None:
+            continue
+        work = f"pid {process.pid} {reason}"
+        processes.append(work)
+        if process.owner not in mains:
+            outside.append(work)
     return outside, processes
 
 
@@ -1094,70 +1176,6 @@ def busy_units(services: list[str], backend=None, *, timeout: float | None = Non
     kwargs = {"timeout": timeout} if timeout is not None else {}
     return [service for service in services
             if backend.is_active(service, **kwargs) in ("active", "activating", "deactivating")]
-
-
-@dataclass(frozen=True)
-class _PythonEntrypoint:
-    kind: Literal["script", "module", "command", "stdin", "none"]
-    target: str | None = None
-    args: tuple[str, ...] = ()
-
-
-# Value-taking options end a short-option group; only c/m select an entrypoint.
-_PYTHON_VALUE_OPTIONS = {"c": "command", "m": "module", "W": None, "X": None,
-                         "--check-hash-based-pycs": None}
-
-
-def _python_entrypoint(argv: Iterable[str]) -> _PythonEntrypoint:
-    """Parse exact CPython argv once, keeping script/module/command boundaries distinct."""
-    args = iter(argv)
-    for arg in args:
-        if arg == "--":
-            target = next(args, None)
-            return (_PythonEntrypoint("script", target, tuple(args)) if target is not None
-                    else _PythonEntrypoint("none"))
-        if arg == "-":
-            return _PythonEntrypoint("stdin", args=tuple(args))
-        if not arg.startswith("-"):
-            return _PythonEntrypoint("script", arg, tuple(args))
-        if arg.startswith("--"):
-            if arg in _PYTHON_VALUE_OPTIONS:
-                next(args, None)
-            continue  # Long flags (including unknown ones) consume no following value.
-        for index, flag in enumerate(arg[1:], 2):
-            if flag not in _PYTHON_VALUE_OPTIONS:
-                continue  # Short flags may repeat or group, e.g. -bBOO.
-            value = arg[index:] or next(args, None)
-            kind = _PYTHON_VALUE_OPTIONS[flag]
-            if kind is not None:
-                return _PythonEntrypoint(kind, value, tuple(args))
-            break
-    return _PythonEntrypoint("none")
-
-
-def _python_factory_args(executable: str, words: Iterable[str], tool_bins: set[Path],
-                         launchers: set[str]) -> list[str]:
-    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(executable).name):
-        return []
-    entrypoint = _python_entrypoint(words)
-    if entrypoint.kind == "script" and entrypoint.target in launchers:
-        return list(entrypoint.args)
-    if (entrypoint.kind == "module" and entrypoint.target == "factory"
-            and Path(executable).parent in tool_bins):
-        return list(entrypoint.args)
-    return []
-
-
-def _factory_work(argv: list[str], tool_bins: set[Path], launchers: set[str]) -> str | None:
-    """Classify exact argv only; command text is never tokenized."""
-    executable, *words = argv
-    if executable in launchers or executable == "factory":
-        args = words
-    else:
-        args = _python_factory_args(executable, words, tool_bins, launchers)
-    if args and args[0] != "dashboard":
-        return f"factory {args[0]}"
-    return None
 
 
 def _busy_handland(backend, run_cmd, *, timeout: float) -> list[str]:

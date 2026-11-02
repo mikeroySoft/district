@@ -83,6 +83,8 @@ class EngineUnitRolesTest(unittest.TestCase):
                     (directory / "cgroup").write_text(
                         f"0::/user/{owner}/child\n" if pid == "123" else "0::/user/session.scope\n"
                     )
+                    (directory / "cwd").unlink(missing_ok=True)
+                    (directory / "cwd").symlink_to("/tmp", target_is_directory=True)
                     argv = ([str(case.tool / "bin/python"), "-m", "factory", "dispatch"]
                             if pid == "123" and live else [])
                     (directory / "cmdline").write_bytes(
@@ -111,6 +113,9 @@ class EngineUnitRolesTest(unittest.TestCase):
 
             def commands(argv, **kwargs):
                 raw = list(argv)
+                macos_observer = argv == ["sh", "-c", apply._MACOS_PROCESSES]
+                if macos_observer:
+                    argv = ["ps", "-ww", "-eo", "pid=,ppid=,lstart=,args="]
                 if argv[:3] == ["env", "LC_ALL=C", "ps"]:
                     argv = argv[2:]
                 if argv[0] == "ps":
@@ -124,7 +129,9 @@ class EngineUnitRolesTest(unittest.TestCase):
                             rows = [f"123 {command}".rstrip()] if command else []
                         if paused():
                             post_pause_observations[0] += 1
-                        return subprocess.CompletedProcess(raw, 0, "\n".join(rows) + ("\n" if rows else ""), "")
+                        output = "\n".join(rows) + ("\n" if rows else "")
+                        return subprocess.CompletedProcess(
+                            raw, 0, ("900\n" if macos_observer else "") + output, "")
                     return subprocess.CompletedProcess(
                         raw, 0,
                         "123 42 Thu Nov 12 00:00:00 2026\n42 1 Thu Nov 12 00:00:00 2026\n", "")
@@ -156,6 +163,7 @@ class EngineUnitRolesTest(unittest.TestCase):
                     if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                         parts = shlex.split(parts[-1])
                     if (parts[0] == "ps" or parts[:3] == ["env", "LC_ALL=C", "ps"]
+                            or parts == ["sh", "-c", apply._MACOS_PROCESSES]
                             or parts[:2] in (["systemctl", "--user"], ["launchctl", "list"])
                             or parts[:2] == ["python3", "-c"] and "/proc" in parts[2]):
                         return commands(parts, **kwargs)

@@ -18,7 +18,7 @@ class ProcessObservationTest(unittest.TestCase):
 
     def observation_case(self, *, remote, platform="macos", mode="localized",
                          phase="before", command="dispatch", rollback=False, form="module",
-                         argv_override=None, busy=True):
+                         argv_override=None, cwd_override=None, busy=True, reason_contains=None):
         case = self.case
         if mode == "width":
             case.tool = case.root / ("long-launcher-" + "x" * 120) / "factory"
@@ -72,6 +72,9 @@ class ProcessObservationTest(unittest.TestCase):
 
         def commands(argv, **kwargs):
             raw = list(argv)
+            macos_observer = argv == ["sh", "-c", apply._MACOS_PROCESSES]
+            if macos_observer:
+                argv = ["ps", "-ww", "-eo", "pid=,ppid=,lstart=,args="]
             if argv[:2] == ["env", "LC_ALL=C"]:
                 argv = argv[2:]
             if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
@@ -81,6 +84,22 @@ class ProcessObservationTest(unittest.TestCase):
                 directory.mkdir(parents=True, exist_ok=True)
                 (directory / "stat").write_text("321 (worker ( odd ) name)) S 1 " + "0 " * 17 + "100 0\n")
                 (directory / "cgroup").write_text("0::/user/session.scope\n")
+                if mode == "observer":
+                    for pid, parent, start in (("901", "902", "101"), ("902", "1", "102")):
+                        observer = root / pid
+                        observer.mkdir(parents=True, exist_ok=True)
+                        (observer / "stat").write_text(
+                            f"{pid} (observer) S {parent} " + "0 " * 17 + f"{start} 0\n")
+                        (observer / "cgroup").write_text("0::/user/session.scope\n")
+                        (observer / "cmdline").write_bytes(
+                            b"/usr/bin/python3\0-m\0factory.__main__\0gate\0")
+                        (observer / "cwd").unlink(missing_ok=True)
+                        (observer / "cwd").symlink_to("/tmp", target_is_directory=True)
+                cwd = directory / "cwd"
+                cwd.unlink(missing_ok=True)
+                if cwd_override is not None:
+                    target_cwd = cwd_override if live else case.root / "outside"
+                    cwd.symlink_to(target_cwd, target_is_directory=True)
                 cmdline = directory / "cmdline"
                 if mode == "unreadable":
                     if cmdline.is_file():
@@ -88,31 +107,39 @@ class ProcessObservationTest(unittest.TestCase):
                     cmdline.mkdir(exist_ok=True)
                 else:
                     cmdline.write_bytes(b"\0".join(word.encode() for word in exact_argv) + b"\0"
-                                        if live and mode != "empty" else b"")
+                                        if live and mode not in ("empty", "observer") else b"")
                 if mode == "vanished":
                     (directory / "stat").unlink(missing_ok=True)
                 probes.append(raw)
-                return subprocess.run([sys.executable, "-c", argv[2].replace("'/proc/'", repr(str(root) + "/")),
-                                       *argv[3:]], capture_output=True, text=True, timeout=kwargs["timeout"])
+                script = argv[2].replace("'/proc/'", repr(str(root) + "/"))
+                if mode == "observer":
+                    script = script.replace("str(os.getpid())", "'901'")
+                return subprocess.run([sys.executable, "-c", script, *argv[3:]],
+                                      capture_output=True, text=True, timeout=kwargs["timeout"])
             if argv[0] == "ps":
                 self.assertGreater(kwargs.get("timeout", 0), 0)
                 self.assertLessEqual(kwargs["timeout"], 5)
                 probes.append(raw)
                 live = late[0] if rollback else phase == "before" or ("pause", "factory-widgets.timer") in case.events
                 if not live:
-                    return subprocess.CompletedProcess(raw, 0, "", "")
+                    return subprocess.CompletedProcess(raw, 0, "900\n" if macos_observer else "", "")
                 text = argv_text
                 if mode == "width" and "-ww" not in argv:
                     text = text[:int(os.environ["COLUMNS"])]
                 if platform == "macos":
                     start = ("木 11/12 00:00:00 2026" if mode == "malformed" or
                              mode == "identity-malformed" and "args=" not in argv[-1] or
-                             mode == "localized" and raw[:2] != ["env", "LC_ALL=C"]
+                             mode == "localized" and raw[:2] != ["env", "LC_ALL=C"] and not macos_observer
                              else "Thu Nov 12 00:00:00 2026")
-                    output = f"321 1 {start}" + (f" {text}" if "args=" in argv[-1] else "")
+                    if mode == "observer":
+                        suffix = f" {text}" if "args=" in argv[-1] else ""
+                        output = f"900 901 {start}{suffix}\n901 1 {start}{suffix}"
+                    else:
+                        output = f"321 1 {start}" + (f" {text}" if "args=" in argv[-1] else "")
                 else:
-                    output = f"321 {text}"
-                return subprocess.CompletedProcess(raw, 0, output + "\n", "")
+                    output = f"901 {text}\n902 {text}" if mode == "observer" else f"321 {text}"
+                return subprocess.CompletedProcess(
+                    raw, 0, ("900\n" if macos_observer else "") + output + "\n", "")
             if argv[:2] == ["launchctl", "list"]:
                 return subprocess.CompletedProcess(raw, 0, "", "")
             if argv[:3] == ["uv", "tool", "install"] and fail[0]:
@@ -130,7 +157,8 @@ class ProcessObservationTest(unittest.TestCase):
                     parts = shlex.split(parts[-1])
                 if parts[:2] == ["python3", "-c"] and "/proc/" in parts[2]:
                     return commands(parts, **kwargs)
-                if parts[0] == "ps" or parts[:3] == ["env", "LC_ALL=C", "ps"]:
+                if (parts[0] == "ps" or parts[:3] == ["env", "LC_ALL=C", "ps"]
+                        or parts == ["sh", "-c", apply._MACOS_PROCESSES]):
                     return commands(parts, **kwargs)
                 return transport(argv, **kwargs)
 
@@ -152,9 +180,9 @@ class ProcessObservationTest(unittest.TestCase):
         self.assertEqual(len(case.installs()), int(rollback), "no uv replacement while work is live")
         reason = case.output.getvalue() if rollback else record.deferred[
             "engine:remote" if remote else "engine"]["reason"]
-        self.assertIn("invalid C-locale ps row" if mode in ("malformed", "identity-malformed")
-                      else "ambiguous Factory command text" if platform == "macos" or mode in ("empty", "unreadable")
-                      else f"pid 321 factory {command}", reason)
+        self.assertIn(reason_contains or (
+            "invalid C-locale ps row" if mode in ("malformed", "identity-malformed")
+            else "pid 321"), reason)
         if not rollback:
             paused = {name for event, name in case.events if event == "pause"}
             self.assertEqual(paused, set() if phase == "before" else
@@ -176,9 +204,13 @@ class ProcessObservationTest(unittest.TestCase):
                          fixtures.TARGET if rollback else fixtures.OLD)
         self.assertTrue(probes)
         if platform == "macos":
-            self.assertTrue(all(argv[:3] == ["env", "LC_ALL=C", "ps"] for argv in probes), probes)
+            self.assertTrue(all(
+                argv[:3] == ["env", "LC_ALL=C", "ps"]
+                or argv == ["sh", "-c", apply._MACOS_PROCESSES] for argv in probes), probes)
             if mode != "malformed":
-                self.assertTrue(any("args=" not in argv[-1] for argv in probes), probes)
+                self.assertTrue(any(
+                    argv == ["sh", "-c", apply._MACOS_PROCESSES]
+                    or "args=" not in argv[-1] for argv in probes), probes)
 
     def test_macos_locale_and_malformed_rows_never_hide_work(self):
         for remote in (False, True):
@@ -237,7 +269,7 @@ class ProcessObservationTest(unittest.TestCase):
                             with self.subTest(platform=platform, form=form, phase=phase,
                                               blocked=blocked, command=command):
                                 self.case.hand_work_fleet(
-                                    f"dashboard-{command}" if platform == "linux" else command, phase=phase, blocked=blocked,
+                                    command, phase=phase, blocked=blocked,
                                     platform=platform, space_paths=True, form=form)
 
     def test_text_only_observations_fail_closed(self):
@@ -271,7 +303,7 @@ class ProcessObservationTest(unittest.TestCase):
                                    ("install", "remote"), ("rollback", "local")):
                 for command in ("gate", "dispatch"):
                     with self.subTest(option=option, phase=phase, blocked=blocked, command=command):
-                        self.case.hand_work_fleet(f"dashboard-{command}", phase=phase, blocked=blocked,
+                        self.case.hand_work_fleet(command, phase=phase, blocked=blocked,
                                                   python_option=option)
 
     def test_python_terminated_launcher_blocks_replacement_and_automatic_rollback(self):
@@ -291,41 +323,139 @@ class ProcessObservationTest(unittest.TestCase):
                     self.case.hand_work_fleet(command, phase=phase, blocked=blocked,
                                               form="terminated-script")
 
-    def test_python_entrypoint_boundaries_with_exact_proc_argv(self):
-        python = str(self.case.tool / "bin/python")
-        launcher = str(self.case.cli)
+    def test_relative_and_equivalent_factory_entrypoints_block_replacement_and_automatic_rollback(self):
+        outside = self.case.root / "outside"
+        tool_bin = self.case.tool / "bin"
         cases = (
-            (["-bBm", "factory", "gate"], True, "gate"),
-            (["-mfactory", "gate"], True, "gate"),
-            (["-Wignore", launcher, "dispatch"], True, "dispatch"),
-            (["-X", "dev", "--", launcher, "gate"], True, "gate"),
-            (["--check-hash-based-pycs", "always", "--", launcher, "gate"], True, "gate"),
-            (["--help-env", "--unknown", "-bBdEiIOOPqRsSuvVx", launcher, "gate"], True, "gate"),
-            (["--", "-m", "factory", "gate"], False, "gate"),
-            (["-", launcher, "gate"], False, "gate"),
-            (["-c", launcher, "gate"], False, "gate"),
-            (["-Ic", launcher, "gate"], False, "gate"),
-            ([f"-c{launcher}", "gate"], False, "gate"),
-            (["--", "/tmp/unrelated.py", "gate"], False, "gate"),
+            (["python", "-m", "factory", "gate"], outside),
+            (["./python", "-m", "factory", "dispatch"], tool_bin),
+            ([str(tool_bin / "python"), "--", "./factory", "gate"], tool_bin),
+            (["/usr/bin/python3", "-m", "factory.__main__", "gate"], outside),
         )
         for remote in (False, True):
-            for args, busy, command in cases:
-                with self.subTest(remote=remote, args=args):
-                    self.observation_case(remote=remote, platform="linux", busy=busy,
-                                          command=command, argv_override=[python, *args])
+            for argv, cwd in cases:
+                for phase in ("before", "after", "rollback"):
+                    with self.subTest(remote=remote, argv=argv, cwd=cwd, phase=phase):
+                        self.observation_case(
+                            remote=remote, platform="linux", argv_override=argv,
+                            cwd_override=cwd, command=argv[-1], phase=phase,
+                            rollback=phase == "rollback", reason_contains="pid 321",
+                        )
 
-    def test_vanished_process_and_exact_dashboard_do_not_block(self):
+    def test_relative_and_equivalent_factory_entrypoints_block_fleet_replacement_and_outer_rollback(self):
+        outside = self.case.root / "outside"
+        tool_bin = self.case.root / "tools/factory/bin"
+        cases = (
+            (["python", "-m", "factory", "gate"], outside, "gate"),
+            (["./python", "-m", "factory", "dispatch"], tool_bin, "dispatch"),
+            ([str(tool_bin / "python"), "--", "./factory", "gate"], tool_bin, "gate"),
+            (["/usr/bin/python3", "-m", "factory.__main__", "gate"], outside, "gate"),
+        )
+        phases = (
+            ("before", "local"), ("before", "remote"),
+            ("after", "local"), ("after", "remote"),
+            ("install", "remote"), ("rollback", "local"),
+        )
+        for argv, cwd, command in cases:
+            for phase, blocked in phases:
+                with self.subTest(argv=argv, cwd=cwd, phase=phase, blocked=blocked):
+                    self.case.hand_work_fleet(
+                        command, phase=phase, blocked=blocked, argv_override=argv,
+                        cwd_override=cwd, reason_contains="pid 321",
+                    )
+
+    def test_factory_path_name_and_cwd_boundaries_with_exact_proc_argv(self):
+        tool_bin = self.case.tool / "bin"
+        tool_python = str(tool_bin / "python")
+        launcher = str(self.case.cli)
+        outside = self.case.root / "outside"
+        cases = (
+            (["/usr/bin/python3", "-m", "factory", "gate"], outside, True, "factory name"),
+            (["/usr/bin/python3", "-mfactory", "gate"], outside, True, "factory name"),
+            (["/usr/bin/python3", "--", "/tmp/factory", "gate"], outside, True, "factory name"),
+            ([tool_python], outside, True, "factory path"),
+            # Former Python-grammar negatives remain BUSY because the managed interpreter,
+            # launcher, or Factory name is sufficient lexical evidence.
+            ([tool_python, "-bBm", "factory", "gate"], outside, True, "factory path"),
+            ([tool_python, "-mfactory", "gate"], outside, True, "factory path"),
+            ([tool_python, "-Wignore", launcher, "dispatch"], outside, True, "factory path"),
+            ([tool_python, "-X", "dev", "--", launcher, "gate"], outside, True, "factory path"),
+            ([tool_python, "--check-hash-based-pycs", "always", "--", launcher, "gate"],
+             outside, True, "factory path"),
+            ([tool_python, "--help-env", "--unknown", "-bBdEiIOOPqRsSuvVx", launcher, "gate"],
+             outside, True, "factory path"),
+            ([tool_python, "--", "-m", "factory", "gate"], outside, True, "factory path"),
+            ([tool_python, "-", launcher, "gate"], outside, True, "factory path"),
+            ([tool_python, "-c", launcher, "gate"], outside, True, "factory path"),
+            ([tool_python, "-Ic", launcher, "gate"], outside, True, "factory path"),
+            ([tool_python, f"-c{launcher}", "gate"], outside, True, "factory path"),
+            ([tool_python, "--", "/tmp/unrelated.py", "gate"], outside, True, "factory path"),
+            (["/usr/bin/python3", f"--root={tool_python}"], outside, True, "factory path"),
+            (["../bin/python"], tool_bin, True, "factory path"),
+            (["./python", "--", "-"], None, True, "cwd unavailable for relative argv"),
+            (["/usr/bin/python3", "--", "-"], tool_bin, True, "cwd in"),
+            (["/usr/bin/python3", "--", "-"], "/tmp", False, None),
+            (["/tmp/factory-other"], outside, False, None),
+            (["/usr/bin/python3", "/tmp/unrelated.py", "gate"], outside, False, None),
+            (["/usr/bin/python3", "-m", "http.server"], "/tmp", False, None),
+            (["/usr/bin/python3"], None, False, None),
+            (["/usr/bin/python3", "/tmp/unrelated.py"], None, False, None),
+            (["/usr/bin/python3", "-c", "print('factory gate')"], outside, False, None),
+        )
         for remote in (False, True):
-            with self.subTest(remote=remote, work="vanished"):
-                self.observation_case(remote=remote, platform="linux", mode="vanished", busy=False)
-            with self.subTest(remote=remote, work="dashboard"):
-                self.observation_case(remote=remote, platform="linux", form="option-X",
-                                      command="dashboard", busy=False)
+            for argv, cwd, busy, reason in cases:
+                with self.subTest(remote=remote, argv=argv, cwd=cwd):
+                    self.observation_case(
+                        remote=remote, platform="linux", busy=busy, argv_override=argv,
+                        cwd_override=cwd, reason_contains=reason,
+                    )
 
-    def test_unrelated_python_scripts_without_managed_paths_stay_idle(self):
+    def test_repo_and_district_cwds_are_busy_on_the_owning_host(self):
+        for remote in (False, True):
+            data_home = self.case.root / ("remote-data" if remote else "data")
+            for cwd in (
+                self.case.repo,
+                self.case.repo / ".factory/wt-41",
+                data_home / "district/roots",
+                data_home / "district/roots/work",
+            ):
+                with self.subTest(remote=remote, cwd=cwd):
+                    self.observation_case(
+                        remote=remote, platform="linux", argv_override=["/usr/bin/sleep", "10"],
+                        cwd_override=cwd, reason_contains="cwd in",
+                    )
+
+    def test_observer_and_ancestor_processes_do_not_block(self):
         for platform in ("linux", "macos"):
             for remote in (False, True):
-                for argv in (["/usr/bin/python3", "-c", "print('factory gate')"],
-                             ["/usr/bin/python3", "/tmp/unrelated.py", "-m", "factory", "dispatch"]):
+                with self.subTest(platform=platform, remote=remote):
+                    self.observation_case(
+                        remote=remote, platform=platform, mode="observer", busy=False,
+                    )
+
+    def test_vanished_process_does_not_block(self):
+        for remote in (False, True):
+            with self.subTest(remote=remote):
+                self.observation_case(remote=remote, platform="linux", mode="vanished", busy=False)
+
+    def test_unowned_dashboard_command_is_busy(self):
+        for remote in (False, True):
+            with self.subTest(remote=remote):
+                self.observation_case(
+                    remote=remote, platform="linux", form="option-X",
+                    command="dashboard", reason_contains="pid 321",
+                )
+
+    def test_factory_name_in_script_arguments_is_busy(self):
+        cases = (
+            (["/usr/bin/python3", "-c", "print('factory gate')"], False),
+            (["/usr/bin/python3", "/tmp/unrelated.py", "-m", "factory", "dispatch"], True),
+        )
+        for platform in ("linux", "macos"):
+            for remote in (False, True):
+                for argv, busy in cases:
                     with self.subTest(platform=platform, remote=remote, argv=argv):
-                        self.observation_case(remote=remote, platform=platform, argv_override=argv, busy=False)
+                        self.observation_case(
+                            remote=remote, platform=platform, argv_override=argv, busy=busy,
+                            reason_contains="pid 321",
+                        )

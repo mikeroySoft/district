@@ -157,6 +157,9 @@ Resolution, ancestry, target persistence, receipt, and dashboard completion time
 fail the named engine step without further installs; repository checks on a usable
 engine and the remaining hosts still run. Initial config-sync timeout fails that
 host without retrying setup or installing; other selected hosts continue.
+Only confirmed absence permits creating a remote config without a backup.
+Any other config-read error fails the named host/path before a write; successfully
+read malformed or legacy TOML is backed up byte-for-byte before projection.
 Nonzero dashboard restarts also fail the engine step without aborting repository
 checks; the pending restart remains saved for the next apply.
 
@@ -186,36 +189,37 @@ from the registry, not a `-dashboard` suffix: `acme/ops-dashboard` drains its ma
 `factory-ops-dashboard-dashboard.service`. Registered main units take precedence
 over any colliding dashboard name; unregistered suffix-looking units are not exempt.
 If both installs fail, affected repos fail without trying another `factory` on `PATH`.
-Active/activating/deactivating `handland-*` user units and hand-run uv-tool
-`factory gate` / `factory dispatch` processes defer a changed engine install.
-District identifies managed passes on the owning host by systemd cgroup, or
-launchd label PID and descendants. Their dispatch processes drain after timer
-pause rather than deferring the window. Exact argv proving `factory dashboard`
-is exempt. An exact gate/dispatch inside a dashboard cgroup remains outside work;
-on text-only platforms only unchanged registered dashboard ownership grants the
-exemption. Registered dashboard services are excluded from the service wait.
-Managed exemptions require an
-unchanged owning-host `(PID, start time)`: Linux uses `/proc/PID/stat` field 22
-(after the final comm parenthesis). Linux reads NUL-separated `/proc/<pid>/cmdline`
-and brackets it with start-time observations on the owning host. Remote observations
-return JSON argv lists, never whitespace-joined arguments. A structured CPython
-entrypoint model distinguishes scripts, modules, commands and stdin. Python options
-before `-m factory`, including multiword `-X`/`-W` values and attached/grouped forms,
-retain their exact boundaries. `python -- <known Factory launcher> gate/dispatch`
-is work; after `--`, a literal `-m` is a script filename, never a module option.
-A process that vanishes during observation is gone;
-an unreadable or empty cmdline with managed-path command text is ambiguous and busy.
-macOS uses C-locale, unbounded-width `ps -ww` for command text and lstart identity.
-Text cannot prove argv boundaries: any mention of the configured or owning-host-resolved
-tool directory or Factory launcher is named ambiguous work, even in an unrelated
-script. It blocks replacement and rollback rather than guessing a subcommand.
-Only exact argv proving `factory dashboard`, or unchanged ownership by a registered
-dashboard unit for text-only observations, exempts a dashboard process.
-Managed dispatch processes still drain after timer pause. Ownership checks retain
-PID/start-time generations; launchd ancestry checks every parent and label anchor.
-A reused/disappeared PID or changed parent defers with a named identity reason,
-never a stale managed exemption. All probes share the idle deadline; unavailable
-or timed-out observation/ownership cannot authorize replacement.
+Active/activating/deactivating `handland-*` user units and observed Factory work
+defer a changed engine install. One fail-closed rule handles every launch spelling:
+
+- **Path:** argv[0], non-option tokens and values in `--option=value` are compared
+  lexically with the configured and owning-host-resolved tool directory and CLI.
+  Relative paths use the process's own cwd, never the controller's cwd. Paths
+  inside the tool count, including its `bin/python`; Python symlinks are not followed.
+  The tokens `-` and `--` are never paths.
+- **Name:** any token with a `/` component `factory`, or module name `factory`
+  or `factory.*` (including attached `-mfactory.__main__`), counts as Factory work.
+  This intentionally includes arguments after `--` and arguments to `-c`.
+- **Cwd (Linux only):** cwd inside the tool, a registered repository checkout
+  (including `.factory/wt-*`), or `<data_home>/district/roots` counts as work.
+  Unreadable cwd plus a relative path token containing `/` is busy; unreadable cwd
+  alone does not make an absolute-path daemon busy.
+
+Linux reads exact NUL-separated `/proc/<pid>/cmdline` and lexical
+`/proc/<pid>/cwd` on the owning host, bracketed by stat generation checks.
+Remote observations return structured JSON, never reconstructed argv.
+Unreadable/empty cmdline uses conservative path/name matching on fallback `ps`
+text. macOS has no cwd source: it applies absolute-path and name rules to
+C-locale, unbounded-width `ps -ww` whitespace tokens. Whole-text managed-path
+mentions also fail closed, including paths containing spaces.
+
+Only positively owned registered-dashboard processes and the observing probe
+and its ancestor chain are exempt. An unowned `factory dashboard` is busy.
+Registered main-owned processes still drain after timer pause; they are excluded
+only from the outside/hand-work list. Ownership uses unchanged `(PID, start time)`
+with Linux cgroups or macOS launchd ancestry, validating every parent and anchor.
+A reused/disappeared PID, changed parent, parse/listing error or unavailable
+ownership defers with a named reason. All probes share the original idle deadline.
 Plain apply and `--upgrade`, locally and across a fleet, check before pausing
 and again after draining under the same idle deadline.
 The receipt names the busy unit or PID; other repo unit drift still converges

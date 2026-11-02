@@ -1605,7 +1605,7 @@ class ApplyTest(DistrictCase):
             return subprocess.CompletedProcess(argv, 0, output, "")
 
         observed = {} if processes is None else {
-            "218269": ["100", "1", processes, " ".join(processes)],
+            "218269": ["100", "1", processes, " ".join(processes), "/tmp"],
         }
 
         with mock.patch.object(apply, "_linux_processes", return_value=observed), \
@@ -1682,7 +1682,7 @@ class ApplyTest(DistrictCase):
             tool, launcher = host.factory_tool_paths()
             yield tool, launcher, tool.resolve(), launcher.resolve()
 
-    def test_engine_swap_defers_while_a_hand_run_gate_or_dispatch_process_uses_the_tool(self) -> None:
+    def test_engine_swap_defers_for_factory_paths_and_names(self) -> None:
         with self.factory_path_spellings() as (tool, launcher, real_tool, real_launcher):
             for command, busy in (
                 ("factory gate --base origin/main", True),
@@ -1695,11 +1695,11 @@ class ApplyTest(DistrictCase):
                 (f"{real_launcher} dispatch --ticket 489", True),
                 (f"{tool}/bin/python {launcher} dispatch --ticket 489", True),
                 (f"{real_tool}/bin/python {real_launcher} gate --base origin/main", True),
-                (f"{launcher} dashboard --json", False),
-                (f"{tool}/bin/python -m factory dashboard --json", False),
-                ("/unrelated/bin/python -m factory gate", False),
-                (str(launcher), False),
-                (str(tool / "bin/python"), False),
+                (f"{launcher} dashboard --json", True),
+                (f"{tool}/bin/python -m factory dashboard --json", True),
+                ("/unrelated/bin/python -m factory gate", True),
+                (str(launcher), True),
+                (str(tool / "bin/python"), True),
                 (f"/usr/bin/python3 {launcher} gate --base origin/main", True),
                 (f"/usr/bin/python3 {real_launcher} dispatch --ticket 489", True),
                 (f"/usr/bin/bash -c '{launcher} gate'", False),
@@ -1710,42 +1710,39 @@ class ApplyTest(DistrictCase):
                         states, engine=True, processes=shlex.split(command),
                         install_starts_timer=False,
                     )
-
                     installed = any(argv[:3] == ["uv", "tool", "install"] for argv in commands)
                     self.assertEqual(installed, not busy)
                     self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
                     self.assertEqual(states["factory-widgets.timer"], "inactive")
                     if busy:
                         self.assertIn("pid 218269", receipt["deferred"][0]["reason"])
-                        self.assertRegex(receipt["deferred"][0]["reason"], r"factory (gate|dispatch)")
                     else:
                         self.assertEqual(receipt["deferred"], [])
 
-    def test_engine_swap_defers_for_python_flags_before_factory_module(self) -> None:
+    def test_tool_python_path_is_busy_regardless_python_arguments(self) -> None:
         cases = (
-            ("-u -m factory gate --base origin/main", True),
-            ("-X dev -m factory dispatch --ticket 489", True),
-            (["-X", "pycache_prefix=/tmp/Cache Files", "-m", "factory",
-              "dispatch", "--ticket", "489"], True),
-            ("-W ignore -m factory gate", True),
-            (["-W", "ignore:some module", "-m", "factory", "gate"], True),
-            ("-Xdev -Wignore -m factory dispatch", True),
-            ("-S -O -m factory gate", True),
-            ("-uS -m factory dispatch", True),
-            ("--check-hash-based-pycs always -m factory gate", True),
-            ("-u -m factory dashboard --json", False),
-            ("-c print(1) -m factory gate", False),
-            ("-cprint(1) -m factory gate", False),
-            ("-m unrelated -m factory gate", False),
-            ("-W -m factory gate", False),
-            ("-X -m factory gate", False),
-            ("- -m factory gate", False),
-            ("-- -m factory gate", False),
-            ("unrelated.py -m factory gate", False),
+            "-u -m factory gate --base origin/main",
+            "-X dev -m factory dispatch --ticket 489",
+            ["-X", "pycache_prefix=/tmp/Cache Files", "-m", "factory", "dispatch", "--ticket", "489"],
+            "-W ignore -m factory gate",
+            ["-W", "ignore:some module", "-m", "factory", "gate"],
+            "-Xdev -Wignore -m factory dispatch",
+            "-S -O -m factory gate",
+            "-uS -m factory dispatch",
+            "--check-hash-based-pycs always -m factory gate",
+            "-u -m factory dashboard --json",
+            "-c print(1) -m factory gate",
+            "-cprint(1) -m factory gate",
+            "-m unrelated -m factory gate",
+            "-W -m factory gate",
+            "-X -m factory gate",
+            "- -m factory gate",
+            "-- -m factory gate",
+            "unrelated.py -m factory gate",
         )
         with self.factory_path_spellings() as (tool, _, real_tool, _):
             for python in (tool / "bin/python", real_tool / "bin/python"):
-                for args, busy in cases:
+                for args in cases:
                     with self.subTest(python=python, args=args):
                         exact_args = shlex.split(args) if isinstance(args, str) else args
                         receipt, _, commands, _ = self.timer_state_apply(
@@ -1753,46 +1750,40 @@ class ApplyTest(DistrictCase):
                             processes=[str(python), *exact_args],
                             install_starts_timer=False,
                         )
-                        self.assertEqual(
-                            any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
-                        self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
-                        if busy:
-                            self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
-                        else:
-                            self.assertEqual(receipt["deferred"], [])
+                        self.assertFalse(
+                            any(argv[:3] == ["uv", "tool", "install"] for argv in commands))
+                        self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
+                        self.assertIn("pid 218269", receipt["deferred"][0]["reason"])
 
-    def test_engine_swap_defers_for_attached_and_grouped_python_module_options(self) -> None:
+    def test_tool_python_path_is_busy_with_attached_and_grouped_options(self) -> None:
         cases = (
-            ("-mfactory gate", True),
-            ("-um factory dispatch", True),
-            ("-uSmfactory gate", True),
-            ("-uW ignore -mfactory gate", True),
-            ("-uWignore -mfactory dispatch", True),
-            ("-uX dev -mfactory gate", True),
-            ("-uXdev -mfactory dispatch", True),
-            ("--check-hash-based-pycs=always -mfactory gate", True),
-            ("-mfactory dashboard --json", False),
-            ("-um factory dashboard --json", False),
-            ("-uc -mfactory gate", False),
-            ("-uW -mfactory gate", False),
-            ("-uX -mfactory gate", False),
+            "-mfactory gate",
+            "-um factory dispatch",
+            "-uSmfactory gate",
+            "-uW ignore -mfactory gate",
+            "-uWignore -mfactory dispatch",
+            "-uX dev -mfactory gate",
+            "-uXdev -mfactory dispatch",
+            "--check-hash-based-pycs=always -mfactory gate",
+            "-mfactory dashboard --json",
+            "-um factory dashboard --json",
+            "-uc -mfactory gate",
+            "-uW -mfactory gate",
+            "-uX -mfactory gate",
         )
         with self.factory_path_spellings() as (tool, _, real_tool, _):
             for python in (tool / "bin/python", real_tool / "bin/python"):
-                for args, busy in cases:
+                for args in cases:
                     with self.subTest(python=python, args=args):
                         receipt, _, commands, _ = self.timer_state_apply(
                             {"factory-widgets.timer": "inactive"}, engine=True,
                             processes=[str(python), *shlex.split(args)],
                             install_starts_timer=False,
                         )
-                        self.assertEqual(
-                            any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
-                        self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
-                        if busy:
-                            self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
-                        else:
-                            self.assertEqual(receipt["deferred"], [])
+                        self.assertFalse(
+                            any(argv[:3] == ["uv", "tool", "install"] for argv in commands))
+                        self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
+                        self.assertIn("pid 218269", receipt["deferred"][0]["reason"])
 
 
 
@@ -2105,7 +2096,7 @@ class ApplyTest(DistrictCase):
             if not (self.bin / "factory-widgets.timer.disabled").exists():
                 return {}
             exact = [str(launcher), "gate", "--base", "origin/main"]
-            return {"218269": ["100", "1", exact, " ".join(exact)]}
+            return {"218269": ["100", "1", exact, " ".join(exact), "/tmp"]}
 
         with mock.patch.object(apply, "run", side_effect=process_started_after_drain), \
              mock.patch.object(apply, "_linux_processes",
@@ -2113,7 +2104,7 @@ class ApplyTest(DistrictCase):
             result = apply.upgrade(host.load(), record=record)
 
         self.assertEqual(result, "deferred")
-        self.assertIn("pid 218269 factory gate", record.deferred["engine"]["reason"])
+        self.assertIn("pid 218269", record.deferred["engine"]["reason"])
         self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
         self.assertEqual(record.disabled, {"factory-widgets.timer"})
         self.assertEqual(record.reenabled, {"factory-widgets.timer"})
