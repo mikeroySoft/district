@@ -1,7 +1,7 @@
 """`district update [--dry-run] [--to REF] [--rollback] [--yes] [--json]`.
 
-Updates only District's official uv-managed tool installation.  Factory and all
-unit files are outside this command's write set.
+The transaction updates only District's official uv-managed tool installation.
+After a successful update releases its locks, the new CLI runs `apply --drain`.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from district import host, service, systemd
+from district import drain, host, metrics, service, systemd
 from district import update_transaction as transaction
 
 REPOSITORY = "mikeroySoft/district"
@@ -305,6 +305,8 @@ def operations(mode: str, services: dict) -> list[str]:
         "verify the restarted dashboard process, HTTP response, and collector publication when it was running",
         "atomically record current/previous installation metadata and retain an offline rollback artifact",
     ))
+    if mode == "update":
+        result.append("run the newly installed District apply with a bounded Factory drain")
     return result
 
 
@@ -424,6 +426,18 @@ def operation_lock():
         yield lock.fileno()
 
 
+@contextmanager
+def metrics_lock():
+    path = metrics.lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise UpdateError(f"another District metrics operation is running ({path})") from exc
+        yield
+
+
 def install_helper(root: Path) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     for source, name in ((Path(transaction.__file__), "transaction.py"),
@@ -534,7 +548,7 @@ def recover_pending(args: argparse.Namespace) -> int | None:
         if not confirm(plan, args.json):
             emit({**plan, "ok": False, "status": "cancelled"}, args.json)
             return 1
-    with operation_lock() as lock_fd:
+    with operation_lock() as lock_fd, metrics_lock():
         helper = root / "transaction.py"
         if not helper.is_file():
             raise UpdateError(f"retained transaction helper is missing: {helper}")
@@ -612,6 +626,23 @@ def execute(plan: dict, context: dict, lock_fd: int) -> dict:
     return result
 
 
+def drained_apply(entrypoint: Path) -> dict:
+    argv = [str(entrypoint), "apply", "--drain"]
+    try:
+        proc = command(argv, timeout=drain.DRAIN_MAX_TTL + 15 * 60)
+    except UpdateError as exc:
+        return {"ok": False, "error": str(exc)}
+    result = {"ok": proc.returncode == 0, "returncode": proc.returncode}
+    if proc.stdout:
+        result["stdout"] = proc.stdout
+    if proc.stderr:
+        result["stderr"] = proc.stderr
+    if proc.returncode:
+        lines = (proc.stderr or proc.stdout).strip().splitlines()
+        result["error"] = lines[-1] if lines else f"district apply --drain exited {proc.returncode}"
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(argv or [])
     json_mode = "--json" in argv
@@ -648,10 +679,15 @@ def main(argv: list[str] | None = None) -> int:
                 result = {**plan, "ok": False, "status": "cancelled"}
                 emit(result, args.json)
                 return 1
-        with operation_lock() as lock_fd:
+        with operation_lock() as lock_fd, metrics_lock():
             if (context["root"] / "transaction.json").exists():
                 raise UpdateError("another update transaction appeared after preflight; invoke update again to recover")
             result = execute(plan, context, lock_fd)
+        if result.get("ok") and plan["mode"] == "update":
+            result["drain_apply"] = drained_apply(context["entrypoint"])
+            if not result["drain_apply"]["ok"]:
+                result["ok"] = False
+                result["error"] = f"post-update drained apply failed: {result['drain_apply']['error']}"
         emit(result, args.json)
         return 0 if result.get("ok") else 1
     except Exception as exc:
