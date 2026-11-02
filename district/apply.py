@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Iterable
 
-from district import host, install_state
+from district import host, install_state, systemd
 from district.engine_cleanup import cleanup
 from district.host import DistrictError, run
 from district.service import remaining_timeout
@@ -983,7 +983,8 @@ def _render_errors(output: str, tool: Path, cli: Path, runner) -> list[str]:
             else:
                 commands = [line.removeprefix("ExecStart=").strip() for line in body.splitlines()
                             if line.startswith("ExecStart=")]
-                argv = shlex.split(commands[0]) if len(commands) == 1 else None
+                argv = ([word.replace("%%", "%").replace("$$", "$") for word in systemd.words(commands[0])]
+                        if len(commands) == 1 else None)
             error = _argv_error(argv, tool, cli, runner)
         except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError,
                 plistlib.InvalidFileException) as exc:

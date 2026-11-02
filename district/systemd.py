@@ -1,5 +1,14 @@
 """Small, strict parser for systemd's whitespace-delimited setting values."""
 
+import json
+import re
+
+
+def quote(value: str) -> str:
+    """Encode one literal setting word; specifiers must not reinterpret paths."""
+    value = value.replace("%", "%%")
+    return value if re.fullmatch(r"[A-Za-z0-9_./:=+@,-]+", value) else json.dumps(value, ensure_ascii=False)
+
 
 def words(value: str) -> list[str]:
     """Return decoded systemd words, raising ValueError for malformed syntax."""

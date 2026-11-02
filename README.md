@@ -123,6 +123,12 @@ name.
 `~/Library/LaunchAgents/<label>.plist` for macOS. Launchd jobs add
 `/opt/homebrew/bin` to the service PATH and write stdout/stderr under the
 factory's `.factory/logs/` directory. `local` is reserved for this machine.
+District-rendered systemd executable/argument, working-directory and environment
+values preserve spaces, quotes and backslashes; literal `%` and ExecStart `$`
+are escaped rather than expanded by the manager. Factory render validation and
+systemd file-status reads use the same systemd word decoder, not shell parsing.
+Ambiguous loaded `ExecStart` debug text remains untrusted: self-update refuses
+an unverifiable executable rather than guessing from a potentially stale unit file.
 Remote commands use noninteractive SSH with a ten-second connection timeout.
 Remote hosts need Python >=3.11 as `python3`, plus Factory, `uv`, git, and authenticated `gh`
 on their noninteractive PATH. Commands with execution deadlines also run a

@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import Callable, Mapping
 from xml.parsers.expat import ExpatError
 
+from . import systemd
+
 Runner = Callable[..., subprocess.CompletedProcess]
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
 LAUNCHD_CLEANUP_TIMEOUT = 3
@@ -236,12 +238,11 @@ def _exec_start(raw: str) -> tuple[str, ...] | None:
     match = re.fullmatch(
         r"\{\s*path=(.*?)\s+;\s+argv\[]=(.*?)\s+;\s+ignore_errors=(?:yes|no)\s+;[^{}]*\}", raw,
     )
-    if not match:
+    # systemctl's debug format is flattened argv, not shell-quoted text.
+    # Quoting/escapes cannot recover boundaries; leave ambiguous identity unknown.
+    if not match or any(char in match[2] for char in "\"'\\"):
         return None
-    try:
-        argv = tuple(shlex.split(match[2]))
-    except ValueError:
-        return None
+    argv = tuple(match[2].split())
     return argv if argv and argv[0] == match[1] else None
 
 
@@ -295,13 +296,15 @@ class SystemdUserBackend(ServiceBackend):
     def _service(definition: ServiceDefinition) -> str:
         after = "After=network.target\n" if definition.after_network else ""
         kind = "Type=oneshot\n" if definition.interval else ""
-        working = f"WorkingDirectory={definition.root}\n" if definition.working_directory else ""
-        environment = "".join(f"Environment={key}={value}\n" for key, value in definition.environment.items())
+        working = f"WorkingDirectory={systemd.quote(str(definition.root))}\n" if definition.working_directory else ""
+        environment = "".join(f"Environment={systemd.quote(f'{key}={value}')}\n"
+                              for key, value in definition.environment.items())
+        argv = " ".join(systemd.quote(arg.replace("$", "$$")) for arg in definition.argv)
         restart = "Restart=on-failure\nRestartSec=5\n" if definition.keep_alive else ""
         install = "\n[Install]\nWantedBy=default.target\n" if definition.keep_alive else ""
         return (
             f"[Unit]\nDescription={definition.description}\n{after}\n"
-            f"[Service]\n{kind}{working}{environment}ExecStart={' '.join(definition.argv)}\n"
+            f"[Service]\n{kind}{working}{environment}ExecStart={argv}\n"
             f"{restart}{install}"
         )
 
@@ -383,14 +386,21 @@ class SystemdUserBackend(ServiceBackend):
         file_argv = None
         if body is not None:
             for line in body.splitlines():
-                if line.startswith("Environment=") and "=" in line.removeprefix("Environment="):
-                    key, value = line.removeprefix("Environment=").split("=", 1)
-                    environment[key] = value
+                if line.startswith("Environment="):
+                    try:
+                        assignments = systemd.words(line.removeprefix("Environment="))
+                    except ValueError as exc:
+                        raise OSError(f"{name}: invalid Environment: {exc}") from exc
+                    for assignment in assignments:
+                        key, separator, value = assignment.replace("%%", "%").partition("=")
+                        if separator:
+                            environment[key] = value
                 elif line.startswith("ExecStart="):
                     try:
-                        file_argv = tuple(shlex.split(line.removeprefix("ExecStart=").lstrip("-")))
+                        file_argv = tuple(word.replace("%%", "%").replace("$$", "$") for word in
+                                          systemd.words(line.removeprefix("ExecStart=").lstrip("-")))
                     except ValueError:
-                        pass
+                        file_argv = None
         if load in ("", "not-found"):
             pid = self._property(name, "MainPID", deadline=deadline) if name.endswith(".service") else ""
             return ServiceStatus(
