@@ -333,6 +333,21 @@ class HandRunTest(unittest.TestCase):
         result = subprocess.run([str(start)], text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_unsupported_shell_quote_cannot_hide_source_without_lexer_error(self):
+        fragment = self.source / "settings.txt"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        fragment.chmod(0o644)
+        self.script.write_text(
+            "#!/bin/bash\nprintf '%s\\n' $'it\\'s ready'\nsource ./settings.txt\n# it's done\n"
+        )
+        syntax = subprocess.run(["/bin/bash", "-n", str(self.script)], text=True, capture_output=True)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot inspect sourced dependencies", result.stderr)
+        self.assertIn("chain.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
