@@ -319,23 +319,6 @@ class InstallStateTest(DistrictCase):
                     "https://github.com/mikeroySoft/factory", RELEASE_SHA, SHA,
                 ))
 
-    def test_apply_records_and_warns_when_it_reenables_a_stopped_enabled_timer(self) -> None:
-        before = {"factory-widgets.timer": timer("inactive"), "district-apply.timer": timer("active")}
-        after = {"factory-widgets.timer": timer("active"), "district-apply.timer": timer("active")}
-        self.stub("factory", ("doctor --json", json.dumps(DOCTOR)),
-                  ("dashboard --json", json.dumps(dashboard())))
-        with mock.patch.object(install_state, "timer_states", side_effect=[before, after, after]), \
-             mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
-            code, apply_output = self.district("apply", "widgets")
-            text_code, text_output = self.district("install-state")
-        self.assertEqual(code, 0, apply_output)
-        self.assertEqual(text_code, 0, text_output)
-        document = json.loads(install_state.state_path().read_text())
-        self.assertEqual(document["last_apply"]["exit_status"], 0)
-        self.assertEqual(document["last_apply"]["reenabled"], ["factory-widgets.timer"])
-        self.assertIn("WARNING: last apply re-enabled factory-widgets.timer", text_output)
-        self.assertFalse(install_state.state_path().with_suffix(".json.tmp").exists())
-
     def test_lock_contended_apply_does_not_claim_timer_reenables(self) -> None:
         states = {"factory-widgets.timer": timer("active"), "district-apply.timer": timer("active")}
         with mock.patch.object(apply.fcntl, "flock", side_effect=BlockingIOError), \
@@ -400,11 +383,19 @@ class InstallStateTest(DistrictCase):
                 self.assertEqual(document["last_apply"]["reenabled"], [])
                 self.assertNotIn("WARNING:", output)
 
-    def test_systemctl_stopped_enabled_timer_transition_still_warns(self) -> None:
-        active = SHOW.replace("ActiveState=inactive", "ActiveState=active", 1)
-        document, output = self._apply_with_show_observations(SHOW, active)
+
+    def test_reenabled_only_includes_timers_apply_disabled(self) -> None:
+        before = {name: timer("inactive") for name in ("factory-widgets.timer", "district-apply.timer")}
+        after = {name: timer("active") for name in before}
+        record = install_state.ApplyRun.start()
+        record.disabled.add("factory-widgets.timer")
+        with mock.patch.object(install_state, "timer_states", side_effect=[before, after]), \
+             mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
+            record.observe(host.load())
+            record.finish(0)
+
+        document = json.loads(install_state.state_path().read_text())
         self.assertEqual(document["last_apply"]["reenabled"], ["factory-widgets.timer"])
-        self.assertIn("WARNING: last apply re-enabled factory-widgets.timer", output)
 
     def test_failed_observations_preserve_explicit_timer_operations(self) -> None:
         record = install_state.ApplyRun.start()

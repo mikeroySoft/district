@@ -159,11 +159,13 @@ class OneInstallTest(unittest.TestCase):
                 out = json.dumps({"version": "0.4.7", "dispatcher": {"consecutive_failures": 0}})
             elif argv[1:] != ["init", "--labels-only"]:
                 self.fail(f"unexpected Factory command: {argv}")
+        elif argv[:3] == ["systemctl", "--user", "list-units"]:
+            self.events.append(("handland", "scan"))
         elif argv[0] == "ps":
             self.events.append(("processes", "scan"))
-            if self.process_busy:
+            if self.process_busy and ("pause", "factory-widgets.timer") in self.events:
                 self.process_busy -= 1
-                out = f"123 {self.tool}/bin/python -m factory dispatch --ticket 12\n"
+                out = f"123 {self.tool}/bin/python -m factory install\n"
         elif argv[:2] == ["git", "rev-parse"]:
             out = OLD + "\n"  # A stale checkout must never be used by --upgrade.
         elif argv[:2] not in (["git", "archive"], ["git", "status"]) and argv[0] != "tar":
@@ -287,10 +289,9 @@ class OneInstallTest(unittest.TestCase):
                 self.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
                 self.assertEqual(self.apply(), 0, self.output.getvalue())
                 self.assertEqual(self.installs(), [], "must not replace an engine used through its real path")
-                self.assertIn("idle wait timed out", self.output.getvalue())
+                self.assertIn("pid 123 factory dispatch", self.output.getvalue())
                 self.assertEqual(self.active, {"factory-widgets.timer"})
-                self.assertEqual([e for e in self.events if e[0] in ("pause", "enable")], [
-                    ("pause", "factory-widgets.timer"), ("enable", "factory-widgets.timer")])
+                self.assertEqual([e for e in self.events if e[0] in ("pause", "enable")], [])
                 busy[0] = False
                 self.assertEqual(self.apply(), 0, self.output.getvalue())
                 self.assertEqual(len(self.installs()), 1)
@@ -880,7 +881,7 @@ class OneInstallTest(unittest.TestCase):
                         installed.append(parts)
                         receipt(OLD if f"@{OLD}" in " ".join(parts) else TARGET)
                         return subprocess.CompletedProcess(parts, 0, "", "")
-                    if parts[:1] == ["ps"]:
+                    if parts[:1] == ["ps"] or parts[:3] == ["systemctl", "--user", "list-units"]:
                         return subprocess.CompletedProcess(parts, 0, "", "")
                     if parts[0] in (str(remote_cli), "factory"):
                         if parts[1:] in (["install", "--print"], ["install"]):

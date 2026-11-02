@@ -53,7 +53,16 @@ only once.
 Before stating an install version or timer state, run `district install-state --json`
 and quote its `observed_at`. Every `district apply`, successful or failed, atomically
 rewrites `${XDG_STATE_HOME:-~/.local/state}/district/install-state.json`; a warning
-in text mode identifies timers the last apply re-enabled.
+in text mode identifies timers apply disabled and then re-enabled, including
+successful `--reset` of a timer capped by an earlier apply. Unrelated timer
+activations are excluded. `last_apply.stopped` lists corrective stops when
+`factory install` starts an operator-stopped timer.
+
+When repo units change, apply preserves an existing timer's pre-install active/inactive
+state: active timers are drained and restored; inactive timers are stopped again
+without disabling them if install starts them. First installs and unchanged units
+still converge an inactive timer through install. A retained inactive timer remains visible in apply's
+output and nonzero convergence status.
 
 ## Ownership
 
@@ -159,6 +168,13 @@ to become idle, installs with `uv tool install
 verification reinstalls and verifies the previous revision. The `finally` path
 restores exactly the timers District paused; dashboards restart on the new code.
 If both installs fail, affected repos fail without trying another `factory` on `PATH`.
+Active/activating/deactivating `handland-*` user units and hand-run uv-tool
+`factory gate` / `factory dispatch` processes defer a changed engine install.
+Plain apply and `--upgrade`, locally and across a fleet, check before pausing
+and again after draining under the same idle deadline. Python options before
+`-m factory`, including attached/grouped forms, are recognized; text merely
+mentioning a command and dashboards do not block swaps. The receipt names the
+busy unit or PID; other repo unit drift still converges and the next apply retries.
 The idle budget is one deadline including discovery, probes, timer pauses, and
 remote state synchronization. Zero or exhausted time defers before another
 command. Timer/dashboard restoration has a separate 30-second budget after

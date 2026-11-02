@@ -305,13 +305,18 @@ def _resolved_paths(paths: list[Path], runner, *, timeout: float = SMOKE_TIMEOUT
 def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> list[str]:
     deadline = time.monotonic() + timeout
     real_tool, real_cli = _resolved_paths([tool, cli], run_cmd, timeout=remaining_timeout(deadline))
-    spellings = (str(tool) + "/", str(real_tool) + "/", str(cli), str(real_cli))
+    tool_bins = {tool / "bin", real_tool / "bin"}
+    launchers = {str(cli), str(real_cli), *(str(directory / "factory") for directory in tool_bins)}
     proc = run_cmd(["ps", "-eo", "pid=,args="], timeout=remaining_timeout(deadline))
     if proc.returncode:
         raise OSError(proc.stderr.strip() or "cannot inspect Factory processes")
-    return [line.strip() for line in proc.stdout.splitlines()
-            if any(spelling in line for spelling in spellings)
-            and not re.search(r"(?:^|\s)dashboard(?:\s|$)", line)]
+    busy = []
+    for line in proc.stdout.splitlines():
+        fields = line.split(maxsplit=1)
+        if len(fields) == 2 and fields[0].isdigit():
+            if work := _factory_work(fields[1], tool_bins, launchers):
+                busy.append(f"pid {fields[0]} {work}")
+    return busy
 
 
 def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
@@ -356,30 +361,45 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record):
             active = [timer for timer in timers
                       if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
             tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
-            if record:
-                record.observe(data)
-            for timer in active:
-                remaining_timeout(deadline)
-                paused = list((host.engine(data, name) or {}).get("paused_timers", []))
-                _save_engine(data, name, runner, deadline=deadline,
-                             paused_timers=paused if timer in paused else paused + [timer])
-                remaining = remaining_timeout(deadline)
+            hand_work = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
+            hand_work += [work for work in _factory_processes(
+                tool, cli, runner, timeout=remaining_timeout(deadline))
+                if work.endswith(("factory gate", "factory dispatch"))]
+            remaining_timeout(deadline)
+            if hand_work:
+                _defer(record, target, hand_work)
+            else:
                 if record:
-                    record.disabled.add(timer)
-                backend.pause_timer(timer, timeout=remaining)
-            while True:
-                busy = [unit for unit in services if backend.is_active(
-                    unit, timeout=remaining_timeout(deadline)) in ("active", "activating", "deactivating")]
-                busy += _factory_processes(tool, cli, runner, timeout=remaining_timeout(deadline))
-                remaining_timeout(deadline)
-                if not busy:
-                    ready = True
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    _defer(record, target, busy)
-                    break
-                time.sleep(min(1, remaining))
+                    record.observe(data)
+                for timer in active:
+                    remaining_timeout(deadline)
+                    paused = list((host.engine(data, name) or {}).get("paused_timers", []))
+                    _save_engine(data, name, runner, deadline=deadline,
+                                 paused_timers=paused if timer in paused else paused + [timer])
+                    remaining = remaining_timeout(deadline)
+                    if record:
+                        record.disabled.add(timer)
+                    backend.pause_timer(timer, timeout=remaining)
+                while True:
+                    hand_work = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
+                    if hand_work:
+                        _defer(record, target, hand_work)
+                        break
+                    busy = [unit for unit in services if backend.is_active(
+                        unit, timeout=remaining_timeout(deadline)) in ("active", "activating", "deactivating")]
+                    busy += _factory_processes(tool, cli, runner, timeout=remaining_timeout(deadline))
+                    remaining_timeout(deadline)
+                    if hand_work := [work for work in busy if work.endswith(("factory gate", "factory dispatch"))]:
+                        _defer(record, target, hand_work)
+                        break
+                    if not busy:
+                        ready = True
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _defer(record, target, busy)
+                        break
+                    time.sleep(min(1, remaining))
         except subprocess.TimeoutExpired:
             _defer(record, target, ["idle wait timed out"])
         yield ready
@@ -802,6 +822,67 @@ def busy_units(services: list[str], backend=None, *, timeout: float | None = Non
             if backend.is_active(service, **kwargs) in ("active", "activating", "deactivating")]
 
 
+def _python_entrypoint(argv: list[str]) -> list[str]:
+    """Stop at Python's module/script boundary, not text in script arguments."""
+    args = iter(argv)
+    for arg in args:
+        if arg in {"-", "--"}:
+            return []
+        if arg == "--check-hash-based-pycs":
+            next(args, None)
+        elif not arg.startswith("-"):
+            return [arg, *args]
+        elif option := re.match(r"^-[^-]*?([cmWX])(.*)$", arg):
+            # Short options can group; c/m/W/X consume the rest or the next token.
+            flag, value = option.groups()
+            if flag == "c":
+                return []
+            value = value or next(args, "")
+            if flag == "m":
+                return ["-m", value, *args]
+    return []
+
+
+def _python_factory_args(argv: list[str], tool_bins: set[Path], launchers: set[str]) -> list[str]:
+    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(argv[0]).name):
+        return []
+    args = _python_entrypoint(argv[1:])
+    if args and args[0] in launchers:
+        return args[1:]
+    if Path(argv[0]).parent in tool_bins and args[:2] == ["-m", "factory"]:
+        return args[2:]
+    return []
+
+
+def _factory_work(command: str, tool_bins: set[Path], launchers: set[str]) -> str | None:
+    """Recognize Factory entrypoints, not text mentioning commands or dashboards."""
+    argv = command.split()
+    if not argv:
+        return None
+    if argv[0] in launchers or argv[0] == "factory":
+        args = argv[1:]
+    else:
+        args = _python_factory_args(argv, tool_bins, launchers)
+    if args and args[0] != "dashboard":
+        return f"factory {args[0]}"
+    return None
+
+
+def _busy_handland(backend, run_cmd, *, timeout: float) -> list[str]:
+    config = backend.configuration()
+    if config.get("platform") == "linux":
+        units = run_cmd([
+            str(config.get("executable", "systemctl")), "--user", "list-units", "--no-legend", "--plain",
+            "--state=active,activating,deactivating", "handland-*",
+        ], timeout=timeout)
+        if units.returncode:
+            raise OSError(units.stderr.strip() or "cannot inspect handland user units")
+        return [line.split()[0] for line in units.stdout.splitlines() if line.strip()]
+    return []
+
+
+
+
 def disable_timers(timers: list[str], timeout: float, backend, *, check: bool = True,
                    record: install_state.ApplyRun | None = None) -> None:
     deadline = time.monotonic() + timeout
@@ -860,8 +941,8 @@ def restore(timers: list[str], repos: dict[str, dict],
     for timer in timers:
         if timer not in disabled and backend.is_active(timer) != "active":
             backend.enable(timer, check=False)
-            if record:
-                record.reenabled.add(timer)
+        if record and timer in record.disabled and backend.is_active(timer) == "active":
+            record.reenabled.add(timer)
 
 
 # ---------------------------------------------------------------- per repo
@@ -1091,7 +1172,10 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                 rows.append(deferred_row(slug, table, reason, backend))
                 continue
             timer = f"{host.unit_name(slug)}.timer"
-            active_timers = [timer] if changed and backend.is_active(timer) == "active" else []
+            timer_state = backend.is_active(timer) if changed else None
+            if timer_state == "inactive" and backend.status(timer).unit_file_state == "not-found":
+                timer_state = None  # First install has no operator state to preserve.
+            active_timers = [timer] if timer_state == "active" else []
             install_error = None
             try:
                 if changed and (busy := drain(active_timers, [service], data, record, backend=backend)):
@@ -1114,6 +1198,9 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                         install_error = f"install: {tail[0]}"
             finally:
                 restore(active_timers, all_repos, record, backend=backend)
+                if timer_state == "inactive" and backend.is_active(timer) == "active":
+                    backend.stop(timer, timeout=DRAIN_TIMEOUT)
+                    record.stopped.add(timer)
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
             if install_error:
                 row["fail"].insert(0, install_error)
