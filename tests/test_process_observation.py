@@ -16,11 +16,19 @@ class ProcessObservationTest(unittest.TestCase):
         self.addCleanup(self.case.doCleanups)
 
     def observation_case(self, *, remote, platform="macos", mode="localized",
-                         phase="before", command="dispatch", rollback=False):
+                         phase="before", command="dispatch", rollback=False, form="module"):
         case = self.case
         if mode == "width":
             case.tool = case.root / ("long-launcher-" + "x" * 120) / "factory"
             os.environ["UV_TOOL_DIR"] = str(case.tool.parent)
+        if mode == "spaces":
+            case.tool = case.root / "Library/Application Support/FactoryTools/factory"
+            case.cli = case.root / "Tool Bin's Space/factory"
+            os.environ["UV_TOOL_DIR"] = str(case.tool.parent)
+            os.environ["UV_TOOL_BIN_DIR"] = str(case.cli.parent)
+            if form == "ambiguous":
+                case.cli = case.tool / "bin/python -m/factory"
+                os.environ["UV_TOOL_BIN_DIR"] = str(case.cli.parent)
         case.install_receipt(fixtures.OLD)
         case.calls.clear()
         case.events.clear()
@@ -46,7 +54,11 @@ class ProcessObservationTest(unittest.TestCase):
         probes = []
         original = case.run_cmd
         launcher = case.tool / "bin" / "python"
-        argv_text = f"{launcher} -m factory {command}"
+        argv_text = (f"{launcher} -m factory {command}" if form in ("module", "unparseable-module") else
+                     f"{case.cli} {command}" if form in ("launcher", "ambiguous", "unparseable") else
+                     f"{launcher} -u {case.cli} {command}")
+        if form in ("unparseable", "unparseable-module"):
+            argv_text = '"' + argv_text
 
         def commands(argv, **kwargs):
             raw = list(argv)
@@ -101,7 +113,8 @@ class ProcessObservationTest(unittest.TestCase):
         self.assertEqual(len(case.installs()), int(rollback), "no uv replacement while work is live")
         reason = case.output.getvalue() if rollback else record.deferred[
             "engine:remote" if remote else "engine"]["reason"]
-        self.assertIn("invalid C-locale ps row" if mode in ("malformed", "identity-malformed")
+        self.assertIn("ambiguous Factory command" if form in ("ambiguous", "unparseable", "unparseable-module") else
+                      "invalid C-locale ps row" if mode in ("malformed", "identity-malformed")
                       else f"pid 321 factory {command}", reason)
         if rollback:
             self.assertIn("rollback FAIL", reason)
@@ -121,7 +134,7 @@ class ProcessObservationTest(unittest.TestCase):
         self.assertTrue(probes)
         if platform == "macos":
             self.assertTrue(all(argv[:3] == ["env", "LC_ALL=C", "ps"] for argv in probes), probes)
-            if mode != "malformed":
+            if mode != "malformed" and form not in ("ambiguous", "unparseable", "unparseable-module"):
                 self.assertTrue(any("args=" not in argv[-1] for argv in probes), probes)
 
     def test_macos_locale_and_malformed_rows_never_hide_work(self):
@@ -159,3 +172,34 @@ class ProcessObservationTest(unittest.TestCase):
             for remote in (False, True):
                 with self.subTest(platform=platform, remote=remote):
                     self.observation_case(remote=remote, platform=platform, mode="width")
+
+    def test_space_paths_block_replacement_and_automatic_rollback(self):
+        for platform in ("linux", "macos"):
+            for remote in (False, True):
+                for form in ("module", "launcher", "script"):
+                    for command in ("gate", "dispatch"):
+                        for phase in ("before", "after", "rollback"):
+                            with self.subTest(platform=platform, remote=remote, form=form,
+                                              command=command, phase=phase):
+                                self.observation_case(remote=remote, platform=platform, mode="spaces",
+                                                      form=form, command=command,
+                                                      phase=phase, rollback=phase == "rollback")
+
+    def test_space_paths_block_fleet_replacement_and_outer_rollback(self):
+        for platform in ("linux", "macos"):
+            for form in ("module", "launcher", "script"):
+                for phase in ("before", "after", "install", "rollback"):
+                    for blocked in ("local", "remote") if phase == "before" else ("local",) if phase in ("after", "rollback") else ("remote",):
+                        for command in ("gate", "dispatch"):
+                            with self.subTest(platform=platform, form=form, phase=phase,
+                                              blocked=blocked, command=command):
+                                self.case.hand_work_fleet(
+                                    f"dashboard-{command}", phase=phase, blocked=blocked,
+                                    platform=platform, space_paths=True, form=form)
+
+    def test_ambiguous_known_paths_fail_closed_with_named_reason(self):
+        for platform in ("linux", "macos"):
+            for remote in (False, True):
+                for form in ("ambiguous", "unparseable", "unparseable-module"):
+                    with self.subTest(platform=platform, remote=remote, form=form):
+                        self.observation_case(remote=remote, platform=platform, mode="spaces", form=form)

@@ -22,6 +22,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Iterable
 
 from district import host, install_state
 from district.engine_cleanup import cleanup
@@ -1026,7 +1027,7 @@ def busy_units(services: list[str], backend=None, *, timeout: float | None = Non
             if backend.is_active(service, **kwargs) in ("active", "activating", "deactivating")]
 
 
-def _python_entrypoint(argv: list[str]) -> list[str]:
+def _python_entrypoint(argv: Iterable[str]) -> list[str]:
     """Stop at Python's module/script boundary, not text in script arguments."""
     args = iter(argv)
     for arg in args:
@@ -1047,26 +1048,51 @@ def _python_entrypoint(argv: list[str]) -> list[str]:
     return []
 
 
-def _python_factory_args(argv: list[str], tool_bins: set[Path], launchers: set[str]) -> list[str]:
-    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(argv[0]).name):
+def _command_words(command: str, paths: set[str]) -> Iterable[str]:
+    """ps flattens argv: preserve known complete paths, never shell-unquote them."""
+    while command:
+        matches = [path for path in paths if command.startswith(path)
+                   and (len(command) == len(path) or command[len(path)].isspace())]
+        if len(matches) > 1:
+            raise ValueError("ambiguous Factory command: multiple known path prefixes")
+        if matches:
+            word = matches[0]
+            command = command[len(word):].lstrip()
+        else:
+            pieces = command.split(maxsplit=1)
+            word = pieces[0]
+            # A quoted/escaped spelling is not argv evidence. Do not silently
+            # lose a known path when its start lies inside this flattened word.
+            if any(0 <= command.find(path) < len(word) for path in paths):
+                raise ValueError("ambiguous Factory command: cannot parse known tool path")
+            command = pieces[1] if len(pieces) == 2 else ""
+        yield word
+
+
+def _python_factory_args(executable: str, words: Iterable[str], tool_bins: set[Path],
+                         launchers: set[str]) -> list[str]:
+    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(executable).name):
         return []
-    args = _python_entrypoint(argv[1:])
+    args = _python_entrypoint(words)
     if args and args[0] in launchers:
         return args[1:]
-    if Path(argv[0]).parent in tool_bins and args[:2] == ["-m", "factory"]:
+    if Path(executable).parent in tool_bins and args[:2] == ["-m", "factory"]:
         return args[2:]
     return []
 
 
 def _factory_work(command: str, tool_bins: set[Path], launchers: set[str]) -> str | None:
     """Recognize Factory entrypoints, not text mentioning commands or dashboards."""
-    argv = command.split()
-    if not argv:
-        return None
-    if argv[0] in launchers or argv[0] == "factory":
-        args = argv[1:]
+    paths = set(launchers)
+    for directory in tool_bins:
+        paths.update(match[0] for match in re.finditer(
+            re.escape(str(directory)) + r"""/python(?:\d+(?:\.\d+)*)?(?=$|[\s"'])""", command))
+    words = iter(_command_words(command, paths))
+    executable = next(words, "")
+    if executable in launchers or executable == "factory":
+        args = list(words)
     else:
-        args = _python_factory_args(argv, tool_bins, launchers)
+        args = _python_factory_args(executable, words, tool_bins, launchers)
     if args and args[0] != "dashboard":
         return f"factory {args[0]}"
     return None

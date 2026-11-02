@@ -783,16 +783,25 @@ class OneInstallTest(unittest.TestCase):
         self.backend.pause_timer.assert_not_called()
         self.backend.resume_timer.assert_not_called()
 
-    def hand_work_fleet(self, work, *, phase, blocked="remote", fleet=True, platform="linux", lstart=None):
+    def hand_work_fleet(self, work, *, phase, blocked="remote", fleet=True, platform="linux", lstart=None,
+                        space_paths=False, form="module"):
         self.install_receipt(OLD)
         self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
         self.data["defaults"]["engine_idle_timeout"] = "5s"
         self.active = {"factory-widgets.timer"}
         self.calls.clear()
         self.events.clear()
+        self.output.seek(0)
+        self.output.truncate()
         alias = self.root / "tool-link"
         alias.unlink(missing_ok=True)
         self.tool = self.root / "tools/factory"
+        if space_paths:
+            self.tool = self.root / "Application Support/FactoryTools/factory"
+            self.cli = self.root / "Tool Bin's Space/factory"
+            os.environ["UV_TOOL_DIR"] = str(self.tool.parent)
+            os.environ["UV_TOOL_BIN_DIR"] = str(self.cli.parent)
+            self.tool.parent.mkdir(parents=True, exist_ok=True)
         runner = self.alias_tool_runner(True)
         remote_active = {"factory-widgets.timer"}
         drained = [False]
@@ -840,6 +849,10 @@ class OneInstallTest(unittest.TestCase):
         ps_probes = []
         scan_started = {}
         command = work.removeprefix("dashboard-")
+        observed_tool = self.tool.resolve() if space_paths else self.tool
+        argv_text = (f"{observed_tool}/bin/python -uSmfactory {command}" if form == "module" else
+                     f"{self.cli} {command}" if form == "launcher" else
+                     f"{observed_tool}/bin/python -u {self.cli} {command}")
 
         def commands(name, argv, **kwargs):
             raw = list(argv)
@@ -866,7 +879,7 @@ class OneInstallTest(unittest.TestCase):
                                  raw[:3] != ["env", "LC_ALL=C", "ps"] else "Thu Nov 12 00:00:00 2026")
                         output = f"321 42 {start}"
                     if "args=" in argv[-1] and name == blocked and available:
-                        output += f" {self.tool}/bin/python -m factory {command}"
+                        output += f" {argv_text}" if space_paths else f" {self.tool}/bin/python -m factory {command}"
                     return subprocess.CompletedProcess(
                         argv, 0, output + "\n42 1 Mon Nov  2 00:00:00 2026\n", "")
                 return subprocess.CompletedProcess(argv, 0, "321 42\n42 1\n", "")
@@ -880,6 +893,8 @@ class OneInstallTest(unittest.TestCase):
                 if name == blocked and available:
                     if work in ("active", "activating", "deactivating") and argv[0] == "systemctl":
                         output = f"handland-4242-merge.service loaded {work} running Hand work\n"
+                    elif space_paths and argv[0] == "ps":
+                        output = f"321 {argv_text}\n"
                     elif command == "gate" and argv[0] == "ps":
                         output = f"321 {self.cli} gate --base origin/main\n"
                     elif command == "dispatch" and argv[0] == "ps":

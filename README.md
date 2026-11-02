@@ -187,7 +187,11 @@ unchanged owning-host `(PID, start time)`: Linux uses `/proc/PID/stat` field 22
 argv and identity observations. An unparseable macOS row defers with a named
 observation/ownership reason rather than dropping a potentially busy process.
 Argv snapshots request unbounded `ps -ww` width on Linux and macOS, so narrow
-`COLUMNS` cannot truncate a launcher or subcommand. The argv observation
+`COLUMNS` cannot truncate a launcher or subcommand. Complete configured and
+owning-host-resolved launcher/tool-Python prefixes are matched before splitting
+the remaining arguments, preserving spaces and literal quotes in UV/XDG paths.
+Multiple matching prefixes or an unparseable known path defer as named unknown
+work, including during automatic and fleet rollback. The argv observation
 is bracketed by identity checks; launchd ancestry also checks every parent and
 label anchor. A reused/disappeared PID or changed parent defers with a named
 identity reason, never a stale managed exemption. All probes share the idle
