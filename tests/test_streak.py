@@ -2,10 +2,11 @@
 
 import json
 import plistlib
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from district import host
-from test_district import DistrictCase
+from tests.test_district import DistrictCase
 
 
 FIRST = "2026-11-02T12:00:00+00:00"
@@ -21,18 +22,19 @@ def journal(codes):
                         "_SYSTEMD_UNIT": "factory-widgets.service"}),
             json.dumps({"__REALTIME_TIMESTAMP": str(stamp),
                         "MESSAGE_ID": "be02cf6855d2428ba40df7e9d022f03d" if code else "39f53479d3a045ac8e11786248231fbf",
-                        "UNIT": "factory-widgets.service", "RESULT": "exit-code" if code else "success",
+                        "USER_UNIT": "factory-widgets.service", "RESULT": "exit-code" if code else "success",
                         "MESSAGE": "Failed to start factory." if code else "Finished factory."}),
         ])
     return "\n".join(lines) + "\n"
 
 
 def pass_log(codes):
-    return "\n".join(
-        f"=== 2026-11-02T12:{i * 10:02d}:00+00:00 start ===\n{ERROR}\n"
-        f"=== end rc={code} 2026-11-02T12:{i * 10:02d}:01+00:00 ==="
-        for i, code in enumerate(codes)
-    ) + "\n"
+    lines = []
+    for i, code in enumerate(codes):
+        at = datetime.fromisoformat(FIRST) + timedelta(minutes=10 * i)
+        lines.append(f"=== {at.isoformat()} start ===\n{ERROR}\n"
+                     f"=== end rc={code} {(at + timedelta(seconds=1)).isoformat()} ===")
+    return "\n".join(lines) + "\n"
 
 
 class TestFailureStreak(DistrictCase):
@@ -125,3 +127,127 @@ class TestFailureStreak(DistrictCase):
                 for value in ("acme/widgets", "6", FIRST, ERROR):
                     self.assertIn(value, str(matches[0]))
                 self.assertEqual(code, 1)
+
+    def test_status_streak_covers_non_primary_host_without_combining_passes(self):
+        data = self.register("launchd", [1] * 6)
+        table = data["repo"]["acme/widgets"]
+        table.pop("host")
+        table.update(hosts=["local", "ultron"], triage_host="local")
+        data.pop("defaults")  # The default is six.
+        host.save(data)
+        self.stub("journalctl", ("*", journal([0] * 6)))
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 1, out)
+        entry = json.loads(out)["acme/widgets"]
+        self.assertEqual(entry["host"], "local")
+        self.assertEqual([alert["host"] for alert in entry["failure_streaks"]], ["ultron"])
+
+        data = self.register("launchd", [1] * 3)
+        table = data["repo"]["acme/widgets"]
+        table.pop("host")
+        table.update(hosts=["local", "ultron"], triage_host="local")
+        host.save(data)
+        self.stub("journalctl", ("*", journal([1] * 3)))
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(json.loads(out)["acme/widgets"]["failure_streaks"], [])
+
+    def test_status_streak_still_detected_when_factory_import_crashes(self):
+        self.register("systemd", [1] * 6)
+        self.stub("factory", ("dashboard *", ERROR, 1))
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(json.loads(out)["acme/widgets"]["failure_streaks"][0]["last_error"], ERROR)
+
+    def test_doctor_streak_clears_after_success(self):
+        for backend in ("systemd", "launchd"):
+            with self.subTest(backend=backend):
+                self.register(backend, [1] * 5 + [0])
+                _, out = self.district("doctor", "--json")
+                self.assertFalse(any("failure streak" in row["label"] for row in json.loads(out)["rows"]))
+
+    def test_status_streak_rejects_invalid_threshold(self):
+        for value in (0, -1, True, "6"):
+            with self.subTest(value=value):
+                self.register("systemd", [1] * 6, threshold=value)
+                code, out = self.district("status")
+                self.assertEqual(code, 1, out)
+                self.assertIn("failed_pass_streak must be a positive integer", out)
+
+    def test_status_streak_missing_history_does_not_reuse_old_alert(self):
+        self.register("systemd", [1] * 6)
+        self.assertEqual(self.district("status")[0], 1)
+        self.stub("journalctl", ("*", "permission denied", 1))
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 2, out)
+        entry = json.loads(out)["acme/widgets"]
+        self.assertEqual(entry["failure_streaks"], [])
+        self.assertIn("permission denied", entry["pass_history_errors"][0]["error"])
+
+    def test_status_streak_threshold_one_and_remote_override(self):
+        data = self.register("launchd", [1], threshold=6)
+        data["hosts"]["ultron"]["defaults"] = {"failed_pass_streak": 1}
+        host.save(data)
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(json.loads(out)["acme/widgets"]["failure_streaks"][0]["count"], 1)
+
+    def test_status_streak_malformed_journal_is_an_observation_error(self):
+        self.register("systemd", [1] * 6)
+        bad = json.loads(journal([1]).splitlines()[-1])
+        bad["__REALTIME_TIMESTAMP"] = []
+        self.stub("journalctl", ("*", journal([1] * 6) + json.dumps(bad)))
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 2, out)
+        entry = json.loads(out)["acme/widgets"]
+        self.assertEqual(entry["failure_streaks"], [])
+        self.assertFalse(entry["pass_history_errors"][0]["unreachable"])
+
+    def test_status_streak_uses_only_latest_window(self):
+        for backend in ("systemd", "launchd"):
+            with self.subTest(backend=backend):
+                self.register(backend, [0] + [1] * 6)
+                code, out = self.district("status", "--json")
+                self.assertEqual(code, 1, out)
+                alert = json.loads(out)["acme/widgets"]["failure_streaks"][0]
+                self.assertEqual(alert["first_failed_at"], "2026-11-02T12:10:00+00:00")
+                self.assertEqual(alert["last_failed_at"], "2026-11-02T13:00:00+00:00")
+
+    def test_status_streak_reports_latest_error_not_an_earlier_pass(self):
+        self.register("systemd", [1] * 6)
+        records = [json.loads(line) for line in journal([1] * 6).splitlines()]
+        records[-2]["MESSAGE"] = "ImportError: newer failure"
+        self.stub("journalctl", ("*", "\n".join(map(json.dumps, records))))
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(json.loads(out)["acme/widgets"]["failure_streaks"][0]["last_error"],
+                         "ImportError: newer failure")
+
+    def test_status_streak_does_not_prefer_old_log_over_undated_completion(self):
+        self.register("launchd", [1] * 6)
+        config = json.loads((self.tmp / "ssh.json").read_text())
+        home = Path(config["targets"]["factory@ultron.example"]["home"])
+        plist = home / "Library/LaunchAgents/factory-widgets.plist"
+        document = plistlib.loads(plist.read_bytes())
+        stderr = home / "stderr.log"
+        stderr.write_text("=== end rc=0 ===\n")
+        document["StandardErrorPath"] = str(stderr)
+        plist.write_bytes(plistlib.dumps(document))
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 2, out)
+        self.assertEqual(json.loads(out)["acme/widgets"]["failure_streaks"], [])
+
+    def test_status_streak_launchd_reports_separate_stderr(self):
+        self.register("launchd", [1] * 6)
+        config = json.loads((self.tmp / "ssh.json").read_text())
+        home = Path(config["targets"]["factory@ultron.example"]["home"])
+        plist = home / "Library/LaunchAgents/factory-widgets.plist"
+        document = plistlib.loads(plist.read_bytes())
+        Path(document["StandardOutPath"]).write_text(pass_log([1] * 6).replace(ERROR, "starting pass"))
+        stderr = home / "crash.log"
+        stderr.write_text(f"Traceback (most recent call last):\n{ERROR}\n")
+        document["StandardErrorPath"] = str(stderr)
+        plist.write_bytes(plistlib.dumps(document))
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(json.loads(out)["acme/widgets"]["failure_streaks"][0]["last_error"], ERROR)
