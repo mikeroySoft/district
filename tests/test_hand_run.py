@@ -492,6 +492,18 @@ class HandRunTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(self.launch_log.exists())
 
+    def test_bundled_interpreter_options_do_not_hide_scripts(self):
+        helper = self.source / "helper"
+        for invocation in ("bash -euo pipefail ./helper", "python3 -uW ignore ./helper"):
+            with self.subTest(invocation=invocation):
+                helper.write_text("import subprocess\nsubprocess.run(['bash', '/tmp/external-live.sh'])\n"
+                                  if invocation.startswith("python") else "bash /tmp/external-live.sh\n")
+                self.script.write_text(f"#!/bin/bash\n{invocation}\n")
+                result = self.command("launch", "532-chain", self.script)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("/tmp/external-live.sh", result.stderr)
+                self.assertFalse(self.launch_log.exists())
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
