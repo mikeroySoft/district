@@ -20,9 +20,15 @@ _LIVE_SCRIPT = re.compile(
     rb"(?:(?<![^\s\"'`=|;&(<>])|(?<=#!))"
     rb"(?P<path>(?:/|\$HOME/|\$\{HOME\}/|~/)[^\x00\r\n\t \"'`|;&()<>]*\.(?:sh|py))(?![A-Za-z0-9._-])"
 )
+_SHELL_WORD = rb"(?:\"(?:\\.|[^\"\\\r\n])*\"|'[^'\r\n]*'|\\[^\r\n]|[^\s\"'`;|&()<>\\])+"
+# Overlapping matches retain literal sources nested inside another argument.
 _SOURCE = re.compile(
-    rb"(?:^|[\s;|&()])(?:source|\.|\"source\"|'source'|\"\.\"|'\.')[ \t]+(?:--[ \t]+)?"
-    rb"(?P<path>\"(?:\\.|[^\"\\\r\n])*\"|'[^'\r\n]*'|(?:\\[^\r\n]|[^\s\"'`;|&()<>\\])+)"
+    rb"(?=(?:^|[\s;|&()`\"'])(?P<command>" + _SHELL_WORD
+    + rb")(?P<arguments>(?:[ \t]+" + _SHELL_WORD + rb")+))"
+)
+_SOURCE_REDIRECTION = re.compile(
+    rb"(?=(?:^|[\s;|&()`])(?P<command>" + _SHELL_WORD + rb")[ \t]*(?:--[ \t]+)?"
+    rb"(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})?(?:[<>]|&>))"
 )
 _VERIFIER = r'''import hashlib, os, pathlib, stat, sys
 root = pathlib.Path(sys.argv[1])
@@ -144,7 +150,7 @@ def _replace_paths(path: Path, replacements: list[tuple[bytes, bytes]]) -> None:
         path.write_bytes(changed)
 
 
-def _source_references(value: bytes, script: Path) -> Iterator[str]:
+def _source_references(value: bytes, script: Path) -> Iterator[tuple[str, str]]:
     value = value.replace(b"\\\n", b"")
     if b"$'" in value or b'$"' in value:
         raise ValueError(f"cannot inspect sourced dependencies in {script}: unsupported Bash quoting")
@@ -153,16 +159,51 @@ def _source_references(value: bytes, script: Path) -> Iterator[str]:
         # could execute inside a multiline quoted string beginning with '#'.
         if line.lstrip().startswith(b"#") and b"$(" not in line and b"`" not in line:
             continue
+        for match in _SOURCE_REDIRECTION.finditer(line):
+            command = shlex.split(os.fsdecode(match.group("command")), comments=False)
+            if command in (["source"], ["."]):
+                raise ValueError(f"cannot inspect sourced dependencies in {script}: redirection before source argument")
         # Extract only the literal source argument. Tokenizing an entire Bash
         # statement as POSIX sh can hide sources inside substitutions or after
         # parameter expansions such as ${file##*/}.
         for match in _SOURCE.finditer(line):
             try:
-                words = shlex.split(os.fsdecode(match.group("path")), comments=False)
+                command = shlex.split(os.fsdecode(match.group("command")), comments=False)
+                if len(command) != 1:
+                    continue
+                name = Path(command[0]).name
+                if command[0] in {"source", "."}:
+                    kind = "source"
+                elif command[0] == "cd":
+                    kind = "cd"
+                elif re.fullmatch(r"(?:ba|da|k|z)?sh|python(?:[0-9]+(?:\.[0-9]+)*)?", name):
+                    kind = "python" if name.startswith("python") else "shell"
+                else:
+                    continue
+                words = shlex.split(os.fsdecode(match.group("arguments")), comments=False)
             except ValueError as error:
                 raise ValueError(f"cannot inspect sourced dependencies in {script}: {error}") from error
-            if len(words) == 1:
-                yield words[0]
+            index = 0
+            while index < len(words) and words[index].startswith(("-", "+")):
+                option = words[index]
+                index += 1
+                if option == "--":
+                    break
+                if kind in {"shell", "python"}:
+                    if option in {"-c", "-m"} or (
+                        kind == "shell" and not option.startswith("--") and "c" in option[1:]
+                    ):
+                        index = len(words)
+                        break
+                    operands = {"-o", "-O", "+o", "+O", "--rcfile", "--init-file"} if kind == "shell" else {
+                        "-X", "-W", "--check-hash-based-pycs"
+                    }
+                    if option in operands:
+                        if option in {"--rcfile", "--init-file"} and index < len(words):
+                            yield "shell", words[index]
+                        index += 1
+            if index < len(words):
+                yield kind, words[index]
 
 
 def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
@@ -174,6 +215,7 @@ def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
             scripts.add(path)
     pending = list(scripts)
     sourced: set[Path] = set()
+    python_inputs: set[Path] = set()
     inspected: set[Path] = set()
     # Scripts can cd before sourcing. Conservatively search every copied
     # directory instead of assuming the entry script's initial working directory.
@@ -187,25 +229,45 @@ def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
             continue
         first = value.split(b"\n", 1)[0]
         if script not in sourced and (
-            script.suffix == ".py" or (first.startswith(b"#!") and b"python" in first.lower())
+            script in python_inputs or script.suffix == ".py" or (first.startswith(b"#!") and b"python" in first.lower())
         ):
             continue
         inspected.add(script)
-        for text in _source_references(value, script):
+        for kind, text in _source_references(value, script):
+            for prefix in ("$HOME/", "${HOME}/"):
+                if text.startswith(prefix):
+                    text = str(Path.home() / text[len(prefix):])
+                    break
             if any(part in text for part in ("$", "`")):
                 # Runtime-constructed dependencies cannot be discovered statically.
                 continue
-            reference = Path(text)
+            if kind == "source" and "/" not in text:
+                raise ValueError(f"cannot inspect sourced PATH lookup {text!r} in {script}; use an explicit ./ path")
+            reference = Path(text).expanduser()
             candidates = {reference} if reference.is_absolute() else {
                 directory / reference for directory in working_dirs
             }
-            for candidate in candidates:
-                candidate = candidate.resolve()
-                if reference.is_absolute() and not candidate.is_relative_to(frozen_root):
-                    raise ValueError(f"cannot relocate live sourced script reference {str(reference)!r} in {script}")
+            resolved = {candidate.resolve() for candidate in candidates}
+            if kind == "cd":
+                discovered = {candidate for candidate in resolved if candidate.is_dir()} - working_dirs
+                if discovered:
+                    working_dirs.update(discovered)
+                    inspected.clear()
+                    pending.extend(scripts)
+                continue
+            if not any(candidate.is_relative_to(frozen_root) for candidate in resolved):
+                raise ValueError(f"cannot relocate live sourced script reference {str(reference)!r} in {script}")
+            for candidate in resolved:
+                if not candidate.is_relative_to(frozen_root):
+                    if candidate.exists():
+                        raise ValueError(f"cannot relocate live sourced script reference {str(reference)!r} in {script}")
+                    continue
                 if candidate in files:
                     scripts.add(candidate)
-                    if candidate not in sourced:
+                    if kind == "python" and candidate not in python_inputs:
+                        python_inputs.add(candidate)
+                        pending.append(candidate)
+                    elif kind != "python" and candidate not in sourced:
                         sourced.add(candidate)
                         pending.append(candidate)
     return scripts
