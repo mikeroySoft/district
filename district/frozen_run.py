@@ -1,6 +1,7 @@
 """Build immutable, self-verifying hand-run snapshots."""
 from __future__ import annotations
 
+from collections.abc import Iterator
 import hashlib
 import json
 import os
@@ -18,10 +19,6 @@ _LIVE_SCRIPT = re.compile(
     # A complete token, not the slash suffix of ./x.sh, $dir/x.sh or lib/x.py.
     rb"(?:(?<![^\s\"'`=|;&(<>])|(?<=#!))"
     rb"(?P<path>(?:/|\$HOME/|\$\{HOME\}/|~/)[^\x00\r\n\t \"'`|;&()<>]*\.(?:sh|py))(?![A-Za-z0-9._-])"
-)
-_SOURCE = re.compile(
-    rb"(?:^|[\s;|&()])(?:source|\.)[ \t]+"
-    rb"(?P<path>\"(?:\\.|[^\"\\\r\n])*\"|'[^'\r\n]*'|(?:\\[^\r\n]|[^\s;|&()<>\\])+)"
 )
 _VERIFIER = r'''import hashlib, os, pathlib, stat, sys
 root = pathlib.Path(sys.argv[1])
@@ -143,33 +140,53 @@ def _replace_paths(path: Path, replacements: list[tuple[bytes, bytes]]) -> None:
         path.write_bytes(changed)
 
 
+def _source_references(value: bytes) -> Iterator[str]:
+    for line in os.fsdecode(value).replace("\\\n", "").splitlines():
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|()<>")
+        lexer.whitespace_split = True
+        try:
+            words = list(lexer)
+        except ValueError:
+            # An isolated line of a multiline quote need not be shell syntax.
+            continue
+        for index, word in enumerate(words[:-1]):
+            if word in {"source", "."}:
+                argument = index + 1
+                if words[argument] == "--":
+                    argument += 1
+                if argument < len(words):
+                    yield words[argument]
+
+
 def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:
     """Find script inputs, including literal sourced fragments with any name."""
+    files = {path for path in frozen_root.rglob("*") if path.is_file()}
     scripts = set(entries)
-    for path in frozen_root.rglob("*"):
-        if path.is_file() and (path.suffix in {".sh", ".py"} or path.read_bytes().startswith(b"#!")):
+    for path in files:
+        if path.suffix in {".sh", ".py"} or path.read_bytes().startswith(b"#!"):
             scripts.add(path)
     pending = list(scripts)
-    working_dirs = {entry.parent for entry in entries}
+    # Scripts can cd before sourcing. Conservatively search every copied
+    # directory instead of assuming the entry script's initial working directory.
+    working_dirs = {frozen_root} | {path.parent for path in files}
     while pending:
         script = pending.pop()
         value = script.read_bytes()
         if b"\0" in value:
             continue
-        for match in _SOURCE.finditer(value.replace(b"\\\n", b"")):
-            words = shlex.split(os.fsdecode(match.group("path")))
-            if len(words) != 1 or any(part in words[0] for part in ("$", "`")):
+        for text in _source_references(value):
+            if any(part in text for part in ("$", "`")):
                 # Runtime-constructed dependencies cannot be discovered statically.
                 continue
-            reference = Path(words[0])
+            reference = Path(text)
             candidates = {reference} if reference.is_absolute() else {
-                directory / reference for directory in working_dirs | {script.parent}
+                directory / reference for directory in working_dirs
             }
             for candidate in candidates:
                 candidate = candidate.resolve()
-                if not candidate.is_relative_to(frozen_root):
+                if reference.is_absolute() and not candidate.is_relative_to(frozen_root):
                     raise ValueError(f"cannot relocate live sourced script reference {str(reference)!r} in {script}")
-                if candidate.is_file() and candidate not in scripts:
+                if candidate in files and candidate not in scripts:
                     scripts.add(candidate)
                     pending.append(candidate)
     return scripts
