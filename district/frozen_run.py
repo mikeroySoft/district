@@ -27,8 +27,8 @@ _SOURCE = re.compile(
     + rb")(?P<arguments>(?:[ \t]+" + _SHELL_WORD + rb")+))"
 )
 _SOURCE_REDIRECTION = re.compile(
-    rb"(?=(?:^|[\s;|&()`])(?P<command>" + _SHELL_WORD + rb")[ \t]*(?:--[ \t]+)?"
-    rb"(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})?(?:[<>]|&>))"
+    rb"(?=(?:^|[\s;|&()`\"'])(?P<command>" + _SHELL_WORD
+    + rb")(?P<arguments>(?:[ \t]+" + _SHELL_WORD + rb")*)[ \t]*(?:[<>]|&>))"
 )
 _VERIFIER = r'''import hashlib, os, pathlib, stat, sys
 root = pathlib.Path(sys.argv[1])
@@ -150,6 +150,51 @@ def _replace_paths(path: Path, replacements: list[tuple[bytes, bytes]]) -> None:
         path.write_bytes(changed)
 
 
+def _command_kind(raw: bytes) -> str | None:
+    command = shlex.split(os.fsdecode(raw), comments=False)
+    if len(command) != 1:
+        return None
+    if command[0] in {"source", "."}:
+        return "source"
+    if command[0] == "cd":
+        return "cd"
+    name = Path(command[0]).name
+    if re.fullmatch(r"(?:ba|da|k|z)?sh|python(?:[0-9]+(?:\.[0-9]+)*)?", name):
+        return "python" if name.startswith("python") else "shell"
+    return None
+
+
+def _file_arguments(kind: str, words: list[str]) -> Iterator[tuple[str, str]]:
+    index = 0
+    while index < len(words) and words[index].startswith(("-", "+")):
+        option = words[index]
+        index += 1
+        if option == "--":
+            break
+        if kind in {"shell", "python"}:
+            if option.startswith("--"):
+                name, separator, attached = option.partition("=")
+                if name in {"--rcfile", "--init-file", "--check-hash-based-pycs"}:
+                    if name in {"--rcfile", "--init-file"}:
+                        if separator:
+                            yield "shell-init", attached
+                        elif index < len(words):
+                            yield "shell-init", words[index]
+                    if not separator:
+                        index += 1
+            else:
+                for offset, flag in enumerate(option[1:], 1):
+                    if flag == "c" or (kind == "python" and flag == "m"):
+                        index = len(words)
+                        break
+                    if flag in ({"o", "O"} if kind == "shell" else {"X", "W"}):
+                        if offset == len(option) - 1:
+                            index += 1
+                        break
+    if index < len(words):
+        yield kind, words[index]
+
+
 def _source_references(value: bytes, script: Path) -> Iterator[tuple[str, str]]:
     value = value.replace(b"\\\n", b"")
     if b"$'" in value or b'$"' in value:
@@ -160,50 +205,28 @@ def _source_references(value: bytes, script: Path) -> Iterator[tuple[str, str]]:
         if line.lstrip().startswith(b"#") and b"$(" not in line and b"`" not in line:
             continue
         for match in _SOURCE_REDIRECTION.finditer(line):
-            command = shlex.split(os.fsdecode(match.group("command")), comments=False)
-            if command in (["source"], ["."]):
-                raise ValueError(f"cannot inspect sourced dependencies in {script}: redirection before source argument")
+            kind = _command_kind(match.group("command"))
+            if kind is None:
+                continue
+            prefix = re.sub(
+                rb"(?:^|[ \t])(?:[0-9]+|\{[A-Za-z_][A-Za-z0-9_]*\})[ \t]*$",
+                b"", match.group("arguments"),
+            )
+            words = shlex.split(os.fsdecode(prefix), comments=False)
+            if not any(argument_kind == kind for argument_kind, _ in _file_arguments(kind, words)):
+                raise ValueError(f"cannot inspect sourced dependencies in {script}: redirection before file argument")
         # Extract only the literal source argument. Tokenizing an entire Bash
         # statement as POSIX sh can hide sources inside substitutions or after
         # parameter expansions such as ${file##*/}.
         for match in _SOURCE.finditer(line):
             try:
-                command = shlex.split(os.fsdecode(match.group("command")), comments=False)
-                if len(command) != 1:
-                    continue
-                name = Path(command[0]).name
-                if command[0] in {"source", "."}:
-                    kind = "source"
-                elif command[0] == "cd":
-                    kind = "cd"
-                elif re.fullmatch(r"(?:ba|da|k|z)?sh|python(?:[0-9]+(?:\.[0-9]+)*)?", name):
-                    kind = "python" if name.startswith("python") else "shell"
-                else:
+                kind = _command_kind(match.group("command"))
+                if kind is None:
                     continue
                 words = shlex.split(os.fsdecode(match.group("arguments")), comments=False)
             except ValueError as error:
                 raise ValueError(f"cannot inspect sourced dependencies in {script}: {error}") from error
-            index = 0
-            while index < len(words) and words[index].startswith(("-", "+")):
-                option = words[index]
-                index += 1
-                if option == "--":
-                    break
-                if kind in {"shell", "python"}:
-                    if option in {"-c", "-m"} or (
-                        kind == "shell" and not option.startswith("--") and "c" in option[1:]
-                    ):
-                        index = len(words)
-                        break
-                    operands = {"-o", "-O", "+o", "+O", "--rcfile", "--init-file"} if kind == "shell" else {
-                        "-X", "-W", "--check-hash-based-pycs"
-                    }
-                    if option in operands:
-                        if option in {"--rcfile", "--init-file"} and index < len(words):
-                            yield "shell", words[index]
-                        index += 1
-            if index < len(words):
-                yield kind, words[index]
+            yield from _file_arguments(kind, words)
 
 
 def _script_inputs(frozen_root: Path, entries: list[Path]) -> set[Path]:

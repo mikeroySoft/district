@@ -104,8 +104,8 @@ targets and HOME expansion are included when checking relative source paths.
 If a literal source argument cannot be inspected, launch refuses with its script
 path rather than silently skipping dependencies. Bash ANSI-C (`$'...'`) and
 locale-translation (`$"..."`) quoting are not supported and are refused explicitly.
-Redirections before a source filename are also refused; place them after the
-filename. Relative source paths must remain inside the frozen snapshot.
+Redirections before a source/interpreter filename are also refused; place them
+after the filename. Relative source paths must remain inside the frozen snapshot.
 Python files are not shell-tokenized unless explicitly sourced as shell.
 Do not construct paths back to live scripts dynamically. Script outputs belong
 outside the read-only snapshot.
