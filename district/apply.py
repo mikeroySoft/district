@@ -1464,13 +1464,14 @@ def smoke(slugs, backend=None, *, run_cmd=None) -> tuple[int, list[str]]:
     return units, fails
 
 
-def _host_context(data: dict, host_name: str):
-    """(run_cmd, backend) for one host; a remote host gets its synced factory config first."""
+def _host_context(data: dict, host_name: str, *, sync: bool = True):
+    """Build owning-host commands/backend; drain preflight must not sync config before idle."""
     if host_name == "local":
         return run, host.service_backend()
     target = data["hosts"][host_name]
     run_cmd = host.remote_runner(host_name, target)
-    host.sync_remote_config(data, host_name, run_cmd)
+    if sync:
+        host.sync_remote_config(data, host_name, run_cmd)
     return run_cmd, host.service_backend(target, run=run_cmd)
 
 
@@ -1484,7 +1485,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     if host_name != "local":
         facts = run_cmd.facts()
         install_env = {"PATH": host.service_path(facts["path"], home=Path(facts["home"]))}
-    previous = (host.engine(data, host_name) or {}).get("previous") if engine_result == "applied" else installed_engine_commit(data, host_name)
+    previous = installed_engine_commit(data, host_name)
 
     rows = []
     completed = {}
@@ -1602,7 +1603,11 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
             record.drains[host_name].update(
                 folders_before=cleaned["folders_before"], folders_after=cleaned["folders_after"])
             print(f"legacy factory folders {host_name}: {cleaned['folders_before']} -> {cleaned['folders_after']}")
+            if cleaned["scan_errors"] or cleaned["remove_errors"]:
+                print(f"postcheck FAIL {host_name}: legacy engine cleanup incomplete")
+                code = 1
     if host_name in record.drains and engine_result in ("applied", "unchanged"):
+        previous = (host.engine(data, host_name) or {}).get("previous") or previous
         failures = postcheck.check(data, host_name, run_cmd, backend, all_repos, previous=previous,
                                    deadline=record.drain_deadlines[host_name][1])
         for failure in failures:
@@ -1673,7 +1678,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             # Wait before policy, migrations, unit changes or any install is applied.
             for name in dict.fromkeys([*fleet_hosts, *groups]):
                 try:
-                    runner, backend = _host_context(data, name)
+                    runner, backend = _host_context(data, name, sync=False)
                     repos = _host_repos(data, name)
                     explicit_contexts[name] = (runner, backend, repos)
                     _start_drain(record, name, runner)
@@ -1685,6 +1690,9 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         host.sync_local_claims(data)
         status, warnings = policy(data)
         host.save(data)
+        for name, (runner, _, _) in explicit_contexts.items():
+            if name != "local":
+                host.sync_remote_config(data, name, runner)
 
         rows = []
         smokes = []

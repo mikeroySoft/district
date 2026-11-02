@@ -287,6 +287,12 @@ class DrainTest(unittest.TestCase):
             self.assertTrue(any("unlink" in command[2] and command[-1].endswith("/drain")
                                 for command in commands if command[:2] == ["python3", "-c"]))
             self.assert_no_timer_changes(case)
+            remote_config = Path(runner.facts()["config_home"]) / "factory/config.toml"
+            before = remote_config.read_bytes()
+            with mock.patch.object(host, "remote_runner", return_value=runner):
+                self.timeout_case(case)
+            self.assertEqual(remote_config.read_bytes(), before, "timeout must not sync or migrate remote config")
+            self.assertFalse(drain.path().exists())
 
     def test_failed_flag_write_does_not_register_a_live_drain(self):
         with self.case() as case:
@@ -316,6 +322,16 @@ class DrainTest(unittest.TestCase):
             self.assertIsNotNone(row["disabled"])
             case.backend.enable.assert_called_once()
             self.assertEqual(case.backend.enable.call_args.args, ("factory-widgets.timer", False))
+
+    def test_incomplete_cleanup_does_not_mark_drain_applied(self):
+        with self.case() as case:
+            result = {"folders_before": 2, "folders_after": 2,
+                      "scan_errors": ["unreadable unit drop-in"], "remove_errors": []}
+            with mock.patch.object(apply, "cleanup", return_value=result):
+                self.assertEqual(self.run_apply(case), 1)
+            self.assertIsNone(self.record()["drain"]["applied_at"])
+            self.assertFalse(drain.path().exists())
+            self.assertIn("legacy engine cleanup incomplete", case.output.getvalue())
 
 
 if __name__ == "__main__":
