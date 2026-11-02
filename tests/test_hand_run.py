@@ -237,6 +237,17 @@ class HandRunTest(unittest.TestCase):
         self.assertIn(str(interpreter), result.stderr)
         self.assertFalse(self.launch_log.exists())
 
+    def test_copied_script_shebang_interpreter_stays_frozen(self):
+        interpreter = self.source / "interpreter.sh"
+        interpreter.write_text('#!/bin/bash\nexec /bin/bash "$@"\n')
+        interpreter.chmod(0o755)
+        self.script.write_text(f"#!{interpreter}\nprintf 'approved\\n'\n")
+        start, _ = self.launch()
+        interpreter.write_text("#!/bin/bash\nexit 91\n")
+        result = subprocess.run([str(start)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "approved")
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
