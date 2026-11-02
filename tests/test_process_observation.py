@@ -60,6 +60,9 @@ class ProcessObservationTest(unittest.TestCase):
             flag, value = (("-X", "pycache_prefix=/tmp/Cache Files") if form == "option-X"
                            else ("-W", "ignore:message with spaces:UserWarning"))
             exact_argv = [str(launcher), flag, value, "-m", "factory", command]
+        if form == "terminated-script":
+            command_args = ["--base", "origin/main"] if command == "gate" else ["--ticket", "12"]
+            exact_argv = [str(launcher), "--", str(case.cli), command, *command_args]
         if argv_override is not None:
             exact_argv = argv_override
         argv_text = " ".join(exact_argv)
@@ -152,6 +155,10 @@ class ProcessObservationTest(unittest.TestCase):
         self.assertIn("invalid C-locale ps row" if mode in ("malformed", "identity-malformed")
                       else "ambiguous Factory command text" if platform == "macos" or mode in ("empty", "unreadable")
                       else f"pid 321 factory {command}", reason)
+        if not rollback:
+            paused = {name for event, name in case.events if event == "pause"}
+            self.assertEqual(paused, set() if phase == "before" else
+                             {"factory-widgets.timer", "factory-idle.timer"})
         if rollback:
             self.assertIn("rollback FAIL", reason)
             self.assertEqual(case.active, set())
@@ -266,6 +273,46 @@ class ProcessObservationTest(unittest.TestCase):
                     with self.subTest(option=option, phase=phase, blocked=blocked, command=command):
                         self.case.hand_work_fleet(f"dashboard-{command}", phase=phase, blocked=blocked,
                                                   python_option=option)
+
+    def test_python_terminated_launcher_blocks_replacement_and_automatic_rollback(self):
+        for remote in (False, True):
+            for command in ("gate", "dispatch"):
+                for phase in ("before", "after", "rollback"):
+                    with self.subTest(remote=remote, command=command, phase=phase):
+                        self.observation_case(remote=remote, platform="linux", form="terminated-script",
+                                              command=command, phase=phase, rollback=phase == "rollback")
+
+    def test_python_terminated_launcher_blocks_fleet_replacement_and_outer_rollback(self):
+        for phase, blocked in (("before", "local"), ("before", "remote"),
+                               ("after", "local"), ("after", "remote"),
+                               ("install", "remote"), ("rollback", "local")):
+            for command in ("gate", "dispatch"):
+                with self.subTest(phase=phase, blocked=blocked, command=command):
+                    self.case.hand_work_fleet(command, phase=phase, blocked=blocked,
+                                              form="terminated-script")
+
+    def test_python_entrypoint_boundaries_with_exact_proc_argv(self):
+        python = str(self.case.tool / "bin/python")
+        launcher = str(self.case.cli)
+        cases = (
+            (["-bBm", "factory", "gate"], True, "gate"),
+            (["-mfactory", "gate"], True, "gate"),
+            (["-Wignore", launcher, "dispatch"], True, "dispatch"),
+            (["-X", "dev", "--", launcher, "gate"], True, "gate"),
+            (["--check-hash-based-pycs", "always", "--", launcher, "gate"], True, "gate"),
+            (["--help-env", "--unknown", "-bBdEiIOOPqRsSuvVx", launcher, "gate"], True, "gate"),
+            (["--", "-m", "factory", "gate"], False, "gate"),
+            (["-", launcher, "gate"], False, "gate"),
+            (["-c", launcher, "gate"], False, "gate"),
+            (["-Ic", launcher, "gate"], False, "gate"),
+            ([f"-c{launcher}", "gate"], False, "gate"),
+            (["--", "/tmp/unrelated.py", "gate"], False, "gate"),
+        )
+        for remote in (False, True):
+            for args, busy, command in cases:
+                with self.subTest(remote=remote, args=args):
+                    self.observation_case(remote=remote, platform="linux", busy=busy,
+                                          command=command, argv_override=[python, *args])
 
     def test_vanished_process_and_exact_dashboard_do_not_block(self):
         for remote in (False, True):

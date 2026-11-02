@@ -20,9 +20,11 @@ import sys
 import tomllib
 import time
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Iterable
+from typing import Literal
 
 from district import host, install_state, systemd
 from district.engine_cleanup import cleanup
@@ -1094,36 +1096,55 @@ def busy_units(services: list[str], backend=None, *, timeout: float | None = Non
             if backend.is_active(service, **kwargs) in ("active", "activating", "deactivating")]
 
 
-def _python_entrypoint(argv: Iterable[str]) -> list[str]:
-    """Stop at Python's module/script boundary, not text in script arguments."""
+@dataclass(frozen=True)
+class _PythonEntrypoint:
+    kind: Literal["script", "module", "command", "stdin", "none"]
+    target: str | None = None
+    args: tuple[str, ...] = ()
+
+
+# Value-taking options end a short-option group; only c/m select an entrypoint.
+_PYTHON_VALUE_OPTIONS = {"c": "command", "m": "module", "W": None, "X": None,
+                         "--check-hash-based-pycs": None}
+
+
+def _python_entrypoint(argv: Iterable[str]) -> _PythonEntrypoint:
+    """Parse exact CPython argv once, keeping script/module/command boundaries distinct."""
     args = iter(argv)
     for arg in args:
-        if arg in {"-", "--"}:
-            return []
-        if arg == "--check-hash-based-pycs":
-            next(args, None)
-        elif not arg.startswith("-"):
-            return [arg, *args]
-        elif option := re.match(r"^-[^-]*?([cmWX])(.*)$", arg):
-            # Short options can group; c/m/W/X consume the rest or the next token.
-            flag, value = option.groups()
-            if flag == "c":
-                return []
-            value = value or next(args, "")
-            if flag == "m":
-                return ["-m", value, *args]
-    return []
+        if arg == "--":
+            target = next(args, None)
+            return (_PythonEntrypoint("script", target, tuple(args)) if target is not None
+                    else _PythonEntrypoint("none"))
+        if arg == "-":
+            return _PythonEntrypoint("stdin", args=tuple(args))
+        if not arg.startswith("-"):
+            return _PythonEntrypoint("script", arg, tuple(args))
+        if arg.startswith("--"):
+            if arg in _PYTHON_VALUE_OPTIONS:
+                next(args, None)
+            continue  # Long flags (including unknown ones) consume no following value.
+        for index, flag in enumerate(arg[1:], 2):
+            if flag not in _PYTHON_VALUE_OPTIONS:
+                continue  # Short flags may repeat or group, e.g. -bBOO.
+            value = arg[index:] or next(args, None)
+            kind = _PYTHON_VALUE_OPTIONS[flag]
+            if kind is not None:
+                return _PythonEntrypoint(kind, value, tuple(args))
+            break
+    return _PythonEntrypoint("none")
 
 
 def _python_factory_args(executable: str, words: Iterable[str], tool_bins: set[Path],
                          launchers: set[str]) -> list[str]:
     if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(executable).name):
         return []
-    args = _python_entrypoint(words)
-    if args and args[0] in launchers:
-        return args[1:]
-    if Path(executable).parent in tool_bins and args[:2] == ["-m", "factory"]:
-        return args[2:]
+    entrypoint = _python_entrypoint(words)
+    if entrypoint.kind == "script" and entrypoint.target in launchers:
+        return list(entrypoint.args)
+    if (entrypoint.kind == "module" and entrypoint.target == "factory"
+            and Path(executable).parent in tool_bins):
+        return list(entrypoint.args)
     return []
 
 

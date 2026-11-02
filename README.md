@@ -198,9 +198,12 @@ Managed exemptions require an
 unchanged owning-host `(PID, start time)`: Linux uses `/proc/PID/stat` field 22
 (after the final comm parenthesis). Linux reads NUL-separated `/proc/<pid>/cmdline`
 and brackets it with start-time observations on the owning host. Remote observations
-return JSON argv lists, never whitespace-joined arguments. Python options before
-`-m factory`, including multiword `-X`/`-W` values and attached/grouped forms,
-retain their exact boundaries. A process that vanishes during observation is gone;
+return JSON argv lists, never whitespace-joined arguments. A structured CPython
+entrypoint model distinguishes scripts, modules, commands and stdin. Python options
+before `-m factory`, including multiword `-X`/`-W` values and attached/grouped forms,
+retain their exact boundaries. `python -- <known Factory launcher> gate/dispatch`
+is work; after `--`, a literal `-m` is a script filename, never a module option.
+A process that vanishes during observation is gone;
 an unreadable or empty cmdline with managed-path command text is ambiguous and busy.
 macOS uses C-locale, unbounded-width `ps -ww` for command text and lstart identity.
 Text cannot prove argv boundaries: any mention of the configured or owning-host-resolved

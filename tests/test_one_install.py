@@ -861,11 +861,13 @@ class OneInstallTest(unittest.TestCase):
         observed_tool = self.tool.resolve() if space_paths else self.tool
         python = str(observed_tool / "bin/python")
         option = list(python_option or ())
-        command_args = ["--base", "origin/main"] if command == "gate" else ["--ticket", "42"]
+        command_args = ["--base", "origin/main"] if command == "gate" else ["--ticket", "12"]
         observed_argv = ([python, *option, "-uSmfactory", command, *command_args]
                          if form == "module" else
                          [str(self.cli), command, *command_args] if form == "launcher" else
                          [python, *option, "-u", str(self.cli), command, *command_args])
+        if form == "terminated-script":
+            observed_argv = [python, "--", str(self.cli), command, *command_args]
         argv_text = " ".join(observed_argv)
 
         def commands(name, argv, **kwargs):
@@ -882,6 +884,17 @@ class OneInstallTest(unittest.TestCase):
                 output = "42 0 factory-widgets-dashboard\n" if work.startswith("dashboard-") else ""
                 return subprocess.CompletedProcess(argv, 0, output, "")
             if argv[:2] == ["python3", "-c"] and "'cmdline'" in argv[2]:
+                if form == "terminated-script":
+                    root = self.root / f"fleet-proc-{name}"
+                    directory = root / "321"
+                    directory.mkdir(parents=True, exist_ok=True)
+                    (directory / "stat").write_text("321 (worker) S 1 " + "0 " * 17 + "100 0\n")
+                    (directory / "cmdline").write_bytes(
+                        b"\0".join(word.encode() for word in observed_argv) + b"\0"
+                        if name == blocked and available else b"")
+                    return subprocess.run(
+                        [sys.executable, "-c", argv[2].replace("'/proc/'", repr(str(root) + "/")), *argv[3:]],
+                        capture_output=True, text=True, timeout=kwargs["timeout"])
                 rows = {}
                 if name == blocked and available and command in ("gate", "dispatch"):
                     parent = "42" if work.startswith("dashboard-") else "1"
