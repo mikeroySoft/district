@@ -204,6 +204,21 @@ SIGTERM, or SIGINT. `district drain --clear` removes the local flag;
 `--host NAME` clears one registered remote host. `district doctor` warns about
 active, expired, stale, malformed, future-mtime, or unreadable flags.
 
+Drain admission requires Factory's companion
+[`drain-check` support (factory#563)](https://github.com/mikeroySoft/factory/issues/563)
+and updated pass units. Check `factory drain-check --help`, then roll out the
+rendered `ExecCondition=` (or launchd script gate) through an ordinary apply
+before relying on drains. Older pass units ignore the flag; District still
+checks running work and times out rather than swapping a busy engine.
+
+Before clearing a successful drain, District probes Factory help, version,
+tool-Python import and receipt, verifies the target revision or a descendant,
+checks registered dashboards for HTTP 200, and restarts the installed District
+dashboard before checking HTTP 200. It also validates the previous engine in
+temporary `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` directories without touching the live
+install. `factory watch --dry-run` runs from a registered repository checkout,
+never the invoking directory; no available checkout is an explicit check failure.
+
 The hourly apply automatically drains an engine change after 3 prior
 deferrals or once the original deferral is more than 24 hours old. Earlier
 attempts remain plain deferrals. A successful `district update` invokes
