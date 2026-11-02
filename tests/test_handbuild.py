@@ -33,9 +33,10 @@ def factory_python():
 FACTORY_PYTHON = factory_python()
 
 
-@unittest.skipUnless(FACTORY_PYTHON, "hand-build integration requires an installed Factory")
 class HandbuildTest(unittest.TestCase):
     def setUp(self):
+        if not FACTORY_PYTHON:
+            self.skipTest("hand-build integration requires an installed Factory")
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.wt = self.tmp / "wt"
         self.wt.mkdir()
