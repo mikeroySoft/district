@@ -153,7 +153,7 @@ tests/test_district.py
 ### 2.2 `district add <path|url>`
 
 1. URL → `gh repo clone <url> <clone_dir>/<name>`, `clone_dir` from
-   `[defaults.clone_dir]` (default `~/dev/mikeroysoft`).
+   `[defaults.clone_dir]` (default `~/dev`).
 2. `factory doctor --json` in the repo → resolved `repo` slug (honours a
    committed `[repo].slug`). If doctor cannot run (no git remote), stop.
 3. **Write the registry entry first**: `path`, `dashboard.port = next_port()`.
