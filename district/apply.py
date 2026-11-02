@@ -694,8 +694,8 @@ def _engine_busy(runner, backend, repos, *, deadline: float) -> list[str]:
     busy = busy_units(services, backend, timeout=remaining_timeout(deadline))
     busy += _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
     tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
-    _, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
-    return list(dict.fromkeys(busy + processes))
+    outside, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
+    return list(dict.fromkeys(busy + outside + processes))
 
 
 def _wait_drained(record, name: str, runner, backend, repos, *, deadline: float) -> None:
