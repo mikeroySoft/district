@@ -43,6 +43,9 @@ only once.
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table across local and remote hosts. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. An unreachable host keeps its factories visible as unreachable with the last successful observation time and produces unknown exit 2, not fleet failure exit 1. Exit 1 remains operational attention or a failed controller `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row); exit 0 means every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
 | `district doctor` | Check District's own host prerequisites and every toolchain profile declared by a managed repository. `--json`. |
+| `district hand-run launch NAME SCRIPT` | Freeze local hand-run scripts and dependencies, then start a `handland-*` user unit. `--stop-post SCRIPT`, repeatable `--include DIR` and `--arg VALUE`. |
+| `district hand-run update TARGET REPLACEMENT` | Atomically replace a script; refuse while an active unit or process uses it or its frozen source tree. |
+| `district hand-run check` | Fail if an active hand-run unit executes live, writable, or checksum-invalid scripts. |
 | `district report` | Print a read-only Markdown fleet review across every host; each repository section names its host and unreachable last-seen state. The install section comes from the persisted install-state record. |
 | `district metrics [slug]` | Per-factory `git`/`gh` metrics from the hourly cache. `--refresh`, `--max-age`. |
 | `district dashboard` | Serve the fleet console and host-badged Atlas on `127.0.0.1:8760`. `--install` enables the dashboard, metrics, and apply units; `--host` adds read-only LAN viewing. Remote collection is controller-initiated SSH and opens no listeners. |
@@ -63,6 +66,52 @@ state: active timers are drained and restored; inactive timers are stopped again
 without disabling them if install starts them. First installs and unchanged units
 still converge an inactive timer through install. A retained inactive timer remains visible in apply's
 output and nonzero convergence status.
+
+## Frozen hand-run chains
+
+Launch local Linux orchestration through District, not directly through
+`systemd-run`:
+
+```sh
+data="${XDG_DATA_HOME:-$HOME/.local/share}/district"
+district hand-run launch 532-chain "$data/handland-532/chain.sh" \
+  --stop-post "$data/handland-532/stop.sh"
+district hand-run check
+```
+
+Each launch prints a unique `$data/runs/<run-id>/` directory. District copies
+all `handland-*` trees into its `bin/`, including sourced shell files, Python
+scripts, and helper directories such as those containing `sitecustomize.py`.
+Use repeatable `--include "$data/other-helpers"` for additional dependency
+directories below District's data directory. Dependencies must be regular files
+and directories, not symlinks.
+
+Absolute source paths and their `$HOME`, `${HOME}`, and `~/` forms are relocated
+to the copies; relative references run from the copied entry script's directory.
+Keep script dependencies in these copied trees. Literal external shell/Python
+script paths are rejected; do not construct paths back to live scripts
+dynamically. Script outputs belong outside the read-only snapshot.
+
+The complete snapshot is `chmod a-w` with a SHA-256 `checksums.txt`. Both
+ExecStart and optional ExecStopPost execute wrappers inside the run directory.
+Each wrapper verifies file inventory, permissions, and checksums before running
+any orchestration step; mismatch refuses execution, including stop-hook actions.
+`district hand-run check` reports unsafe active/starting/stopping/reloading
+hand-run units with a nonzero exit, naming the unit and ExecStart or ExecStopPost.
+
+Prepare changes in a separate file, then use the guarded update command:
+
+```sh
+district hand-run update "$data/handland-532/chain.sh" /tmp/chain.next.sh
+```
+
+Updates preserve permissions and replace the target by a same-directory atomic
+rename. They refuse with a named unit/process reason if the target is referenced
+by an active unit's ExecStart/ExecStopPost, belongs to that unit's frozen run or
+source trees, or is executing/open in `/proc`. Stop the unit and wait for its
+processes to exit before retrying. Launches and updates share a lock; failed
+inspection refuses an update rather than guessing. Never edit a running chain
+or its frozen snapshot in place.
 
 ## Ownership
 
