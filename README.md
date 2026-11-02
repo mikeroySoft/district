@@ -260,8 +260,9 @@ then `%h` and `%%` are expanded before resolving symlink aliases. Malformed
 quotes/escapes, unresolved specifiers or unreadable fragments report the source
 file and line where available, make the scan incomplete, and prevent every deletion.
 Config/receipt TOML and plist values are scanned as complete strings, preserving
-spaces and literal quotes in paths. Referenced directories and symlinks are kept
-and reported.
+spaces and literal quotes in paths. HOME/tilde expansion adds possible references
+without discarding the original literal spelling. Referenced directories and
+symlinks are kept and reported.
 Local and remote cleanup normalize TOML date, time, and datetime settings to ISO
 strings; unsupported scalar types raise before cleanup removes anything.
 A legacy `factory_source` setting is removed through District's config writer

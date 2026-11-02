@@ -125,23 +125,24 @@ def _systemd_values(text, home):
 
 
 def _references(value, candidate, home):
-    value = _expanded(value, home)
     logical, resolved = candidate
-    for spelling in {logical, resolved}:
-        if re.search(re.escape(spelling) + r"(?=$|[/\s\"'<>\[\]{},;:)])", value):
-            return True
-    complete_values = {value}
-    if "=" in value:
-        complete_values.add(value.split("=", 1)[1])
-    complete_values.update(item.lstrip("-@:+!") for item in tuple(complete_values))
-    complete_values.update(part for item in tuple(complete_values) for part in item.split(":"))
-    for complete in complete_values:
-        if complete.startswith("/") and _within(os.path.realpath(complete), resolved):
-            return True
-    for match in _PATH.finditer(value):
-        token = match.group(0).replace(r"\ ", " ").rstrip(":)")
-        if _within(os.path.realpath(token), resolved):
-            return True
+    # Expansion adds possible references; it must not erase literal path bytes.
+    for value in {value, _expanded(value, home)}:
+        for spelling in {logical, resolved}:
+            if re.search(re.escape(spelling) + r"(?=$|[/\s\"'<>\[\]{},;:)])", value):
+                return True
+        complete_values = {value}
+        if "=" in value:
+            complete_values.add(value.split("=", 1)[1])
+        complete_values.update(item.lstrip("-@:+!") for item in tuple(complete_values))
+        complete_values.update(part for item in tuple(complete_values) for part in item.split(":"))
+        for complete in complete_values:
+            if complete.startswith("/") and _within(os.path.realpath(complete), resolved):
+                return True
+        for match in _PATH.finditer(value):
+            token = match.group(0).replace(r"\ ", " ").rstrip(":)")
+            if _within(os.path.realpath(token), resolved):
+                return True
     return False
 
 

@@ -164,6 +164,25 @@ class QuotedEngineCleanupReferencesTest(unittest.TestCase):
             self.assertTrue(target.exists(), escape)
             self.assertIn(str(target), self.output.getvalue())
 
+    def test_literal_home_markers_in_quoted_complete_paths_are_not_lost(self):
+        agents = self.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        for remote in (False, True):
+            for index, parent in enumerate(('$HOME', '${HOME}', '~')):
+                with self.subTest(remote=remote, parent=parent):
+                    target = self.leftover(f"home-marker-{remote}-{index}")
+                    directory = self.root / str(remote) / parent
+                    directory.mkdir(parents=True, exist_ok=True)
+                    alias = directory / 'Engine "Quoted" Alias'
+                    alias.symlink_to(target, target_is_directory=True)
+                    (agents / f"factory-marker-{remote}-{index}.plist").write_bytes(plistlib.dumps({
+                        "Label": f"factory-marker-{remote}-{index}",
+                        "WorkingDirectory": str(alias),
+                    }))
+                    engine_cleanup.cleanup({}, run_cmd=self.remote_runner() if remote else None)
+                    self.assertTrue(target.exists())
+                    self.assertIn(str(target), self.output.getvalue())
+
     def test_malformed_systemd_quoting_and_escapes_block_all_deletion(self) -> None:
         for remote in (False, True):
             with self.subTest(remote=remote):
