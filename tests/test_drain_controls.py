@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from district import cli, doctor, drain, host, metrics, update
+from district import doctor, drain, host, metrics, update
 
 
 UTC = timezone.utc
@@ -54,7 +54,7 @@ class DrainFlagTest(unittest.TestCase):
             self.assertEqual(
                 drain.path(), self.tmp / "other-home" / ".local" / "state" / "district" / "drain")
 
-    def test_request_atomically_writes_factory_contract_and_caps_ttl(self) -> None:
+    def test_flag_contract_matches_factory(self) -> None:
         destination = drain.path()
         replaced = []
         real_replace = os.replace
@@ -183,10 +183,6 @@ class DrainCliTest(unittest.TestCase):
             "XDG_CACHE_HOME": str(self.tmp / "cache"),
         }))
 
-    def test_top_level_cli_dispatches_drain_clear(self) -> None:
-        with mock.patch.object(drain, "main", return_value=7) as main:
-            self.assertEqual(cli.main(["drain", "--clear"]), 7)
-        main.assert_called_once_with(["--clear"])
 
     def test_clear_holds_operation_lock_and_refuses_contention(self) -> None:
         with mock.patch.object(drain, "clear") as clear:
@@ -214,12 +210,18 @@ class DrainCliTest(unittest.TestCase):
 
 
 class DrainDoctorTest(unittest.TestCase):
-    def test_doctor_warns_with_drain_status_diagnosis(self) -> None:
+    def test_expired_flag_ignored_and_reported_by_doctor(self) -> None:
         backend = mock.Mock()
         backend.manager_status.return_value = "running"
         empty_rows = ("factory_rows", "toolchain_rows", "remote_config_rows", "parity_rows",
                       "repo_rows", "port_rows", "policy_rows", "unit_rows")
         with contextlib.ExitStack() as stack:
+            root = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            stack.enter_context(mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root)}))
+            flag = drain.request(timeout=1)
+            created = datetime.now(UTC) - timedelta(hours=1)
+            flag.update(created_at=created.isoformat(), expires_at=(created + timedelta(minutes=1)).isoformat())
+            drain.path().write_text(json.dumps(flag))
             stack.enter_context(mock.patch.object(doctor.host, "load", return_value={}))
             stack.enter_context(mock.patch.object(doctor.host, "hosts", return_value={}))
             stack.enter_context(mock.patch.object(doctor.host, "repos", return_value={}))
@@ -228,11 +230,12 @@ class DrainDoctorTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(doctor, "gh_auth", return_value=doctor.row("PASS", "gh auth", "ok")))
             for name in empty_rows:
                 stack.enter_context(mock.patch.object(doctor, name, return_value=[]))
-            stack.enter_context(mock.patch.object(doctor.drain, "status", return_value=(
-                "expired drain flag; no longer blocks Factory; district drain --clear removes it")))
             rows = doctor.check()
-        self.assertIn(doctor.row(
-            "WARN", "drain", "expired drain flag; no longer blocks Factory; district drain --clear removes it"), rows)
+        warning = next(item for item in rows if item["label"] == "drain")
+        self.assertEqual(warning["status"], "WARN")
+        self.assertIn("expired drain flag", warning["detail"])
+        self.assertIn("no longer blocks Factory", warning["detail"])
+        self.assertIn("district drain --clear", warning["detail"])
 
 
 class MetricsLockTest(unittest.TestCase):
@@ -348,6 +351,39 @@ class UpdateDrainTest(unittest.TestCase):
         self.assertEqual((code, emitted["status"]), (1, "prepare-failed"))
         self.assertFalse(self.marker.exists())
         self.assertFalse(drain.path().exists())
+
+    def test_up_to_date_update_still_drains_pending_engine_but_dry_run_does_not(self) -> None:
+        self.lock.parent.mkdir(parents=True)
+        plan, context = self.plan()
+        plan["target"] = plan["installed"]
+        code, emitted = self.invoke(plan, context, {"ok": True}, "--yes", "--json")
+        self.assertEqual((code, emitted["status"]), (0, "up-to-date"))
+        self.assertTrue(self.marker.exists())
+        self.marker.unlink()
+        plan, context = self.plan(dry_run=True)
+        plan["target"] = plan["installed"]
+        code, emitted = self.invoke(plan, context, {"ok": True}, "--dry-run", "--json")
+        self.assertEqual(code, 0)
+        self.assertFalse(self.marker.exists())
+
+    def test_update_signal_reaches_child_and_waits_for_drain_clear(self) -> None:
+        self.entrypoint.write_text(
+            "#!/usr/bin/python3\n"
+            "import os,pathlib,signal,time\n"
+            "flag=pathlib.Path(os.environ['DRAIN_TEST_MARKER'])\n"
+            "def stop(signum,frame):\n"
+            " flag.unlink(missing_ok=True)\n"
+            " raise SystemExit(128+signum)\n"
+            "signal.signal(signal.SIGTERM,stop)\n"
+            "flag.write_text('active drain')\n"
+            "os.kill(int(os.environ['DRAIN_TEST_PARENT']),signal.SIGTERM)\n"
+            "time.sleep(10)\n"
+        )
+        with mock.patch.dict(os.environ, {"DRAIN_TEST_PARENT": str(os.getpid())}):
+            with self.assertRaises(SystemExit) as caught:
+                update.drained_apply(self.entrypoint)
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+        self.assertFalse(self.marker.exists(), "update returned before the child cleared its drain")
 
 
 if __name__ == "__main__":

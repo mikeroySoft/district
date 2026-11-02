@@ -225,6 +225,9 @@ class DrainTest(unittest.TestCase):
             record.defer("engine", "busy: factory-widgets.service")
             record.deferred["engine"]["since"] = apply.iso(apply.now() - timedelta(hours=25))
             record.finish(0)
+            previous = install_state.read_record()
+            previous["schema_version"] = 2
+            install_state.write_record(previous)
             case.busy = 2
             self.assertEqual(apply.main([]), 0)
             self.assertTrue(case.installs())
@@ -284,6 +287,35 @@ class DrainTest(unittest.TestCase):
             self.assertTrue(any("unlink" in command[2] and command[-1].endswith("/drain")
                                 for command in commands if command[:2] == ["python3", "-c"]))
             self.assert_no_timer_changes(case)
+
+    def test_failed_flag_write_does_not_register_a_live_drain(self):
+        with self.case() as case:
+            record = install_state.ApplyRun("", "", fixtures.OLD, engine_deferrals={"engine": 3})
+            with contextlib.ExitStack() as stack:
+                record.drain_stack = stack
+                with mock.patch.object(drain, "request", side_effect=OSError("state directory denied")):
+                    self.assertEqual(case.reconcile(record=record), "failed")
+            self.assertEqual(record.drains, {})
+            self.assertFalse(drain.path().exists())
+            self.assertFalse(case.installs())
+
+    def test_other_host_drain_does_not_suspend_local_failure_cap(self):
+        with self.case() as case:
+            record = install_state.ApplyRun("", "", fixtures.OLD, drains={"remote": {}})
+            original = case.run_cmd
+
+            def runner(argv, **kwargs):
+                if argv[1:] == ["dashboard", "--json"]:
+                    return subprocess.CompletedProcess(argv, 0, json.dumps({
+                        "version": "0.4.7", "dispatcher": {"consecutive_failures": 10}}), "")
+                return original(argv, **kwargs)
+
+            host.save(case.data)
+            row = apply.repo_pass("acme/widgets", case.data["repo"]["acme/widgets"],
+                                  case.data, record, backend=case.backend, run_cmd=runner)
+            self.assertIsNotNone(row["disabled"])
+            case.backend.enable.assert_called_once()
+            self.assertEqual(case.backend.enable.call_args.args, ("factory-widgets.timer", False))
 
 
 if __name__ == "__main__":

@@ -612,7 +612,10 @@ def _hand_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline:
 
 def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
     paused = (host.engine(data, name) or {}).get("paused_timers", [])
-    if not paused or (record is not None and name in record.drains):
+    if not paused:
+        return
+    if record is not None and name in record.drains:
+        print(f"engine:{name} keeping legacy paused timers during drain: {', '.join(paused)}; run `district apply` to restore")
         return
     blocked = (host.engine(data, name) or {}).get("install_pending", {}).get("rollback_blocked")
     if blocked:
@@ -661,10 +664,10 @@ def _host_drain(record, name: str, runner, timeout: float):
     started = time.monotonic()
     entry = {"requested_at": iso(now()), "idle_at": None, "applied_at": None,
              "cleared_at": None, "waited_s": 0.0}
-    record.drains[name] = entry
     # Register cleanup before writing: a remote rename may succeed even if SSH disconnects.
     try:
         flag = drain_flag.request(runner, timeout=timeout)
+        record.drains[name] = entry
         entry["requested_at"] = flag["created_at"]
         ttl = (datetime.fromisoformat(flag["expires_at"].replace("Z", "+00:00")) -
                datetime.fromisoformat(flag["created_at"].replace("Z", "+00:00"))).total_seconds()
@@ -736,8 +739,8 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
         yield record.drain_deadlines[name][1]
         return
     if deadline is None:
-        deadline = time.monotonic() + max(
-            SMOKE_TIMEOUT, hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600)
+        timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
+        deadline = time.monotonic() + timeout
     try:
         busy = _engine_busy(runner, backend, repos, deadline=deadline)
     except subprocess.TimeoutExpired:
@@ -1002,8 +1005,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
             if (_engine_current(pin[1], tool, cli, runner)
                     and not (host.engine(data, name) or {}).get("paused_timers")):
                 continue
-            timeout = max(SMOKE_TIMEOUT, hours(
-                host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600)
+            timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
             deadlines[name] = time.monotonic() + timeout
             target = "engine" if name == "local" else f"engine:{name}"
             if record is not None and (
@@ -1344,7 +1346,8 @@ def reset(slug: str, table: dict, data: dict, record: install_state.ApplyRun | N
 
 
 def repo_pass(slug: str, table: dict, data: dict,
-              record: install_state.ApplyRun | None = None, *, backend=None, run_cmd=None) -> dict:
+              record: install_state.ApplyRun | None = None, *, backend=None, run_cmd=None,
+              draining: bool = False) -> dict:
     run_cmd = run if run_cmd is None else run_cmd
     root = Path(table["path"])
     backend = backend or host.service_backend()
@@ -1386,7 +1389,7 @@ def repo_pass(slug: str, table: dict, data: dict,
 
     cap = int(host.default(data, "max_failed_passes"))
     if (row["failures"] is not None and row["failures"] >= cap
-            and not (record and record.drains) and backend.is_active(f"{unit}.timer") == "active"):
+            and not draining and backend.is_active(f"{unit}.timer") == "active"):
         disable_timers([f"{unit}.timer"], DRAIN_TIMEOUT, backend, check=False, record=record)
         table["disabled_at"] = iso(now())
         table["disabled_reason"] = f"{row['failures']} consecutive failed passes (cap {cap})"
@@ -1523,15 +1526,18 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     _, factory_cli = host.factory_tool_paths(run_cmd)
     for slug, table in targets.items():
         if engine_result == "failed":
-            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd,
+                            draining=host_name in record.drains)
             row["fail"].append("engine step failed; install skipped")
         elif slug in render_errors:
-            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd,
+                            draining=host_name in record.drains)
             row["fail"].extend(render_errors[slug])
         elif table.get("disabled_at"):
-            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd,
+                            draining=host_name in record.drains)
         elif host_name in record.drains:
-            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd, draining=True)
             if changes[slug] or args.reset:
                 reason = "unit changes deferred during district drain (timers untouched)"
                 record.defer(slug, reason)
@@ -1666,10 +1672,13 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         if record.drain_timeout is not None:
             # Wait before policy, migrations, unit changes or any install is applied.
             for name in dict.fromkeys([*fleet_hosts, *groups]):
-                runner, backend = _host_context(data, name)
-                repos = _host_repos(data, name)
-                explicit_contexts[name] = (runner, backend, repos)
-                _start_drain(record, name, runner)
+                try:
+                    runner, backend = _host_context(data, name)
+                    repos = _host_repos(data, name)
+                    explicit_contexts[name] = (runner, backend, repos)
+                    _start_drain(record, name, runner)
+                except (OSError, host.RemoteHostError, subprocess.TimeoutExpired) as exc:
+                    raise DistrictError(f"drain preflight failed on {name}: {exc}; nothing applied") from exc
             for name, (runner, backend, repos) in explicit_contexts.items():
                 _wait_drained(record, name, runner, backend, repos,
                               deadline=record.drain_deadlines[name][0])
@@ -1760,11 +1769,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
     parser.add_argument("--drain", action="store_true", help="request Factory skip new timer passes, then wait for idle")
     parser.add_argument("--drain-timeout", default="6h", metavar="DURATION",
-                        help="maximum drain wait (default 6h, maximum 7h45min)")
+                        help="maximum drain wait (default 6h, maximum 465min)")
     args = parser.parse_args(argv)
     args.drain_timeout = hours(args.drain_timeout, "--drain-timeout") * 3600
     if args.drain_timeout > drain_flag.DRAIN_MAX_TTL - 900:
-        parser.error("--drain-timeout must be at most 7h45min (8h flag cap minus 15min install margin)")
+        parser.error("--drain-timeout must be at most 465min (8h flag cap minus 15min install margin)")
     record = install_state.ApplyRun.start()
     code = 1
     try:

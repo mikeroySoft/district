@@ -232,6 +232,7 @@ rocm-app   capped             <span class="att">attention</span>
       <div class="k">district update</div><div class="v">Resolve an official ref to one immutable SHA, require the successful <code>ci.yml</code> <code>test</code> job for that SHA, and transactionally replace only District's uv tool. A successful update releases its transaction lock before the newly installed CLI runs <code>district apply --drain</code>; dry runs and failed updates do not drain. Supports query-only <code>--dry-run</code>, machine-readable <code>--json</code>, and retained offline <code>--rollback</code>.</div>
       <div class="k">district rm</div><div class="v">Disable and delete the units, drop the registry entry. Repo files untouched; the factory can be re-added later.</div>
     </div>
+    <p>A drain waits 6h by default; <code>--drain-timeout 465min</code> is the maximum wait, leaving 15 minutes within the 8h flag cap. Install-state schema 3 retains local <code>last_apply.drain</code> and per-host <code>last_apply.drains</code>, including requested/idle/applied/cleared timestamps, seconds waited, and cleanup folder counts. An already-current <code>district update</code> still requests a drained apply for pending engine work; dry runs and offline rollback do not.</p>
   </section>
 
   <section id="console">

@@ -435,7 +435,7 @@ def metrics_lock():
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise UpdateError(f"another District metrics operation is running ({path})") from exc
-        yield
+        yield lock.fileno()
 
 
 def install_helper(root: Path) -> Path:
@@ -489,7 +489,8 @@ def prepare(plan: dict, context: dict) -> Path:
     return stage
 
 
-def run_helper(python: Path, helper: Path, mode: str, path: Path, root: Path, lock_fd: int) -> tuple[int, dict]:
+def run_helper(python: Path, helper: Path, mode: str, path: Path, root: Path,
+               lock_fd: int, metrics_fd: int) -> tuple[int, dict]:
     result_path = root / "last-result.json"
     result_path.unlink(missing_ok=True)
     with (root / "transaction.log").open("a") as log:
@@ -499,7 +500,7 @@ def run_helper(python: Path, helper: Path, mode: str, path: Path, root: Path, lo
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=True,
-            pass_fds=(lock_fd,),
+            pass_fds=(lock_fd, metrics_fd),
             env={**os.environ, "DISTRICT_UPDATE_LOCK_FD": str(lock_fd)},
         )
         try:
@@ -548,12 +549,12 @@ def recover_pending(args: argparse.Namespace) -> int | None:
         if not confirm(plan, args.json):
             emit({**plan, "ok": False, "status": "cancelled"}, args.json)
             return 1
-    with operation_lock() as lock_fd, metrics_lock():
+    with operation_lock() as lock_fd, metrics_lock() as metrics_fd:
         helper = root / "transaction.py"
         if not helper.is_file():
             raise UpdateError(f"retained transaction helper is missing: {helper}")
         python = external_python(Path("/__district_unmanaged__"))
-        code, result = run_helper(python, helper, "recover", root, root, lock_fd)
+        code, result = run_helper(python, helper, "recover", root, root, lock_fd, metrics_fd)
     emit(result, args.json, error=code != 0)
     return 0 if code == 0 else 1
 
@@ -573,7 +574,7 @@ def cleanup_transients(root: Path, state: dict | None) -> None:
             candidate.unlink(missing_ok=True)
 
 
-def execute(plan: dict, context: dict, lock_fd: int) -> dict:
+def execute(plan: dict, context: dict, lock_fd: int, metrics_fd: int) -> dict:
     root = context["root"]
     state = context["state"]
     cleanup_transients(root, state)
@@ -612,7 +613,7 @@ def execute(plan: dict, context: dict, lock_fd: int) -> dict:
     }
     write_request(request, data)
     try:
-        code, result = run_helper(context["python"], helper, "run", request, root, lock_fd)
+        code, result = run_helper(context["python"], helper, "run", request, root, lock_fd, metrics_fd)
     except UpdateError:
         if not (root / "transaction.json").exists():
             cleanup_transients(root, state)
@@ -628,10 +629,20 @@ def execute(plan: dict, context: dict, lock_fd: int) -> dict:
 
 def drained_apply(entrypoint: Path) -> dict:
     argv = [str(entrypoint), "apply", "--drain"]
+    env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME")}
     try:
-        proc = command(argv, timeout=drain.DRAIN_MAX_TTL + 15 * 60)
-    except UpdateError as exc:
-        return {"ok": False, "error": str(exc)}
+        with drain.interrupted():
+            child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            try:
+                stdout, stderr = child.communicate(timeout=drain.DRAIN_MAX_TTL + 15 * 60)
+            except (SystemExit, KeyboardInterrupt, subprocess.TimeoutExpired):
+                with contextlib.suppress(ProcessLookupError):
+                    child.send_signal(signal.SIGTERM)
+                child.communicate(timeout=30)
+                raise
+            proc = subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": f"district apply --drain failed: {exc}"}
     result = {"ok": proc.returncode == 0, "returncode": proc.returncode}
     if proc.stdout:
         result["stdout"] = proc.stdout
@@ -641,6 +652,13 @@ def drained_apply(entrypoint: Path) -> dict:
         lines = (proc.stderr or proc.stdout).strip().splitlines()
         result["error"] = lines[-1] if lines else f"district apply --drain exited {proc.returncode}"
     return result
+
+
+def _drain_after_update(result: dict, entrypoint: Path) -> None:
+    result["drain_apply"] = drained_apply(entrypoint)
+    if not result["drain_apply"]["ok"]:
+        result["ok"] = False
+        result["error"] = f"post-update drained apply failed: {result['drain_apply']['error']}"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -661,8 +679,10 @@ def main(argv: list[str] | None = None) -> int:
         plan, context = make_plan(args)
         if plan["target"]["sha"] == plan["installed"]["sha"]:
             plan.update(ok=True, status="up-to-date", operations=[])
+            if not args.dry_run and not args.rollback:
+                _drain_after_update(plan, context["entrypoint"])
             emit(plan, args.json)
-            return 0
+            return 0 if plan["ok"] else 1
         if plan["ci"] is not None and not plan["ci"]["eligible"]:
             plan["status"] = "ineligible"
             emit(plan, args.json)
@@ -679,15 +699,12 @@ def main(argv: list[str] | None = None) -> int:
                 result = {**plan, "ok": False, "status": "cancelled"}
                 emit(result, args.json)
                 return 1
-        with operation_lock() as lock_fd, metrics_lock():
+        with operation_lock() as lock_fd, metrics_lock() as metrics_fd:
             if (context["root"] / "transaction.json").exists():
                 raise UpdateError("another update transaction appeared after preflight; invoke update again to recover")
-            result = execute(plan, context, lock_fd)
+            result = execute(plan, context, lock_fd, metrics_fd)
         if result.get("ok") and plan["mode"] == "update":
-            result["drain_apply"] = drained_apply(context["entrypoint"])
-            if not result["drain_apply"]["ok"]:
-                result["ok"] = False
-                result["error"] = f"post-update drained apply failed: {result['drain_apply']['error']}"
+            _drain_after_update(result, context["entrypoint"])
         emit(result, args.json)
         return 0 if result.get("ok") else 1
     except Exception as exc:

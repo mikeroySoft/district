@@ -220,7 +220,7 @@ def _verify_previous_at(failures: list[str], data: dict, runner, previous: str, 
         failures,
         "previous engine import factory",
         runner,
-        [str(tool / "bin" / "python"), "-c", "import factory"],
+        [str(tool / "bin" / "python"), "-I", "-c", "import factory"],
         deadline=deadline,
     )
 
@@ -282,7 +282,7 @@ def check(data: dict, name: str, runner, backend, repos: dict[str, dict], *,
         failures.extend(("import factory: factory tool path unavailable",
                          "factory receipt: factory tool path unavailable"))
     else:
-        _command(failures, "import factory", runner, [str(tool / "bin" / "python"), "-c", "import factory"],
+        _command(failures, "import factory", runner, [str(tool / "bin" / "python"), "-I", "-c", "import factory"],
                  deadline=deadline)
         _engine(failures, data, name, runner, tool, deadline=deadline)
     _dashboards(failures, runner, backend, repos, deadline=deadline)

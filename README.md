@@ -191,7 +191,7 @@ Factory passes see the flag and skip before starting work; already-running and
 hand-run passes are never stopped, killed, disabled, masked, or delayed.
 District waits for them to finish, re-checks idle before replacement, installs,
 migrates, cleans up, and runs post-apply checks. The default wait is 6 hours;
-`--drain-timeout` accepts at most 7h45m, reserving 15 minutes for installation.
+`--drain-timeout` accepts at most `465min` (7h45m), reserving 15 minutes for installation.
 While that flag exists, District does not call `factory install` and does not
 apply the failure cap, because Factory exposes no install-without-start option.
 Generated-unit drift is reported as
@@ -206,12 +206,14 @@ active, expired, stale, malformed, future-mtime, or unreadable flags.
 
 The hourly apply automatically drains an engine change after 3 prior
 deferrals or once the original deferral is more than 24 hours old. Earlier
-attempts remain plain deferrals. A successful `district update` invokes the
-newly installed `district apply --drain` only after the self-update transaction
-has released its lock; dry runs and failed updates do not drain. The apply
-operation lock permits only one drain, while metrics uses its independent lock
-and remains available during a long wait. Local and per-host remote drain
-timing is retained in the last-apply/install-state record.
+attempts remain plain deferrals. A successful `district update` invokes
+`district apply --drain` only after the self-update transaction releases its lock;
+an already-current District still drains a pending engine update. Dry runs,
+failed updates, and offline rollback do not drain. The apply operation lock
+permits only one drain, while metrics uses its independent lock and remains
+available during a long wait. Install-state schema 3 records local `last_apply.drain`
+and per-host `last_apply.drains`: `requested_at`, `idle_at`, `applied_at`,
+`cleared_at`, `waited_s`, and legacy folder counts before/after cleanup.
 
 One fail-closed rule handles every launch spelling while deciding whether the
 engine is idle:

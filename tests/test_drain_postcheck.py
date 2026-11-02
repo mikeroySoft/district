@@ -1,6 +1,7 @@
 """Issue #149: consumer-visible checks after a drained engine replacement."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -105,8 +106,8 @@ class FakeRunner:
                 return completed(argv, returncode=1 if "watch" in self.fail else 0,
                                  stderr="watch failed" if "watch" in self.fail else "")
 
-        if len(argv) >= 3 and Path(argv[0]).name.startswith("python") and argv[1] == "-c":
-            script = argv[2]
+        if len(argv) >= 3 and Path(argv[0]).name.startswith("python") and "-c" in argv:
+            script = argv[argv.index("-c") + 1]
             if "import factory" in script:
                 staged = str(argv[0]).startswith(tuple(str(root) for root in self.stage_roots))
                 key = "previous-import" if staged else "import"
@@ -151,10 +152,11 @@ class FakeRemote(host.RemoteRunner):
             ["--help"], ["--version"], ["watch", "--dry-run"],
         ):
             return completed(argv, stdout="factory 0.5.0\n" if argv[1:] == ["--version"] else "")
-        if len(argv) >= 3 and Path(argv[0]).name.startswith("python") and argv[1] == "-c":
-            if "import factory" in argv[2]:
+        if len(argv) >= 3 and Path(argv[0]).name.startswith("python") and "-c" in argv:
+            script = argv[argv.index("-c") + 1]
+            if "import factory" in script:
                 return completed(argv)
-            if "urlopen" in argv[2] or "HTTPConnection" in argv[2]:
+            if "urlopen" in script or "HTTPConnection" in script:
                 return completed(argv, stdout="200\n")
         raise AssertionError(f"unexpected remote command: {argv} {kwargs}")
 
@@ -192,17 +194,17 @@ class DrainPostcheckTest(unittest.TestCase):
         }
         self.repos = self.data["repo"]
 
-    def test_success_checks_live_engine_dashboards_and_repo_watch(self):
-        failures = postcheck.check(
-            self.data, "local", self.runner, self.backend, self.repos,
-        )
+    def test_postcheck_runs_factory_watch_from_repo_checkout(self):
+        with contextlib.chdir(self.root):
+            failures = postcheck.check(
+                self.data, "local", self.runner, self.backend, self.repos,
+            )
 
         self.assertEqual(failures, [])
         commands = [(argv, kwargs) for argv, kwargs in self.runner.calls]
         self.assertTrue(any(argv[1:] == ["--help"] for argv, _ in commands))
         self.assertTrue(any(argv[1:] == ["--version"] for argv, _ in commands))
-        self.assertTrue(any("import factory" in argv[2] for argv, _ in commands
-                            if len(argv) > 2 and argv[1] == "-c"))
+        self.assertTrue(any("import factory" in argv for argv, _ in commands))
         self.assertIn(
             ["gh", "api", f"repos/mikeroySoft/factory/compare/{TARGET}...{CURRENT}"],
             [argv for argv, _ in commands],

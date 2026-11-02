@@ -17,7 +17,7 @@ from pathlib import Path
 
 from district import __version__, host
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA_PATH = Path(__file__).with_name("install-state.schema.json")
 UNKNOWN = "unknown"
 CACHE_SECONDS = 3600
@@ -235,7 +235,7 @@ def read_record() -> dict:
         value = json.loads(state_path().read_text())
     except (OSError, ValueError):
         return {}
-    return value if isinstance(value, dict) and value.get("schema_version") == SCHEMA_VERSION else {}
+    return value if isinstance(value, dict) and value.get("schema_version") in (2, SCHEMA_VERSION) else {}
 
 
 def collect(*, data: dict | None = None, releases: dict | None = None,
