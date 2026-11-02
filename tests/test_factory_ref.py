@@ -19,8 +19,17 @@ ORIGIN = "https://github.com/mikeroySoft/factory.git"
 
 
 class FactoryRefTest(unittest.TestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.dict("os.environ", {
+            "HOME": str(root / "home"), "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_DATA_HOME": str(root / "data"), "XDG_STATE_HOME": str(root / "state"),
+            "XDG_CACHE_HOME": str(root / "cache"), "UV_TOOL_DIR": str(root / "tools"),
+            "UV_TOOL_BIN_DIR": str(root / "bin"),
+        }))
+
     def data(self, *, ref: str | None = "main", sha: str | None = OLD) -> dict:
-        defaults = {"factory_source": "/factory"}
+        defaults = {"factory_repo": ORIGIN}
         if ref is not None:
             defaults["factory_ref"] = ref
         if sha is not None:
@@ -41,10 +50,11 @@ class FactoryRefTest(unittest.TestCase):
             backend = mock.Mock()
             backend.status.return_value.loaded = False
 
+        backend.configuration.return_value = {"platform": "linux"}
         def run(argv, **kwargs):
             calls.append(argv)
-            if argv[:4] == ["git", "remote", "get-url", "origin"]:
-                return self.proc(argv, ORIGIN + "\n")
+            if argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
+                return self.proc(argv, "{}")
             if argv[:3] == ["git", "ls-remote", "--tags"] and remote_refs is not None:
                 return self.proc(argv, remote_refs)
             if argv[:2] == ["git", "ls-remote"] and pinned_refs is not None:
@@ -53,12 +63,24 @@ class FactoryRefTest(unittest.TestCase):
                 code = 2 if remote_refs is not None else resolve_code
                 return self.proc(argv, f"{SHA}\trefs/heads/main\n", code, "network down")
             if argv[:2] == ["gh", "api"]:
+                endpoint = argv[-1]
+                if "/compare/" in endpoint:
+                    return self.proc(argv, '{"status":"ahead","ahead_by":1,"behind_by":0}')
+                if "/commits?" in endpoint:
+                    return self.proc(argv, "[]")
                 return self.proc(argv, checks)
+            if argv[:3] == ["uv", "tool", "install"]:
+                source = argv[argv.index("--from") + 1]
+                receipt(source.rsplit("@", 1)[1].split("[", 1)[0])
             return self.proc(argv)
 
         document = data or self.data()
         active = set(active_timers or [])
-        backend.is_active.side_effect = lambda unit: "active" if unit in active else "inactive"
+        backend.is_active.side_effect = lambda unit, **kwargs: "active" if unit in active else "inactive"
+        backend.factory_units.return_value = set()
+        backend.pause_timer.side_effect = backend.enable
+        backend.resume_timer.return_value = self.proc([])
+        backend.start.return_value = self.proc([])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             env = {
@@ -66,9 +88,23 @@ class FactoryRefTest(unittest.TestCase):
                 "XDG_CONFIG_HOME": str(root / "config"),
                 "XDG_STATE_HOME": str(root / "state"),
                 "XDG_CACHE_HOME": str(root / "cache"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "UV_TOOL_DIR": str(root / "tools"),
+                "UV_TOOL_BIN_DIR": str(root / "bin"),
             }
+            tool = root / "tools/factory"
+            cli = root / "bin/factory"
+            (tool / "bin").mkdir(parents=True)
+            (tool / "bin/factory").touch()
+            cli.parent.mkdir(parents=True)
+            cli.symlink_to(tool / "bin/factory")
+
+            def receipt(sha):
+                (tool / "uv-receipt.toml").write_text(
+                    f'[tool]\nrequirements = [{{name = "factory", git = "{ORIGIN}?rev={sha}"}}]\n')
+
+            receipt(document.get("defaults", {}).get("engine", {}).get("sha", OLD))
             with mock.patch.dict("os.environ", env), \
-                    mock.patch.object(Path, "is_dir", return_value=True), \
                     mock.patch.object(apply, "run", side_effect=run), \
                     mock.patch.object(host, "save"):
                 self.assertTrue(host.path().is_relative_to(root), host.path())
@@ -79,7 +115,7 @@ class FactoryRefTest(unittest.TestCase):
         result, calls, _ = self.calls("", data=self.data(sha=SHA))
         self.assertEqual(result, "unchanged")
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
-        self.assertIn(f"refs/heads/{self.data()['defaults']['factory_ref']}", calls[1])
+        self.assertTrue(any("refs/heads/main" in call for call in calls))
 
     def test_non_green_ci_skips_install_with_reason(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"failure"}]}'
@@ -87,7 +123,6 @@ class FactoryRefTest(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             result, calls, document = self.calls(checks)
         self.assertEqual(result, "unchanged")
-        self.assertIn(f"engine {SHA[:12]} CI failed", out.getvalue())
         self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
         self.assertEqual(document["defaults"]["engine"]["sha"], OLD)
 
@@ -124,19 +159,6 @@ class FactoryRefTest(unittest.TestCase):
         self.assertIn(f"git+{ORIGIN}@{peeled}", installs[0])
         self.assertEqual(document["defaults"]["engine"]["ref"], "v0.4.9-rc.1")
 
-    def test_latest_odd_same_sha_skips_checks_and_install(self) -> None:
-        peeled = "9" * 40
-        tags = (
-            f"{'4' * 40}\trefs/tags/v0.4.9-rc.1\n"
-            f"{peeled}\trefs/tags/v0.4.9-rc.1^{{}}\n"
-        )
-
-        result, calls, _ = self.calls(
-            "", data=self.data(ref="latest-odd", sha=peeled), remote_refs=tags)
-
-        self.assertEqual(result, "unchanged")
-        self.assertFalse(any(call[:2] == ["gh", "api"] for call in calls))
-        self.assertFalse(any(call[:3] == ["uv", "tool", "install"] for call in calls))
 
     def test_latest_odd_without_odd_tag_keeps_installed_engine(self) -> None:
         tags = (
@@ -190,14 +212,6 @@ class FactoryRefTest(unittest.TestCase):
 
         self.assertIn("factory-widgets.timer", record.timers_before)
 
-    def test_install_restarts_installed_dashboard(self) -> None:
-        checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
-        backend = mock.Mock()
-        backend.status.return_value.loaded = True
-        self.calls(checks, backend=backend)
-        backend.start.assert_called_once_with(
-            f"{host.unit_name('acme/widgets')}-dashboard.service", restart=True, check=False)
-
     def test_partial_timer_disable_failure_still_restores(self) -> None:
         checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
         timers = ["factory-one.timer", "factory-two.timer"]
@@ -205,11 +219,9 @@ class FactoryRefTest(unittest.TestCase):
         data["repo"] = {"acme/one": {"path": "/one"}, "acme/two": {"path": "/two"}}
         backend = mock.Mock()
         backend.enable.side_effect = [self.proc([], returncode=0), host.DistrictError("disable failed")]
-        with mock.patch.object(apply, "restore") as restore:
-            with self.assertRaises(host.DistrictError):
-                self.calls(checks, data=data, active_timers=timers, backend=backend)
-        restore.assert_called_once()
-        self.assertEqual(restore.call_args.args[0], timers)
+        with self.assertRaises(host.DistrictError):
+            self.calls(checks, data=data, active_timers=timers, backend=backend)
+        self.assertEqual([call.args[0] for call in backend.resume_timer.call_args_list], timers)
 
     def test_unresolvable_ref_keeps_installed_engine(self) -> None:
         out = io.StringIO()

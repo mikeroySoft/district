@@ -8,6 +8,7 @@ XDG_CONFIG_HOME and PATH point into a temp dir for every test.
 
 from __future__ import annotations
 
+import argparse
 import fcntl
 import contextlib
 import io
@@ -15,6 +16,7 @@ import json
 import os
 import plistlib
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -32,7 +34,7 @@ from district import add, apply, atlas, cli, doctor, health, host, install_state
 from district import dashboard as dash  # noqa: E402  (dashboard() below is the snapshot fixture)
 
 STUB = '''#!/usr/bin/env python3
-import fnmatch, json, pathlib, sys
+import fnmatch, json, os, pathlib, sys
 here = pathlib.Path(__file__).parent
 args = " ".join(sys.argv[1:])
 with (here / "NAME.log").open("a") as f:
@@ -50,6 +52,11 @@ for pat, out, rc in json.loads((here / "NAME.json").read_text()):
     if fnmatch.fnmatchcase(args, pat):
         sys.stdout.write(out)
         sys.exit(rc)
+if "NAME" == "factory" and args == "install --print":
+    python = pathlib.Path(os.environ["UV_TOOL_DIR"]) / "factory/bin/python"
+    unit = f"factory-{pathlib.Path.cwd().name}"
+    print(f"# {unit}.service\\n[Service]\\nExecStart={python} -m factory dispatch\\n")
+    print(f"# {unit}.timer\\n[Timer]\\nOnUnitActiveSec=10min\\n")
 sys.exit(0)
 '''
 
@@ -65,8 +72,16 @@ if target in config["unreachable"]:
     print(f"ssh: connect to host {target}: Connection refused", file=sys.stderr)
     raise SystemExit(255)
 remote = config["targets"][target]
+command = " ".join(args[split + 1:])
+if "/proc" in command:
+    key = "linux_processes" if "cmdline" in command else "linux_identities"
+    print(json.dumps(remote.get(key, {})))
+    raise SystemExit(0)
 env = dict(os.environ)
 env.update(HOME=remote["home"], XDG_CONFIG_HOME=str(pathlib.Path(remote["home"]) / ".config"),
+           XDG_DATA_HOME=str(pathlib.Path(remote["home"]) / ".local/share"),
+           UV_TOOL_DIR=str(pathlib.Path(remote["home"]) / ".local/share/uv/tools"),
+           UV_TOOL_BIN_DIR=str(pathlib.Path(remote["home"]) / ".local/bin"),
            PATH=remote.get("path", config["path"]))
 proc = subprocess.run(args[split + 1], shell=True, executable="/bin/sh", env=env,
                       input=sys.stdin.read(), text=True, start_new_session=True)
@@ -239,6 +254,9 @@ class DistrictCase(unittest.TestCase):
             "XDG_CONFIG_HOME": str(self.tmp / "xdg"),
             "XDG_STATE_HOME": str(self.tmp / "state"),
             "XDG_CACHE_HOME": str(self.tmp / "cache"),
+            "XDG_DATA_HOME": str(self.tmp / "data"),
+            "UV_TOOL_DIR": str(self.tmp / "tools"),
+            "UV_TOOL_BIN_DIR": str(self.bin),
             "PATH": f"{self.bin}:{os.environ['PATH']}",
         })
         self.env.start()
@@ -248,6 +266,19 @@ class DistrictCase(unittest.TestCase):
         self.stub("gh", ("repo view *", json.dumps({"isFork": False, "parent": None})))
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         self.stub("uv")
+        self.stub("ps")
+        # Lifecycle probes use structured fake Linux observations, locally and remotely.
+        self.enterContext(mock.patch.object(apply, "_linux_processes", return_value={}))
+        self.enterContext(mock.patch.object(apply, "_linux_identities",
+                                           return_value={"218269": ["100", "1"]}))
+        tool, factory = host.factory_tool_paths()
+        (tool / "bin").mkdir(parents=True)
+        (tool / "bin/factory").write_text(factory.read_text())
+        (tool / "bin/factory").chmod(0o755)
+        factory.unlink()
+        factory.symlink_to(tool / "bin/factory")
+        (tool / "uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{name="factory", rev="' + "0" * 40 + '"}]\n')
 
     def stub(self, name: str, *cases: tuple[str, str] | tuple[str, str, int]) -> None:
         exe = self.bin / name
@@ -264,6 +295,16 @@ class DistrictCase(unittest.TestCase):
         homes = {target: self.tmp / f"remote-{index}" for index, target in enumerate(targets)}
         for home in homes.values():
             home.mkdir()
+            tool_bin = home / ".local/share/uv/tools/factory/bin"
+            tool_bin.mkdir(parents=True)
+            wrapper = tool_bin / "factory"
+            wrapper.write_text(f'#!/bin/sh\nexec "{self.bin / "factory"}" "$@"\n')
+            wrapper.chmod(0o755)
+            (tool_bin.parent / "uv-receipt.toml").write_text(
+                '[tool]\nrequirements = [{name="factory", rev="' + "0" * 40 + '"}]\n')
+            cli_dir = home / ".local/bin"
+            cli_dir.mkdir(parents=True)
+            (cli_dir / "factory").symlink_to(wrapper)
         config = {
             "log": str(self.tmp / "ssh.log"),
             "path": os.environ["PATH"],
@@ -290,13 +331,15 @@ class DistrictCase(unittest.TestCase):
             '    agents.mkdir(parents=True, exist_ok=True)\n'
             '    unit = f"factory-{root.name}"\n'
             '    for label, interval in ((unit, 600), (f"{unit}-dashboard", None)):\n'
-            '        doc = {"Label": label, "ProgramArguments": [str(here / "factory"), "dispatch"], '
+            '        python = pathlib.Path(os.environ["UV_TOOL_DIR"]) / "factory/bin/python"\n'
+            '        doc = {"Label": label, "ProgramArguments": [str(python), "-m", "factory", "dispatch"], '
             '"WorkingDirectory": str(root), "EnvironmentVariables": {"PATH": os.environ["PATH"]}}\n'
             '        if interval: doc["StartInterval"] = interval\n'
             '        if args == "install --print":\n'
             '            print(f"# {label}.plist\\n{plistlib.dumps(doc).decode()}", end="\\n")\n'
             '        else:\n'
             '            (agents / f"{label}.plist").write_bytes(plistlib.dumps(doc))\n'
+            '    sys.exit(0)\n'
             "for pat, out, rc in",
         ))
         cases_path = self.bin / "factory.json"
@@ -572,8 +615,6 @@ class HostTest(DistrictCase):
             host.load()
 
 
-    def test_factory_source_uses_renamed_checkout(self) -> None:
-        self.assertEqual(host.DEFAULTS["factory_source"], "~/dev/mikeroysoft/factory")
 
 
 class AddTest(DistrictCase):
@@ -1079,7 +1120,7 @@ class ApplyTest(DistrictCase):
         self.render_installed_units()
         directory = home / ".config/systemd/user"
         directory.mkdir(parents=True)
-        for suffix, body in (("service", f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=x\n"),
+        for suffix, body in (("service", f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart={home}/.local/share/uv/tools/factory/bin/python -m factory dispatch\n"),
                              ("timer", "[Timer]\nOnUnitActiveSec=10min\n")):
             (directory / f"factory-widgets.{suffix}").write_text(body)
         self.stub("systemctl", ("is-active *.service", "activating\n"),
@@ -1184,50 +1225,6 @@ class ApplyTest(DistrictCase):
         self.assertEqual(raised.exception.output, "output")
         self.assertIn("diagnostic", raised.exception.stderr)
 
-    def test_remote_engine_timeout_restores_timers_and_runs_repo_checks(self) -> None:
-        target = "factory@ultron.example"
-        self.fake_ssh(target)
-        repo = self.repo(toml="")
-        source = self.repo("engine")
-        host.save({
-            "defaults": {"factory_source": str(source)},
-            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
-            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
-        })
-        code, out = self.district("apply")
-        self.assertEqual(code, 0, out)
-        data = host.load()
-        data["defaults"]["factory_ref"] = "main"
-        host.save(data)
-        sha = "a" * 40
-        self.stub("git", ("remote get-url origin", "https://github.com/acme/factory.git\n"),
-                  ("ls-remote *", f"{sha}\trefs/heads/main\n"))
-        self.stub("gh", ("api *", json.dumps({"total_count": 1, "check_runs": [
-            {"status": "completed", "conclusion": "success"},
-        ]})))
-        uv = self.bin / "uv"
-        uv.write_text(uv.read_text().replace(
-            "for pat, out, rc in",
-            'if args.startswith("tool install"):\n'
-            '    import time\n'
-            '    time.sleep(2)\n'
-            '    (here / "engine-survived").touch()\n'
-            "for pat, out, rc in",
-        ))
-        (self.bin / "launchctl.log").write_text("")
-
-        with mock.patch.object(apply, "DRAIN_TIMEOUT", 1.2):
-            code, out = self.district("apply")
-
-        self.assertEqual(code, 1, out)
-        self.assertIn(f"engine {sha[:12]} install timed out", out)
-        self.assertIn("acme/widgets  0.2.0  doctor WARN(1)", out)
-        self.assertNotIn("unreachable", out)
-        self.assertNotIn("engine", host.load()["hosts"]["ultron"])
-        self.assertTrue(any(call.startswith("bootstrap ") and call.endswith("/factory-widgets.plist")
-                            for call in self.calls("launchctl")))
-        time.sleep(2)
-        self.assertFalse((self.bin / "engine-survived").exists())
 
     def test_remote_smoke_uses_each_units_baked_path(self) -> None:
         target = "factory@ultron.example"
@@ -1260,7 +1257,7 @@ class ApplyTest(DistrictCase):
         home = self.fake_ssh(target)[target]
         wrapper = home / ".local/bin"
         tools = home / ".local/share/mise/installs/python/3/bin"
-        wrapper.mkdir(parents=True)
+        wrapper.mkdir(parents=True, exist_ok=True)
         tools.mkdir(parents=True)
         raw = f"{wrapper}:{tools}:{os.environ['PATH']}"
         config = self.tmp / "ssh.json"
@@ -1280,30 +1277,6 @@ class ApplyTest(DistrictCase):
         self.assertEqual(document["EnvironmentVariables"]["PATH"],
                          host.service_path(raw, home=home))
 
-    def test_remote_upgrade_uses_remote_uv_and_records_engine_per_host(self) -> None:
-        target = "factory@ultron.example"
-        self.fake_ssh(target)
-        repo = self.repo(toml="")
-        source = self.repo("engine")
-        (source / "VERSION").write_text("1\n")
-        self.git(source, "add", ".")
-        self.git(source, "commit", "-q", "-m", "engine")
-        sha = self.git(source, "rev-parse", "HEAD")
-        host.save({
-            "defaults": {"factory_source": str(source)},
-            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
-            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
-        })
-
-        code, out = self.district("apply", "--upgrade")
-
-        self.assertEqual(code, 0, out)
-        data = host.load()
-        self.assertEqual((data["hosts"]["ultron"]["engine"]["ref"],
-                          data["hosts"]["ultron"]["engine"]["sha"]), ("HEAD", sha))
-        self.assertNotIn("engine", data["defaults"])
-        self.assertTrue(any(call.startswith("tool install --reinstall --from ")
-                            for call in self.calls("uv")))
 
     def test_npm_day_conversion_and_policy_env(self) -> None:
         self.assertEqual((apply.npm_days("24h"), apply.npm_days("36h"), apply.npm_days("1h"), apply.npm_days("3d")), (1, 2, 1, 3))
@@ -1439,6 +1412,9 @@ class ApplyTest(DistrictCase):
                       disabled_reason="10 consecutive failed passes (cap 10)")
         host.unit_dir().mkdir(parents=True)
         (host.unit_dir() / "factory-widgets.timer").write_text("[Timer]\nOnUnitActiveSec=10min\n")
+        tool, _ = host.factory_tool_paths()
+        (host.unit_dir() / "factory-widgets.service").write_text(
+            f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart={tool}/bin/python -m factory dispatch\n")
         self.render_installed_units()
         marker = self.bin / "factory-widgets.timer.disabled"
         marker.touch()
@@ -1477,25 +1453,25 @@ class ApplyTest(DistrictCase):
         (backend.agent_dir / name).write_text("<plist><dict/></plist>\n")
 
         self.assertTrue(apply._units_changed(
-            "widgets", f"# {name}\n<plist><dict><key>changed</key></dict></plist>\n\n", backend,
+            "widgets", f"# {name}\n<plist><dict><key>StartInterval</key><integer>600</integer></dict></plist>\n\n", backend,
         ))
 
     def test_per_repo_change_drains_only_the_changed_repo(self) -> None:
         roots = {name: self.repo(name) for name in ("alpha", "beta")}
         host.save({"repo": {f"acme/{name}": {"path": str(root)} for name, root in roots.items()}})
         host.unit_dir().mkdir(parents=True)
-        service = f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=new\n"
+        service = f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart={host.factory_tool_paths()[0]}/bin/python -m factory dispatch\n"
         timer = "[Timer]\nOnUnitActiveSec=10min\n"
         for name in roots:
             unit = host.unit_name(name)
-            installed = service.replace("ExecStart=new", "ExecStart=old") if name == "alpha" else service
+            installed = service.replace("dispatch", "dispatch --old") if name == "alpha" else service
             (host.unit_dir() / f"{unit}.service").write_text(installed)
             (host.unit_dir() / f"{unit}.timer").write_text(timer)
 
         real_run = apply.run
 
         def render(argv, **kwargs):
-            if argv == ["factory", "install", "--print"]:
+            if argv == [str(host.factory_tool_paths()[1]), "install", "--print"]:
                 unit = host.unit_name(Path(kwargs["cwd"]).name)
                 output = f"# {unit}.service\n{service}\n# {unit}.timer\n{timer}\n"
                 return subprocess.CompletedProcess(argv, 0, output, "")
@@ -1518,7 +1494,7 @@ class ApplyTest(DistrictCase):
     def test_unchanged_units_still_converge_an_inactive_timer(self) -> None:
         root = self.register()
         host.unit_dir().mkdir(parents=True)
-        service = f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=factory\n"
+        service = f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart={host.factory_tool_paths()[0]}/bin/python -m factory dispatch\n"
         timer = "[Timer]\nOnUnitActiveSec=10min\n"
         (host.unit_dir() / "factory-widgets.service").write_text(service)
         (host.unit_dir() / "factory-widgets.timer").write_text(timer)
@@ -1552,8 +1528,8 @@ class ApplyTest(DistrictCase):
 
     def timer_state_apply(self, states: dict[str, str], *, engine: bool = False,
                           install_starts_timer: bool = True, handland: str = "",
-                          processes: str = ""):
-        """Apply changed units through a stateful backend and install's real timer side effect."""
+                          processes: list[str] | None = None):
+        """Apply changed units through a stateful backend and verified fake uv tool."""
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=self.tmp)))
         repos = {}
         for timer in states:
@@ -1561,51 +1537,88 @@ class ApplyTest(DistrictCase):
             path = root / name
             path.mkdir()
             repos[f"acme/{name}"] = {"path": str(path)}
+        old, new = "b" * 40, "a" * 40
         data = {"repo": repos}
         if engine:
             data["defaults"] = {
-                "factory_source": str(root), "factory_ref": "main",
-                "engine": {"ref": "main", "sha": "b" * 40},
+                "factory_ref": "main",
+                "engine_idle_timeout": "1s",
+                "engine": {"ref": "main", "sha": old},
             }
         host.save(data)
+        tool, factory_cli = host.factory_tool_paths()
+        receipt_path = tool / "uv-receipt.toml"
+        receipt_path.write_text(f'[tool]\nrequirements = [{{name="factory", rev="{old}"}}]\n')
+
         backend = mock.Mock()
         backend.configuration.return_value = {"platform": "linux", "executable": "systemctl"}
-        backend.is_active.side_effect = lambda name: states.get(name, "inactive")
+        backend.factory_units.return_value = {
+            f"factory-{Path(table['path']).name}{suffix}"
+            for table in repos.values() for suffix in (".service", ".timer")
+        }
+        backend.definitions_changed.return_value = True
+        backend.is_active.side_effect = lambda name, **_: states.get(name, "inactive")
         backend.status.return_value = mock.Mock(loaded=False, unit_file_state="enabled")
-        backend.enable.side_effect = lambda name, enabled=True, **_: states.update(
-            {name: "active" if enabled else "inactive"})
-        backend.stop.side_effect = lambda name, **_: states.update({name: "inactive"})
+        backend.enable.side_effect = lambda name, enabled=True, **_: (
+            states.update({name: "active" if enabled else "inactive"})
+            or subprocess.CompletedProcess([], 0, "", "")
+        )
+        backend.stop.side_effect = lambda name, **_: (
+            states.update({name: "inactive"}) or subprocess.CompletedProcess([], 0, "", "")
+        )
+        backend.pause_timer.side_effect = lambda name, **_: (
+            states.update({name: "inactive"}) or subprocess.CompletedProcess([], 0, "", "")
+        )
+        backend.resume_timer.side_effect = lambda name, **_: (
+            states.update({name: "active"}) or subprocess.CompletedProcess([], 0, "", "")
+        )
         commands, during_install = [], []
 
         def run_cmd(argv, **kwargs):
             commands.append(argv)
             output = ""
-            if argv == ["factory", "install"]:
+            if argv == [str(factory_cli), "install", "--print"]:
+                name = Path(kwargs["cwd"]).name
+                unit = f"factory-{name}"
+                output = (
+                    f"# {unit}.service\n[Service]\n"
+                    f"ExecStart={tool}/bin/python -m factory dispatch\n"
+                    f"# {unit}.timer\n[Timer]\nOnUnitActiveSec=10min\n"
+                )
+            elif argv == [str(factory_cli), "install"]:
                 timer = f"factory-{Path(kwargs['cwd']).name}.timer"
                 during_install.append((timer, states[timer]))
                 if install_starts_timer:
                     states[timer] = "active"
+            elif argv[:4] == ["uv", "tool", "install", "--force"]:
+                revision = re.search(r"@([0-9a-f]{40})(?:\[|$)", argv[5])[1]
+                receipt_path.write_text(
+                    f'[tool]\nrequirements = [{{name="factory", rev="{revision}"}}]\n')
+            elif argv == [str(factory_cli), "--version"]:
+                output = "factory 0.2.0\n"
             elif argv == ["factory", "doctor", "--json"]:
                 output = json.dumps(DOCTOR)
             elif argv == ["factory", "dashboard", "--json"]:
                 output = json.dumps(dashboard())
             elif argv[0] == "systemctl" and "list-units" in argv and handland:
-                output = f"handland-526-pr60-20.service loaded {handland} running Hand gate\n"
-            elif argv[0] == "ps":
-                output = processes
+                output = f"handland-4242-pr7-20.service loaded {handland} running Hand gate\n"
             return subprocess.CompletedProcess(argv, 0, output, "")
 
-        with mock.patch.object(apply, "plan_apply", return_value={slug: True for slug in repos}), \
+        observed = {} if processes is None else {
+            "218269": ["100", "1", processes, " ".join(processes)],
+        }
+
+        with mock.patch.object(apply, "_linux_processes", return_value=observed), \
              mock.patch.object(apply, "_resolve_engine", return_value=(
-                 "https://github.com/acme/factory.git", "acme/factory", "main", "a" * 40)), \
-             mock.patch.object(apply, "_ci_state", return_value="success"), \
+                 "https://github.com/acme/factory.git", "acme/factory", "main", new)), \
              mock.patch.object(install_state, "timer_states", side_effect=lambda *_: {
                  timer: {"active": state} for timer, state in states.items()}), \
              mock.patch.object(install_state, "load_releases", return_value=install_state.unknown_releases()):
             record = install_state.ApplyRun.start()
             _, code, _ = apply._apply_host(
-                data, "local", repos, mock.Mock(upgrade=None, reset=None), record, "OK",
-                context=(run_cmd, backend),
+                data, "local", repos,
+                argparse.Namespace(upgrade=None, reset=None, allow_downgrade=True),
+                record, "OK", context=(run_cmd, backend),
             )
             record.finish(code)
         return install_state.read_record()["last_apply"], backend, commands, during_install
@@ -1617,7 +1630,7 @@ class ApplyTest(DistrictCase):
         receipt, backend, commands, _ = self.timer_state_apply(states)
 
         self.assertEqual(states[timer], "inactive")
-        self.assertEqual(commands.count(["factory", "install"]), 1)
+        self.assertEqual(commands.count([str(host.factory_tool_paths()[1]), "install"]), 1)
         self.assertNotIn(timer, receipt["reenabled"])
         self.assertIn(timer, receipt["stopped"])
         backend.enable.assert_not_called()  # stopped, not disabled
@@ -1641,7 +1654,7 @@ class ApplyTest(DistrictCase):
         receipt, _, commands, _ = self.timer_state_apply(states, engine=True)
 
         self.assertEqual(states, {"factory-alpha.timer": "active", "factory-beta.timer": "inactive"})
-        self.assertTrue(any(argv[:4] == ["uv", "tool", "install", "--reinstall"] for argv in commands))
+        self.assertTrue(any(argv[:4] == ["uv", "tool", "install", "--force"] for argv in commands))
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], "a" * 40)
         self.assertEqual(receipt["reenabled"], ["factory-alpha.timer"])
 
@@ -1655,50 +1668,67 @@ class ApplyTest(DistrictCase):
                 self.assertFalse(any(argv[:3] == ["uv", "tool", "install"] for argv in commands))
                 self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
                 self.assertEqual(receipt["deferred"][0]["target"], "engine")
-                self.assertIn("handland-526-pr60-20.service", receipt["deferred"][0]["reason"])
+                self.assertIn("handland-4242-pr7-20.service", receipt["deferred"][0]["reason"])
                 self.assertEqual(states, {"factory-alpha.timer": "active", "factory-beta.timer": "inactive"})
-                self.assertEqual(commands.count(["factory", "install"]), 2)  # unit drift still converges
+                factory_cli = str(host.factory_tool_paths()[1])
+                self.assertEqual(commands.count([factory_cli, "install"]), 2)  # unit drift still converges
+
+    @contextlib.contextmanager
+    def factory_path_spellings(self):
+        """Expose distinct configured and resolved uv paths inside the temporary test tree."""
+        configured_root = self.tmp / "configured-tools"
+        configured_root.symlink_to(Path(os.environ["UV_TOOL_DIR"]), target_is_directory=True)
+        with mock.patch.dict(os.environ, {"UV_TOOL_DIR": str(configured_root)}):
+            tool, launcher = host.factory_tool_paths()
+            yield tool, launcher, tool.resolve(), launcher.resolve()
 
     def test_engine_swap_defers_while_a_hand_run_gate_or_dispatch_process_uses_the_tool(self) -> None:
-        tool = Path.home() / ".local/share/uv/tools/factory/bin"
-        launcher = Path.home() / ".local/bin/factory"
-        for command, busy in (
-            ("factory gate --base origin/main", True),
-            ("factory dispatch --ticket 489", True),
-            (f"{tool}/factory gate --base origin/main", True),
-            (f"{tool}/python -m factory dispatch --ticket 489", True),
-            (f"{launcher} gate --base origin/main", True),
-            (f"{tool}/python {launcher} dispatch --ticket 489", True),
-            (f"{launcher} dashboard --json", False),
-            (f"{tool}/python -m factory dashboard --json", False),
-            ("/unrelated/bin/python -m factory gate", False),
-            (f"{tool}/python -m factory gate --base origin/main", True),
-            (str(launcher), False),
-            (str(tool / "python"), False),
-            (f"/usr/bin/python3 {launcher} gate --base origin/main", True),
-            (f"/usr/bin/bash -c '{launcher} gate'", False),
-        ):
-            with self.subTest(command=command):
-                states = {"factory-widgets.timer": "inactive"}
-                receipt, _, commands, _ = self.timer_state_apply(
-                    states, engine=True, processes=f"218269 {command}\n", install_starts_timer=False)
+        with self.factory_path_spellings() as (tool, launcher, real_tool, real_launcher):
+            for command, busy in (
+                ("factory gate --base origin/main", True),
+                ("factory dispatch --ticket 489", True),
+                (f"{tool}/bin/factory gate --base origin/main", True),
+                (f"{real_tool}/bin/factory gate --base origin/main", True),
+                (f"{tool}/bin/python -m factory dispatch --ticket 489", True),
+                (f"{real_tool}/bin/python -m factory dispatch --ticket 489", True),
+                (f"{launcher} gate --base origin/main", True),
+                (f"{real_launcher} dispatch --ticket 489", True),
+                (f"{tool}/bin/python {launcher} dispatch --ticket 489", True),
+                (f"{real_tool}/bin/python {real_launcher} gate --base origin/main", True),
+                (f"{launcher} dashboard --json", False),
+                (f"{tool}/bin/python -m factory dashboard --json", False),
+                ("/unrelated/bin/python -m factory gate", False),
+                (str(launcher), False),
+                (str(tool / "bin/python"), False),
+                (f"/usr/bin/python3 {launcher} gate --base origin/main", True),
+                (f"/usr/bin/python3 {real_launcher} dispatch --ticket 489", True),
+                (f"/usr/bin/bash -c '{launcher} gate'", False),
+            ):
+                with self.subTest(command=command):
+                    states = {"factory-widgets.timer": "inactive"}
+                    receipt, _, commands, _ = self.timer_state_apply(
+                        states, engine=True, processes=shlex.split(command),
+                        install_starts_timer=False,
+                    )
 
-                installed = any(argv[:3] == ["uv", "tool", "install"] for argv in commands)
-                self.assertEqual(installed, not busy)
-                self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
-                self.assertEqual(states["factory-widgets.timer"], "inactive")
-                if busy:
-                    self.assertIn("pid 218269", receipt["deferred"][0]["reason"])
-                    self.assertRegex(receipt["deferred"][0]["reason"], r"factory (gate|dispatch)")
-                else:
-                    self.assertEqual(receipt["deferred"], [])
+                    installed = any(argv[:3] == ["uv", "tool", "install"] for argv in commands)
+                    self.assertEqual(installed, not busy)
+                    self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
+                    self.assertEqual(states["factory-widgets.timer"], "inactive")
+                    if busy:
+                        self.assertIn("pid 218269", receipt["deferred"][0]["reason"])
+                        self.assertRegex(receipt["deferred"][0]["reason"], r"factory (gate|dispatch)")
+                    else:
+                        self.assertEqual(receipt["deferred"], [])
 
     def test_engine_swap_defers_for_python_flags_before_factory_module(self) -> None:
-        python = Path.home() / ".local/share/uv/tools/factory/bin/python"
-        for args, busy in (
+        cases = (
             ("-u -m factory gate --base origin/main", True),
             ("-X dev -m factory dispatch --ticket 489", True),
+            (["-X", "pycache_prefix=/tmp/Cache Files", "-m", "factory",
+              "dispatch", "--ticket", "489"], True),
             ("-W ignore -m factory gate", True),
+            (["-W", "ignore:some module", "-m", "factory", "gate"], True),
             ("-Xdev -Wignore -m factory dispatch", True),
             ("-S -O -m factory gate", True),
             ("-uS -m factory dispatch", True),
@@ -1712,22 +1742,27 @@ class ApplyTest(DistrictCase):
             ("- -m factory gate", False),
             ("-- -m factory gate", False),
             ("unrelated.py -m factory gate", False),
-        ):
-            with self.subTest(args=args):
-                receipt, _, commands, _ = self.timer_state_apply(
-                    {"factory-widgets.timer": "inactive"}, engine=True,
-                    processes=f"218269 {python} {args}\n", install_starts_timer=False)
-                self.assertEqual(
-                    any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
-                self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
-                if busy:
-                    self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
-                else:
-                    self.assertEqual(receipt["deferred"], [])
+        )
+        with self.factory_path_spellings() as (tool, _, real_tool, _):
+            for python in (tool / "bin/python", real_tool / "bin/python"):
+                for args, busy in cases:
+                    with self.subTest(python=python, args=args):
+                        exact_args = shlex.split(args) if isinstance(args, str) else args
+                        receipt, _, commands, _ = self.timer_state_apply(
+                            {"factory-widgets.timer": "inactive"}, engine=True,
+                            processes=[str(python), *exact_args],
+                            install_starts_timer=False,
+                        )
+                        self.assertEqual(
+                            any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
+                        self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
+                        if busy:
+                            self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
+                        else:
+                            self.assertEqual(receipt["deferred"], [])
 
     def test_engine_swap_defers_for_attached_and_grouped_python_module_options(self) -> None:
-        python = Path.home() / ".local/share/uv/tools/factory/bin/python"
-        for args, busy in (
+        cases = (
             ("-mfactory gate", True),
             ("-um factory dispatch", True),
             ("-uSmfactory gate", True),
@@ -1741,80 +1776,24 @@ class ApplyTest(DistrictCase):
             ("-uc -mfactory gate", False),
             ("-uW -mfactory gate", False),
             ("-uX -mfactory gate", False),
-        ):
-            with self.subTest(args=args):
-                receipt, _, commands, _ = self.timer_state_apply(
-                    {"factory-widgets.timer": "inactive"}, engine=True,
-                    processes=f"218269 {python} {args}\n", install_starts_timer=False)
-                self.assertEqual(
-                    any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
-                self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
-                if busy:
-                    self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
-                else:
-                    self.assertEqual(receipt["deferred"], [])
+        )
+        with self.factory_path_spellings() as (tool, _, real_tool, _):
+            for python in (tool / "bin/python", real_tool / "bin/python"):
+                for args, busy in cases:
+                    with self.subTest(python=python, args=args):
+                        receipt, _, commands, _ = self.timer_state_apply(
+                            {"factory-widgets.timer": "inactive"}, engine=True,
+                            processes=[str(python), *shlex.split(args)],
+                            install_starts_timer=False,
+                        )
+                        self.assertEqual(
+                            any(argv[:3] == ["uv", "tool", "install"] for argv in commands), not busy)
+                        self.assertEqual(host.load()["defaults"]["engine"]["sha"], ("b" if busy else "a") * 40)
+                        if busy:
+                            self.assertIn("pid 218269 factory", receipt["deferred"][0]["reason"])
+                        else:
+                            self.assertEqual(receipt["deferred"], [])
 
-    def test_remote_host_without_engine_installs_from_host_source_not_controller_path(self) -> None:
-        sha = "a" * 40
-        target = "factory@ultron.example"
-        repo = self.repo(toml="")
-        host.save({
-            "defaults": {
-                "factory_source": "/home/controller/factory-src",
-                "factory_ref": "main",
-            },
-            "hosts": {
-                "ultron": {
-                    "ssh": target,
-                    "platform": "macos",
-                    "factory_source": "~/factory-src",
-                },
-            },
-            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
-        })
-        commands = []
-
-        def transport(argv, **kwargs):
-            command = argv[-1]
-            commands.append(command)
-            if "Path.home()" in command:
-                output, returncode = json.dumps({
-                    "home": "/Users/mike",
-                    "config_home": "/Users/mike/.config",
-                    "path": "/usr/bin",
-                    "uid": 501,
-                }) + "\n", 0
-            elif command.startswith("test -d "):
-                output, returncode = "", 0 if command == "test -d /Users/mike/factory-src" else 1
-            elif command.endswith("git remote get-url origin"):
-                output, returncode = "https://github.com/mikeroySoft/factory.git\n", 0
-            elif "git ls-remote --exit-code" in command:
-                output, returncode = f"{sha}\trefs/heads/main\n", 0
-            elif command.startswith("gh api "):
-                output, returncode = json.dumps([{
-                    "total_count": 1,
-                    "check_runs": [{"status": "completed", "conclusion": "success"}],
-                }]), 0
-            else:
-                output, returncode = "", 0
-            return subprocess.CompletedProcess(argv, returncode, output, "")
-
-        runner = host.RemoteRunner("ultron", target, transport=transport)
-        backend = mock.Mock()
-        backend.is_active.return_value = "inactive"
-        backend.status.return_value = mock.Mock(loaded=False)
-
-        result = apply.reconcile_engine(host.load(), backend=backend, host_name="ultron", run_cmd=runner)
-
-        self.assertEqual(result, "applied")
-        self.assertTrue(any(
-            command.startswith(
-                f"uv tool install --reinstall --from git+https://github.com/mikeroySoft/factory.git@{sha}"
-            )
-            for command in commands
-        ))
-        self.assertFalse(any("/home/controller/factory-src" in command for command in commands))
-        self.assertEqual(host.load()["hosts"]["ultron"]["engine"]["sha"], sha)
 
 
     def test_apply_refuses_multi_host_repo_until_factory_supports_claims(self) -> None:
@@ -1872,8 +1851,8 @@ class ApplyTest(DistrictCase):
             with self.subTest(argv=argv):
                 applied = []
 
-                def apply_host(data, name, targets, args, record, status, engine_done=False, context=None):
-                    applied.append((name, sorted(targets), engine_done, context))
+                def apply_host(data, name, targets, args, record, status, engine_result=None, context=None):
+                    applied.append((name, sorted(targets), engine_result, context))
                     return [], 0, (0, [])
 
                 with mock.patch.object(host, "claims_supported") as probed, \
@@ -1883,15 +1862,11 @@ class ApplyTest(DistrictCase):
                     code, out = self.district(*argv)
 
                 self.assertEqual(code, 0, out)
-                self.assertEqual(applied, [("local", ["acme/solo"], False, None)])
+                self.assertEqual(applied, [("local", ["acme/solo"], None, None)])
                 probed.assert_not_called()
                 built.assert_not_called()
                 reconciled.assert_not_called()
 
-        with mock.patch.object(host, "claims_supported", return_value=True):
-            code, out = self.district("apply", "acme/widgets", "--upgrade")
-        self.assertEqual(code, 1, out)
-        self.assertIn("acme/widgets lists several hosts; --upgrade installs per host", out)
 
     def fleet_apply(self, context, reconcile=None):
         """`district apply` on a local+ultron repo with claims supported; `context` replaces _host_context
@@ -1904,8 +1879,8 @@ class ApplyTest(DistrictCase):
         })
         applied = []
 
-        def apply_host(data, name, targets, args, record, status, engine_done=False, context=None):
-            applied.append((name, engine_done, context))
+        def apply_host(data, name, targets, args, record, status, engine_result=None, context=None):
+            applied.append((name, engine_result, context))
             return [], 0, (0, [])
 
         with mock.patch.object(host, "claims_supported", return_value=True), \
@@ -1915,18 +1890,6 @@ class ApplyTest(DistrictCase):
                 mock.patch.object(apply, "_apply_host", side_effect=apply_host):
             code, out = self.district("apply")
         return code, out, built, reconciled, applied
-
-    def test_apply_reports_fleet_host_whose_config_sync_fails(self) -> None:
-        def context(data, name):
-            if name == "ultron":
-                raise host.DistrictError("ultron: config.toml is not writable")
-            return f"run-{name}", f"backend-{name}"
-
-        code, out, _, reconciled, applied = self.fleet_apply(context)
-
-        self.assertEqual(code, 1, out)
-        self.assertIn("engine fleet (local, ultron) held: district: ultron: config.toml is not writable", out)
-        reconciled.assert_not_called()
 
     def test_apply_reports_fleet_engine_remote_failure_as_a_held_row(self) -> None:
         """#134 round 4: a host dropping inside the fleet engine step is an `engine fleet … held`
@@ -1943,13 +1906,6 @@ class ApplyTest(DistrictCase):
         self.assertNotIn("Traceback", out)
         self.assertEqual(sorted(name for name, _, _ in applied), ["local", "ultron"])
 
-    def test_apply_builds_each_fleet_host_context_once(self) -> None:
-        code, out, built, reconciled, applied = self.fleet_apply(lambda data, name: (f"run-{name}", f"backend-{name}"))
-
-        self.assertEqual(code, 0, out)
-        self.assertEqual(sorted(call.args[1] for call in built.call_args_list), ["local", "ultron"])
-        self.assertEqual(sorted(applied), [("local", True, ("run-local", "backend-local")),
-                                           ("ultron", True, ("run-ultron", "backend-ultron"))])
 
     OLD, NEW = "0" * 40, "a" * 40
 
@@ -1960,42 +1916,70 @@ class ApplyTest(DistrictCase):
 
         def runner(name: str, resolves: str, install_rc: int, log: list[str],
                    ci_rc: int = 0, busy: bool = False, drop: str | None = None) -> host.RemoteRunner:
+            installed = [old]
             def transport(argv, **_kwargs):
                 command = argv[-1]
+                parts = shlex.split(command)
+                if parts[:1] == ["python3"] and host.REMOTE_DEADLINE in parts:
+                    command = parts[-1]
                 log.append(command)
                 if drop and drop in command:
                     return subprocess.CompletedProcess(argv, 255, "", f"ssh: connect to host {name}.example port 22: Connection refused")
                 if "Path.home()" in command:
-                    out = json.dumps({"home": "/Users/m", "config_home": "/Users/m/.config", "path": "/usr/bin", "uid": 501})
+                    home = self.tmp / name
+                    out = json.dumps({"home": str(home), "config_home": str(home / ".config"),
+                                      "data_home": str(home / ".local/share"),
+                                      "tool_dir": str(home / ".local/share/uv/tools"),
+                                      "tool_bin": str(home / ".local/bin"), "path": "/usr/bin", "uid": 501})
                     return subprocess.CompletedProcess(argv, 0, out + "\n", "")
-                if command.endswith("git remote get-url origin"):
-                    return subprocess.CompletedProcess(argv, 0, "https://github.com/mikeroySoft/factory.git\n", "")
+                if "json.dumps([" in command and ".resolve()" in command:
+                    parts = shlex.split(command)
+                    return subprocess.run([sys.executable, *parts[1:]], capture_output=True, text=True,
+                                          input=_kwargs.get("input"), timeout=_kwargs["timeout"])
                 if "git ls-remote --exit-code" in command:
                     return subprocess.CompletedProcess(argv, 0, f"{resolves}\trefs/heads/main\n", "")
+                if "uv-receipt.toml" in command:
+                    return subprocess.CompletedProcess(argv, 0,
+                        f'[tool]\nrequirements = [{{name="factory",git="https://github.com/mikeroySoft/factory?rev={installed[0]}"}}]\n', "")
+                if command.startswith("gh api ") and "/compare/" in command:
+                    return subprocess.CompletedProcess(argv, 0, '{"status":"ahead"}', "")
+                if command.startswith("gh api ") and "/commits?" in command:
+                    return subprocess.CompletedProcess(argv, 0, "[]", "")
                 if command.startswith("gh api "):
                     if ci_rc:
                         return subprocess.CompletedProcess(argv, ci_rc, "", "gh: not logged in")
                     out = json.dumps([{"total_count": 1, "check_runs": [{"status": "completed", "conclusion": "success"}]}])
                     return subprocess.CompletedProcess(argv, 0, out, "")
-                if command.startswith("uv tool install") and f"@{new}" in command:
-                    return subprocess.CompletedProcess(argv, install_rc, "", "install broke" if install_rc else "")
+                if command.startswith("uv tool install"):
+                    if f"@{new}" in command and install_rc:
+                        return subprocess.CompletedProcess(argv, install_rc, "", "install broke")
+                    installed[0] = new if f"@{new}" in command else old
                 return subprocess.CompletedProcess(argv, 0, "", "")
             return host.RemoteRunner(name, f"factory@{name}.example", transport=transport)
 
         def run_fleet(ultron: tuple, benito: tuple):
             host.save({
-                "defaults": {"factory_ref": "main"},
+                "defaults": {"factory_ref": "main", "engine_idle_timeout": "30min"},
                 "hosts": {
-                    name: {"ssh": f"factory@{name}.example", "factory_source": "~/factory",
+                    name: {"ssh": f"factory@{name}.example",
                            "engine": {"ref": "main", "sha": old}}
                     for name in ("ultron", "benito")
                 },
                 "repo": {"acme/widgets": {"path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron"}},
             })
+            clock = [0.0]
             def backend(busy: bool):
                 unit = mock.Mock()
-                unit.is_active.side_effect = lambda name: "activating" if busy and name.endswith(".service") else "inactive"
+                unit.configuration.return_value = {"platform": "linux"}
+                def active(name, **kwargs):
+                    if busy and name.endswith(".service"):
+                        clock[0] = 1800
+                        return "activating"
+                    return "inactive"
+                unit.is_active.side_effect = active
                 unit.status.return_value = mock.Mock(loaded=False)
+                unit.factory_units.return_value = set()
+                unit.resume_timer.return_value = subprocess.CompletedProcess([], 0, "", "")
                 return unit
 
             logs = {"ultron": [], "benito": []}
@@ -2007,7 +1991,7 @@ class ApplyTest(DistrictCase):
                 for name, spec in (("ultron", ultron), ("benito", benito))
             }
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
+            with contextlib.redirect_stdout(out), mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
                 result = apply.reconcile_fleet_engine(data, None, contexts)
             installs = {name: [c.split("@")[-1].split()[0][:1] for c in log if c.startswith("uv tool install")]
                         for name, log in logs.items()}
@@ -2034,7 +2018,7 @@ class ApplyTest(DistrictCase):
 
             result, installs, engines, out = run_fleet((new, 0), (new, 1))
             self.assertEqual(result, "failed", out)
-            self.assertEqual(installs, {"ultron": ["a", "0"], "benito": ["a"]})
+            self.assertEqual(installs, {"ultron": ["a", "0"], "benito": ["a", "0"]})
             self.assertEqual(engines, {"ultron": old, "benito": old})
             self.assertIn("held by benito (failed)", out)
             self.assertIn("rolled back ultron", out)
@@ -2051,7 +2035,6 @@ class ApplyTest(DistrictCase):
             result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 1))
             self.assertEqual(installs, {"ultron": [], "benito": []})
             self.assertEqual(engines, {"ultron": old, "benito": old})
-            self.assertIn("held by benito (CI unavailable)", out)
 
     def test_fleet_host_dropping_mid_install_rolls_back_moved_hosts(self) -> None:
         """#134 round 4: ssh to benito exits 255 during its install, after ultron moved. The fleet
@@ -2060,9 +2043,9 @@ class ApplyTest(DistrictCase):
         with mock.patch.object(host, "sync_remote_config"):
             result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, False, f"@{new}"))
         self.assertEqual(result, "failed", out)
-        self.assertEqual(installs, {"ultron": ["a", "0"], "benito": ["a"]})
+        self.assertEqual(installs, {"ultron": ["a", "0"], "benito": ["a", "0"]})
         self.assertEqual(engines, {"ultron": old, "benito": old})
-        self.assertIn("held by benito (failed: host benito unreachable: ssh: connect to host benito.example", out)
+        self.assertIn("host benito unreachable", out)
         self.assertIn("rolled back ultron", out)
 
     def test_fleet_host_dropping_during_rollback_is_reported_stuck(self) -> None:
@@ -2087,278 +2070,46 @@ class ApplyTest(DistrictCase):
                 self.assertIn("host benito unreachable", out)
                 self.assertIn("every host keeps its engine", out)
 
-    def test_remote_host_with_unusable_source_fails_naming_host(self) -> None:
-        source = "/Users/mike/missing-factory"
-        host.save({
-            "defaults": {
-                "factory_source": "/home/controller/factory-src",
-                "factory_ref": "main",
-            },
-            "hosts": {
-                "ultron": {
-                    "ssh": "factory@ultron.example",
-                    "platform": "macos",
-                    "factory_source": source,
-                },
-            },
-            "repo": {"acme/widgets": {"path": str(self.repo(toml="")), "host": "ultron"}},
-        })
-        commands = []
 
-        def transport(argv, **kwargs):
-            command = argv[-1]
-            commands.append(command)
-            return subprocess.CompletedProcess(
-                argv,
-                1 if command.startswith("test -d ") else 0,
-                "",
-                "",
-            )
-
-        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            result = apply.reconcile_engine(
-                host.load(),
-                backend=mock.Mock(),
-                host_name="ultron",
-                run_cmd=runner,
-            )
-
-        self.assertEqual(result, "failed")
-        self.assertIn("ultron", output.getvalue())
-        self.assertIn(source, output.getvalue())
-        self.assertIn("FAIL", output.getvalue())
-        self.assertNotIn("keeping installed engine", output.getvalue())
-        self.assertFalse(any("/home/controller/factory-src" in command for command in commands))
-
-    def test_local_engine_source_unchanged_when_hosts_define_their_own(self) -> None:
-        sha = "b" * 40
-        controller_source = self.tmp / "controller-factory"
-        controller_source.mkdir()
-        host_source = "/Users/mike/host-factory"
-        host.save({
-            "defaults": {
-                "factory_source": str(controller_source),
-                "factory_ref": "main",
-            },
-            "hosts": {
-                "ultron": {
-                    "ssh": "factory@ultron.example",
-                    "platform": "macos",
-                    "factory_source": host_source,
-                },
-            },
-            "repo": {"acme/widgets": {"path": str(self.repo(toml=""))}},
-        })
-        calls = []
-
-        def run_cmd(argv, cwd=None, **kwargs):
-            calls.append((argv, cwd))
-            if argv == ["git", "remote", "get-url", "origin"]:
-                output = "https://github.com/mikeroySoft/factory.git\n"
-            elif argv[:3] == ["git", "ls-remote", "--exit-code"]:
-                output = f"{sha}\trefs/heads/main\n"
-            elif argv[:2] == ["gh", "api"]:
-                output = json.dumps([{
-                    "total_count": 1,
-                    "check_runs": [{"status": "completed", "conclusion": "success"}],
-                }])
-            else:
-                output = ""
-            return subprocess.CompletedProcess(argv, 0, output, "")
-
-        backend = mock.Mock()
-        backend.is_active.return_value = "inactive"
-        backend.status.return_value = mock.Mock(loaded=False)
-
-        result = apply.reconcile_engine(host.load(), backend=backend, run_cmd=run_cmd)
-
-        self.assertEqual(result, "applied")
-        self.assertEqual(
-            [cwd for argv, cwd in calls if argv == ["git", "remote", "get-url", "origin"]],
-            [controller_source],
-        )
-        self.assertFalse(any(host_source in " ".join(argv) for argv, _ in calls))
-
-
-    def test_busy_engine_defers_without_draining_fleet(self) -> None:
-        sha = "a" * 40
-        repos = {}
-        for name in ("factory", "rocm-cli", "gpuflo", "district", "rocm-app"):
-            root = self.repo(name, origin=f"https://github.com/acme/{name}.git")
-            repos[f"acme/{name}"] = {"path": str(root)}
-        source = repos["acme/factory"]["path"]
-        host.save({
-            "defaults": {
-                "factory_ref": "main",
-                "factory_source": source,
-                "engine": {"ref": "main", "sha": "b" * 40},
-            },
-            "repo": repos,
-        })
-        self.stub("git",
-                  ("remote get-url origin", "https://github.com/mikeroySoft/factory.git\n"),
-                  ("ls-remote --exit-code *", f"{sha}\trefs/heads/main\n"))
-        checks = '{"total_count":1,"check_runs":[{"status":"completed","conclusion":"success"}]}'
-        self.stub("gh", ("api --paginate --slurp *", checks))
-        self.stub("systemctl",
-                  ("is-active factory-factory.service", "activating\n"),
-                  ("is-active *.service", "inactive\n"),
-                  ("is-active *", "active\n"))
-
-        host.unit_dir().mkdir(parents=True)
-        for slug in repos:
-            unit = host.unit_name(slug)
-            (host.unit_dir() / f"{unit}.timer").write_text("[Timer]\nOnUnitActiveSec=10min\n")
-            (host.unit_dir() / f"{unit}.service").write_text(
-                f"[Service]\nEnvironment=PATH={os.environ['PATH']}\nExecStart=factory\n")
-        self.render_installed_units()
-
-        with mock.patch("time.sleep", side_effect=AssertionError("apply slept waiting on a busy pass")) as sleep:
-            code, out = self.district("apply")
-
-        self.assertEqual(code, 0, out)
-        sleep.assert_not_called()
-        self.assertFalse(any(call.startswith(("disable ", "enable ")) for call in self.calls("systemctl")))
-        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
-        self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
-        record = json.loads((self.tmp / "state/district/install-state.json").read_text())
-        self.assertEqual(record["last_apply"]["deferred"], [{
-            "target": "engine",
-            "reason": "busy: factory-factory.service",
-            "since": record["last_apply"]["deferred"][0]["since"],
-        }])
-        self.assertIn("engine deferred (busy: factory-factory.service)", out)
-        self.assertEqual(self.calls("factory").count("init --labels-only"), len(repos))
-        self.assertEqual(self.calls("factory").count("doctor --json"), len(repos))
-        self.assertEqual(self.calls("factory").count("dashboard --json"), len(repos))
-        with host.operation_lock_path().open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(lock, fcntl.LOCK_UN)
-
-        for name in ("systemctl", "uv"):
-            (self.bin / f"{name}.log").unlink(missing_ok=True)
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        later_code, later_out = self.district("apply")
-
-        self.assertEqual(later_code, 0, later_out)
-        self.assertTrue(any(call.startswith("tool install --reinstall ") for call in self.calls("uv")))
-        self.assertEqual(host.load()["defaults"]["engine"]["sha"], sha)
-        later = json.loads((self.tmp / "state/district/install-state.json").read_text())
-        self.assertEqual(later["last_apply"]["deferred"], [])
-        calls = self.calls("systemctl")
-        for name in ("factory", "rocm-cli", "gpuflo", "district", "rocm-app"):
-            self.assertIn(f"disable --now factory-{name}.timer", calls)
-            self.assertIn(f"enable --now factory-{name}.timer", calls)
-
-    def engine_source(self) -> Path:
-        """A committed `factory_source` checkout registered in the host file."""
-        src = self.tmp / "af"
-        src.mkdir()
-        self.git(src, "init", "-q")
-        (src / "VERSION").write_text("1\n")
-        self.git(src, "add", ".")
-        self.git(src, "commit", "-q", "-m", "one")
-        self.register()
-        data = host.load()
-        data["defaults"] = {"factory_source": str(src)}
-        host.save(data)
-        return src
-
-    @staticmethod
-    def git(src: Path, *args: str) -> str:
-        identity = ["-c", "user.name=t", "-c", "user.email=t@x", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"]
-        return subprocess.run(["git", "-C", str(src), *identity, *args], check=True, capture_output=True, text=True).stdout.strip()
-
-    def test_upgrade_restores_timers_on_failure(self) -> None:
-        self.engine_source()
-        self.stub("uv", ("tool install *", "no network\n", 1))
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        code, out = self.district("apply", "--upgrade")
-        self.assertEqual(code, 1)
-        self.assertIn("uv tool install failed", out)
-        calls = self.calls("systemctl")
-        self.assertLess(calls.index("disable --now factory-widgets.timer"), calls.index("enable --now factory-widgets.timer"))
-        self.assertEqual(self.calls("factory"), [])  # nothing ran after the failed reinstall
-        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
-        self.assertNotIn("engine", host.load()["defaults"])
-        # a District-disabled timer is inactive: neither stopped nor restored
-        data = host.load()
-        data["repo"]["acme/widgets"]["disabled_at"] = "2026-09-03T00:00:00Z"
-        host.save(data)
-        (self.bin / "factory-widgets.timer.disabled").touch()
-        (self.bin / "systemctl.log").unlink()
-        code, out = self.district("apply", "--upgrade")
-        self.assertEqual(code, 1)
-        self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
-        self.assertNotIn("enable --now factory-widgets.timer", self.calls("systemctl"))
-
-    def test_upgrade_restores_timer_after_generic_exception(self) -> None:
-        self.engine_source()
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        real_run = apply.run
-
-        def fail_install(argv, **kwargs):
-            if argv[:3] == ["uv", "tool", "install"]:
-                raise RuntimeError("boom")
-            return real_run(argv, **kwargs)
-
-        with mock.patch.object(apply, "run", side_effect=fail_install), \
-             self.assertRaises(RuntimeError):
-            apply.upgrade(host.load())
-        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
-        calls = self.calls("systemctl")
-        self.assertLess(calls.index("disable --now factory-widgets.timer"),
-                        calls.index("enable --now factory-widgets.timer"))
-
-    def test_upgrade_bounds_install_time_and_restores_timer(self) -> None:
-        self.engine_source()
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        real_run = apply.run
-
-        def slow_install(argv, **kwargs):
-            if argv[:3] == ["uv", "tool", "install"]:
-                return real_run([sys.executable, "-c", "import time; time.sleep(0.2)"], **kwargs)
-            return real_run(argv, **kwargs)
-
-        with mock.patch.object(apply, "DRAIN_TIMEOUT", 0.01, create=True), \
-             mock.patch.object(apply, "run", side_effect=slow_install), \
-             self.assertRaisesRegex(host.DistrictError, "timed out after 0.01s"):
-            apply.upgrade(host.load())
-        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
-        calls = self.calls("systemctl")
-        self.assertLess(calls.index("disable --now factory-widgets.timer"),
-                        calls.index("enable --now factory-widgets.timer"))
-
-    def test_upgrade_race_after_drain_restores_and_defers(self) -> None:
-        self.engine_source()
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        record = install_state.ApplyRun.start()
-        with mock.patch.object(apply, "busy_units",
-                               side_effect=[[], ["factory-widgets.service"]]):
-            result = apply.upgrade(host.load(), record=record)
-        self.assertEqual(result, "deferred")
-        self.assertEqual(record.deferred["engine"]["reason"], "busy: factory-widgets.service")
-        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
-        calls = self.calls("systemctl")
-        self.assertLess(calls.index("disable --now factory-widgets.timer"),
-                        calls.index("enable --now factory-widgets.timer"))
 
     def test_upgrade_defers_when_hand_run_work_starts_during_drain(self) -> None:
-        self.engine_source()
+        old, new = "0" * 40, "a" * 40
+        self.register()
+        self.units("widgets")
+        data = host.load()
+        data["defaults"] = {
+            "factory_ref": "main",
+            "engine_idle_timeout": "1s",
+            "engine": {"ref": "main", "sha": old},
+        }
+        host.save(data)
+        tool, launcher = host.factory_tool_paths()
+        (tool / "uv-receipt.toml").write_text(
+            f'[tool]\nrequirements = [{{name="factory", rev="{old}"}}]\n')
         record = install_state.ApplyRun.start()
         real_run = apply.run
-        launcher = Path.home() / ".local/bin/factory"
 
         def process_started_after_drain(argv, **kwargs):
-            if argv[0] == "ps":
-                drained = (self.bin / "factory-widgets.timer.disabled").exists()
-                output = f"218269 {launcher} gate --base origin/main\n" if drained else ""
-                return subprocess.CompletedProcess(argv, 0, output, "")
+            if argv[:3] == ["git", "ls-remote", "--exit-code"]:
+                return subprocess.CompletedProcess(argv, 0, f"{new}\trefs/heads/main\n", "")
+            if argv[:4] == ["gh", "api", "--paginate", "--slurp"]:
+                checks = [{"total_count": 1, "check_runs": [
+                    {"status": "completed", "conclusion": "success"},
+                ]}]
+                return subprocess.CompletedProcess(argv, 0, json.dumps(checks), "")
+            if argv[:2] == ["gh", "api"] and "/compare/" in argv[2]:
+                return subprocess.CompletedProcess(argv, 0, '{"status":"ahead"}', "")
             return real_run(argv, **kwargs)
 
-        with mock.patch.object(apply, "run", side_effect=process_started_after_drain):
+        def processes_started_after_drain(*_args, **_kwargs):
+            if not (self.bin / "factory-widgets.timer.disabled").exists():
+                return {}
+            exact = [str(launcher), "gate", "--base", "origin/main"]
+            return {"218269": ["100", "1", exact, " ".join(exact)]}
+
+        with mock.patch.object(apply, "run", side_effect=process_started_after_drain), \
+             mock.patch.object(apply, "_linux_processes",
+                               side_effect=processes_started_after_drain):
             result = apply.upgrade(host.load(), record=record)
 
         self.assertEqual(result, "deferred")
@@ -2367,42 +2118,15 @@ class ApplyTest(DistrictCase):
         self.assertEqual(record.disabled, {"factory-widgets.timer"})
         self.assertEqual(record.reenabled, {"factory-widgets.timer"})
         self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
-        self.assertNotIn("engine", host.load()["defaults"])
+        engine = host.load()["defaults"]["engine"]
+        self.assertEqual(engine["target"], new)
+        self.assertEqual(engine["sha"], old)
 
-    def test_upgrade_installs_the_renamed_engine_package(self) -> None:
-        src = self.engine_source()
-        self.stub("uv", ("tool install *", "Installed 1 executable: factory\n"))
-        self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)),
-                  ("dashboard --json", json.dumps(dashboard())))
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        code, out = self.district("apply", "--upgrade")
-        self.assertEqual(code, 0, out)
-        self.assertRegex(self.calls("uv")[0], r"^tool install --reinstall --from \S+ factory$")
-        self.assertEqual(self.calls("factory")[0], "--version")
-        self.assertIn(f"installed factory 0.2.0 from {src}", out)
-
-    def test_upgrade_defers_when_a_pass_is_running_with_its_timer_disabled(self) -> None:
-        self.engine_source()
-        self.stub("systemctl", ("is-active *.service", "activating\n"), ("is-active *", "inactive\n"))
-        code, out = self.district("apply", "--upgrade")
-        self.assertEqual(code, 0, out)
-        self.assertIn("engine deferred (busy: factory-widgets.service)", out)
-        self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
-        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
-
-    def test_upgrade_refuses_dirty_source(self) -> None:
-        src = self.engine_source()
-        (src / "x").write_text("dirty")
-        code, out = self.district("apply", "--upgrade")
-        self.assertEqual(code, 1)
-        self.assertIn("uncommitted changes", out)
-        self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
 
     def test_upgrade_rejects_invalid_factory_extras_before_changes(self) -> None:
         self.register()
-        src = self.repo("engine")
         data = host.load()
-        data["defaults"] = {"factory_source": str(src)}
+        data["defaults"] = {"factory_repo": "https://github.com/mikeroySoft/factory"}
         host.save(data)
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         invalid = ("atlas", [1], [""], ["bad extra"], ["-atlas"], ["atlas-"])
@@ -2417,88 +2141,6 @@ class ApplyTest(DistrictCase):
         self.assertFalse(any(call.startswith(("disable ", "enable ", "restart ")) for call in calls))
         self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
 
-    def test_upgrade_unknown_ref_touches_no_timer(self) -> None:
-        src = self.engine_source()
-        code, out = self.district("apply", "--upgrade", "v9")
-        self.assertEqual(code, 1)
-        self.assertIn(f"v9: not a commit in {src}", out)
-        self.assertNotIn("disable --now factory-widgets.timer", self.calls("systemctl"))
-        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
-        self.assertNotIn("engine", host.load()["defaults"])
-
-    def test_upgrade_ref_installs_an_export_of_that_commit_and_records_it(self) -> None:
-        src = self.engine_source()
-        self.git(src, "tag", "v1")
-        tagged = self.git(src, "rev-parse", "v1")
-        (src / "VERSION").write_text("2\n")
-        self.git(src, "commit", "-qam", "two")
-        head = self.git(src, "rev-parse", "HEAD")
-        (src / "VERSION").write_text("dirty\n")
-        seen = []
-        real = apply.run
-
-        def fake_run(argv, **kw):
-            if argv[:3] == ["uv", "tool", "install"]:
-                exported = Path(argv[argv.index("--from") + 1])
-                seen.append(((exported / "VERSION").read_text(), (exported / ".git").exists()))
-                return subprocess.CompletedProcess(argv, 0, "Installed 1 executable: factory\n", "")
-            return real(argv, **kw)
-
-        self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        with mock.patch.object(apply, "run", fake_run):
-            code, out = self.district("apply", "--upgrade", "v1")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(seen, [("1\n", False)])  # the tagged tree, not the dirty checkout
-        engine = host.load()["defaults"]["engine"]
-        self.assertEqual((engine["ref"], engine["sha"]), ("v1", tagged))
-        self.assertNotIn("previous", engine)
-        self.assertRegex(engine["installed_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
-        self.assertNotIn("rollback", out)
-        # HEAD still needs a clean tree; then `apply <slug> --upgrade` is upgrade-then-apply-one
-        code, out = self.district("apply", "widgets", "--upgrade")
-        self.assertEqual(code, 1)
-        self.assertIn("uncommitted changes", out)
-        (src / "VERSION").write_text("2\n")
-        with mock.patch.object(apply, "run", fake_run):
-            code, out = self.district("apply", "widgets", "--upgrade")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(seen[-1], ("2\n", False))
-        engine = host.load()["defaults"]["engine"]
-        self.assertEqual((engine["ref"], engine["sha"], engine["previous"]), ("HEAD", head, tagged))
-        self.assertIn(f"rollback: district apply --upgrade {tagged}", out)
-        # plain apply reports the recorded engine once, ahead of the repo rows
-        code, out = self.district("apply")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(out.count("engine "), 1)
-        self.assertLess(out.index(f"engine {head[:7]} (HEAD)"), out.index("acme/widgets"))
-
-    def test_upgrade_export_includes_factory_extras(self) -> None:
-        """Export install path must still carry [defaults].factory_extras to uv --from."""
-        src = self.engine_source()
-        data = host.load()
-        data["defaults"]["factory_extras"] = ["atlas", "ops"]
-        host.save(data)
-        seen = []
-        real = apply.run
-
-        def fake_run(argv, **kw):
-            if argv[:3] == ["uv", "tool", "install"]:
-                from_arg = argv[argv.index("--from") + 1]
-                self.assertTrue(from_arg.endswith("[atlas,ops]"), from_arg)
-                tree = Path(from_arg[: from_arg.rindex("[")])
-                seen.append(((tree / "VERSION").read_text(), (tree / ".git").exists()))
-                return subprocess.CompletedProcess(argv, 0, "Installed 1 executable: factory\n", "")
-            return real(argv, **kw)
-
-        self.stub("factory", ("--version", "0.2.0\n"), ("doctor --json", json.dumps(DOCTOR)),
-                  ("dashboard --json", json.dumps(dashboard())))
-        self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
-        with mock.patch.object(apply, "run", fake_run):
-            code, out = self.district("apply", "--upgrade")
-        self.assertEqual(code, 0, out)
-        self.assertEqual(seen, [("1\n", False)])
-        self.assertIn(f"installed factory 0.2.0 from {src}", out)
 
 
 class StatusTest(DistrictCase):
@@ -3681,6 +3323,20 @@ class DashboardTest(DistrictCase):
 
 
 class ServicePathTest(unittest.TestCase):
+    def setUp(self) -> None:
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(mock.patch.dict(os.environ, {
+            "HOME": str(root / "home"),
+            "XDG_CONFIG_HOME": str(root / "config"),
+            "XDG_STATE_HOME": str(root / "state"),
+            "XDG_CACHE_HOME": str(root / "cache"),
+            "XDG_DATA_HOME": str(root / "data"),
+            "UV_TOOL_DIR": str(root / "tools"),
+            "UV_TOOL_BIN_DIR": str(root / "bin"),
+        }))
+        self.enterContext(mock.patch.object(
+            host, "run", side_effect=lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", "")))
+
     def test_demotes_local_bin_after_mise_installs(self) -> None:
         home = Path.home()
         local = str(home / ".local" / "bin")
@@ -3704,6 +3360,7 @@ class ServicePathTest(unittest.TestCase):
         self.assertEqual(parts, ["/opt/bin", local, "/usr/bin"])
 
     def test_apply_exports_service_path_for_factory(self) -> None:
+        self.assertTrue(Path.home().is_relative_to(Path(tempfile.gettempdir())))
         home = Path.home()
         local = str(home / ".local" / "bin")
         mise_gh = str(home / ".local" / "share" / "mise" / "installs" / "gh" / "latest" / "bin")

@@ -15,6 +15,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -179,6 +180,15 @@ class UpdateCase(unittest.TestCase):
         self.state_home = self.tmp / "state"
         self.cache_home = self.tmp / "cache"
         self.config_home = self.tmp / "config"
+        self.enterContext(mock.patch.dict(os.environ, {
+            "HOME": str(self.tmp / "home"),
+            "XDG_CONFIG_HOME": str(self.config_home),
+            "XDG_STATE_HOME": str(self.state_home),
+            "XDG_CACHE_HOME": str(self.cache_home),
+            "XDG_DATA_HOME": str(self.tmp / "data"),
+            "UV_TOOL_DIR": str(self.tools),
+            "UV_TOOL_BIN_DIR": str(self.tool_bin),
+        }))
         for path in (self.bin, self.tools, self.tool_bin):
             path.mkdir(parents=True)
         self.port = self.free_port()
@@ -493,7 +503,7 @@ class UpdateCase(unittest.TestCase):
         self.assertFalse(any("install" in line for line in self.log("uv")))
 
     def test_next_invocation_recovers_a_hard_interruption_without_github(self) -> None:
-        from district import service, update_transaction as tx
+        from district import update, update_transaction as tx
 
         root = self.state_home / "district" / "update"
         current = tx.installed_identity(self.tools / "district")
@@ -505,8 +515,7 @@ class UpdateCase(unittest.TestCase):
             },
             current,
         )
-        shutil.copy2(tx.__file__, root / "transaction.py")
-        shutil.copy2(service.__file__, root / "service.py")
+        update.install_helper(root)
         services = {
             name: {"loaded": False, "active_state": "inactive", "unit_file_state": "not-found", "main_pid": "0"}
             for name in tx.UNITS

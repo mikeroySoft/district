@@ -7,29 +7,38 @@ never modifies a committed file. Exit nonzero when any repo is not converged.
 from __future__ import annotations
 
 import argparse
-import copy
 import fcntl
 import json
 import math
 import os
 import re
+import plistlib
+import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
+import tomllib
 import time
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Iterable
+from typing import Literal
 
-from district import host, install_state
+from district import host, install_state, systemd
+from district.engine_cleanup import cleanup
 from district.host import DistrictError, run
+from district.service import remaining_timeout
 
 POLICY_ENV = ("NPM_CONFIG_MIN_RELEASE_AGE", "UV_EXCLUDE_NEWER")
 # doctor rows about committed files: drift the repo owner decides on
 DRIFT_LABELS = (".factory.toml keys", "host settings committed", ".github/ISSUE_TEMPLATE/agent_task.md", ".factory.toml committed")
 SMOKE_TIMEOUT = 10  # seconds per `--version` probe under a unit's PATH
 DRAIN_TIMEOUT = 120  # maximum seconds an install may keep timers drained
+RESTORE_TIMEOUT = 30  # separate budget after the idle deadline expires
 SERVICE_WAIT = 3600  # maximum seconds a hand-run `--reset` pass may take
+ENGINE_HISTORY = 50
 SMOKE_BINARIES = ("gh", "factory")
 DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
 EXTRA_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
@@ -108,7 +117,7 @@ def _defer(record: install_state.ApplyRun | None, target: str, busy: list[str]) 
 def _ci_state(source_cmd, slug: str, sha: str) -> str:
     """unavailable, missing, pending, failed or success for `sha`'s GitHub check runs."""
     checks = source_cmd(["gh", "api", "--paginate", "--slurp",
-                         f"repos/{slug}/commits/{sha}/check-runs?per_page=100"])
+                         f"repos/{slug}/commits/{sha}/check-runs?per_page=100"], timeout=SMOKE_TIMEOUT)
     if checks.returncode:
         return "unavailable"
     try:
@@ -128,233 +137,817 @@ def _ci_state(source_cmd, slug: str, sha: str) -> str:
     return "success"
 
 
-def _engine_source(data: dict, host_name: str, run_cmd):
-    """(runner, path) of the checkout `host_name` resolves engine refs from."""
-    source = host.factory_source(data, host_name)
-    source_cmd = run_cmd
-    if source is None:
-        source = str(host.default(data, "factory_source"))
-        source_cmd = run
-    if isinstance(source_cmd, host.RemoteRunner) and source.startswith("~/"):
-        source = str(Path(source_cmd.facts()["home"]) / source[2:])
-    if isinstance(source_cmd, host.RemoteRunner):
-        return source_cmd, Path(source)
-    return source_cmd, Path(os.path.expanduser(source))
-
-
-def _resolve_engine(ref: str, source_cmd, src: Path, pin: tuple[str, str] | None = None) -> tuple[str, str, str, str]:
-    """(origin, slug, ref, sha) for `ref` (or `pin`) at `src`'s GitHub origin; OSError when unreachable."""
-    if isinstance(source_cmd, host.RemoteRunner):
-        if source_cmd(["test", "-d", str(src)]).returncode:
-            raise OSError(f"{src} does not exist")
-    elif not src.is_dir():
-        raise OSError(f"{src} does not exist")
-    origin_proc = source_cmd(["git", "remote", "get-url", "origin"], cwd=src)
-    if origin_proc.returncode:
-        raise OSError(origin_proc.stderr.strip() or "could not read origin")
-    origin = origin_proc.stdout.strip()
-    slug = github_slug(origin)
+def _resolve_engine(ref: str, run_cmd, origin: str, pin: tuple[str, str] | None = None,
+                    *, verify_ci: bool = True) -> tuple[str, str, str, str]:
+    """Resolve only remote refs; branches follow their newest green commit, tags do not walk."""
+    slug = github_slug(origin) if isinstance(origin, str) else None
     if slug is None:
-        raise OSError(f"{src} origin is not a GitHub repository")
+        raise OSError(f"{origin}: factory_repo must name a GitHub repository")
+    branch = False
     if pin is not None:
         resolved_ref, sha = pin
+    elif SHA.fullmatch(ref):
+        proc = run_cmd(["gh", "api", f"repos/{slug}/commits/{ref}"], timeout=SMOKE_TIMEOUT)
+        payload = json.loads(proc.stdout) if proc.returncode == 0 else None
+        if not isinstance(payload, dict) or payload.get("sha") != ref:
+            raise OSError(f"{ref}: remote commit unavailable")
+        resolved_ref, sha = ref, ref
     elif ref == "latest-odd":
-        resolved = source_cmd(["git", "ls-remote", "--tags", origin], cwd=src)
-        if resolved.returncode:
-            raise OSError(resolved.stderr.strip() or "ls-remote failed")
-        target = latest_odd_tag(resolved.stdout)
+        proc = run_cmd(["git", "ls-remote", "--tags", origin], timeout=SMOKE_TIMEOUT)
+        if proc.returncode:
+            raise OSError(proc.stderr.strip() or "ls-remote failed")
+        target = latest_odd_tag(proc.stdout)
         if target is None:
             raise OSError(f"no odd-patch tag on {origin}")
         resolved_ref, sha = target
     else:
-        resolved = source_cmd([
-            "git", "ls-remote", "--exit-code", origin,
-            f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}",
-        ], cwd=src)
-        if resolved.returncode:
-            raise OSError(resolved.stderr.strip() or "ls-remote failed")
-        remote_refs = {
-            parts[1]: parts[0].lower()
-            for line in resolved.stdout.splitlines()
-            if len(parts := line.split()) == 2 and SHA.fullmatch(parts[0].lower())
-        }
+        proc = run_cmd(["git", "ls-remote", "--exit-code", origin,
+                        f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"],
+                       timeout=SMOKE_TIMEOUT)
+        if proc.returncode:
+            raise OSError(proc.stderr.strip() or "ls-remote failed")
+        refs = {parts[1]: parts[0].lower() for line in proc.stdout.splitlines()
+                if len(parts := line.split()) == 2 and SHA.fullmatch(parts[0].lower())}
         for candidate in (f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"):
-            if candidate in remote_refs:
-                resolved_ref, sha = ref, remote_refs[candidate]
+            if candidate in refs:
+                resolved_ref, sha = ref, refs[candidate]
+                branch = candidate.startswith("refs/heads/")
                 break
         else:
             raise OSError("remote ref did not resolve to one commit")
+    if verify_ci:
+        state = _ci_state(run_cmd, slug, sha)
+        if state != "success" and branch:
+            history = run_cmd(["gh", "api", f"repos/{slug}/commits?sha={sha}&per_page={ENGINE_HISTORY}"],
+                              timeout=SMOKE_TIMEOUT)
+            if history.returncode == 0:
+                commits = json.loads(history.stdout)
+                if isinstance(commits, list):
+                    for commit in commits[:ENGINE_HISTORY]:
+                        candidate = commit.get("sha") if isinstance(commit, dict) else None
+                        if candidate != sha and isinstance(candidate, str) and SHA.fullmatch(candidate):
+                            if _ci_state(run_cmd, slug, candidate) == "success":
+                                return origin, slug, resolved_ref, candidate
+        if state != "success":
+            raise OSError(f"{sha[:12]} CI {state}; no eligible green commit")
     return origin, slug, resolved_ref, sha
+
+
+def _receipt_sha(tool: Path, run_cmd, *, timeout: float = SMOKE_TIMEOUT) -> str | None:
+    receipt = tool / "uv-receipt.toml"
+    try:
+        body = (run_cmd.path(str(receipt)).read_text(timeout=timeout) if isinstance(run_cmd, host.RemoteRunner)
+                else receipt.read_text())
+        requirements = tomllib.loads(body)["tool"]["requirements"]
+        for requirement in requirements:
+            if requirement.get("name") == "factory":
+                revision = requirement.get("rev")
+                if not revision:
+                    match = re.search(r"[?&]rev=([0-9a-f]{40})(?:&|$)", requirement.get("git", ""))
+                    revision = match[1] if match else None
+                return revision if isinstance(revision, str) and SHA.fullmatch(revision) else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def _tool_cli(tool: Path, cli: Path, run_cmd, *, timeout: float = SMOKE_TIMEOUT) -> bool:
+    if isinstance(run_cmd, host.RemoteRunner):
+        script = (
+            "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "
+            "raise SystemExit(not (p.exists() and p.resolve().is_relative_to(pathlib.Path(sys.argv[2]).resolve())))"
+        )
+        return run_cmd(["python3", "-c", script, str(cli), str(tool)], timeout=timeout).returncode == 0
+    return cli.exists() and cli.resolve().is_relative_to(tool.resolve())
+
+
+def _verify_engine(sha: str | None, tool: Path, cli: Path, run_cmd, *, deadline: float | None = None) -> None:
+    if deadline is None:
+        deadline = time.monotonic() + SMOKE_TIMEOUT
+    actual = _receipt_sha(tool, run_cmd, timeout=remaining_timeout(deadline))
+    if actual is None or actual != sha:
+        raise OSError(f"receipt rev {actual or 'unknown'} != {sha}")
+    if not _tool_cli(tool, cli, run_cmd, timeout=remaining_timeout(deadline)):
+        raise OSError(f"{cli} does not resolve into {tool}")
+    proc = run_cmd([str(cli), "--version"], timeout=remaining_timeout(deadline))
+    if proc.returncode:
+        raise OSError(f"{cli} --version exited {proc.returncode}")
+
+
+def _engine_current(sha: str, tool: Path, cli: Path, runner) -> bool:
+    try:
+        _verify_engine(sha, tool, cli, runner)
+    except OSError:
+        return False
+    return True
+
+
+def _save_engine(data: dict, name: str, runner, *, deadline: float | None = None, **values) -> None:
+    previous = host.engine(data, name) or {}
+    engine = dict(previous)
+    engine.update(values)
+    host.set_engine(data, name, engine)
+    host.save(data)
+    if isinstance(runner, host.RemoteRunner):
+        try:
+            host.sync_remote_config(data, name, runner, deadline=deadline)
+        except (subprocess.TimeoutExpired, host.RemoteHostError, DistrictError):
+            # Neither a newly recorded intent nor an unfinished prior one is lost.
+            for key in ("paused_timers", "dashboards_pending", "install_pending"):
+                if previous.get(key) and not engine.get(key):
+                    engine[key] = previous[key]
+            host.save(data)
+            raise
+
+
+def _downgrade_guard(slug: str, previous: str | None, target: str, run_cmd,
+                     allow_downgrade: bool) -> None:
+    if not previous or previous == target or allow_downgrade:
+        return
+    proc = run_cmd(["gh", "api", f"repos/{slug}/compare/{previous}...{target}"], timeout=SMOKE_TIMEOUT)
+    try:
+        status = json.loads(proc.stdout)["status"] if proc.returncode == 0 else None
+    except (ValueError, KeyError, TypeError):
+        status = None
+    if status == "behind":
+        raise DistrictError(f"refusing downgrade {previous} -> {target}; use --allow-downgrade")
+    if status not in ("ahead", "identical", "diverged"):
+        raise DistrictError(f"cannot establish ancestry {previous} -> {target}; compare unavailable")
+
+
+def _engine_roles(repos: dict) -> tuple[set[str], set[str]]:
+    """Registered main units take precedence over dashboard-looking names."""
+    mains = {f"{host.unit_name(slug)}.service" for slug in repos}
+    dashboards = {f"{host.unit_name(slug)}-dashboard.service" for slug in repos} - mains
+    return mains, dashboards
+
+
+def _engine_units(repos: dict, backend, *, timeout: float) -> tuple[list[str], list[str]]:
+    mains, dashboards = _engine_roles(repos)
+    units = set(backend.factory_units(timeout=timeout)) | mains
+    units.update(f"{name.removesuffix('.service')}.timer" for name in mains)
+    services = sorted(name for name in units if name.endswith(".service") and name not in dashboards)
+    timers = sorted(name for name in units if name.endswith(".timer"))
+    return services, timers
+
+
+def _resolved_paths(paths: list[Path], runner, *, timeout: float = SMOKE_TIMEOUT) -> list[Path]:
+    """Resolve identities on the host that owns the paths, never the controller."""
+    if not isinstance(runner, host.RemoteRunner):
+        return [path.resolve() for path in paths]
+    script = (
+        "import json,pathlib,sys; "
+        "print(json.dumps([str(pathlib.Path(p).resolve()) for p in sys.argv[1:]]))"
+    )
+    proc = runner(["python3", "-c", script, *map(str, paths)], timeout=timeout)
+    if proc.returncode:
+        raise OSError(f"cannot resolve Factory paths: {proc.stderr.strip() or proc.returncode}")
+    try:
+        resolved = json.loads(proc.stdout)
+        if not isinstance(resolved, list) or len(resolved) != len(paths):
+            raise ValueError("unexpected path count")
+        if not all(isinstance(path, str) and Path(path).is_absolute() for path in resolved):
+            raise ValueError("expected absolute paths")
+        return [Path(path) for path in resolved]
+    except (TypeError, ValueError) as exc:
+        raise OSError(f"cannot resolve Factory paths: {exc}") from exc
+
+
+def _linux_identities(runner, *, deadline: float, pids: list[str] | None = None) -> dict:
+    """Bracket argv/ownership observations with Linux process generations."""
+    script = """
+import json,pathlib,sys
+root = pathlib.Path('/proc/')
+rows = {}
+for pid in sys.argv[1:] or [p.name for p in root.iterdir() if p.name.isdigit()]:
+    try:
+        stat = (root / pid / 'stat').read_text().rsplit(')', 1)[1].split()
+        value = (root / pid / 'cgroup').read_text() if sys.argv[1:] else stat[1]
+        after = (root / pid / 'stat').read_text().rsplit(')', 1)[1].split()
+        if stat[19] == after[19]:
+            rows[pid] = [stat[19], value]
+    except (OSError, IndexError):
+        pass
+print(json.dumps(rows))
+"""
+    proc = runner(["python3", "-c", script, *(pids or [])], timeout=remaining_timeout(deadline))
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or "cannot inspect Factory process identity")
+    return json.loads(proc.stdout)
+
+
+def _linux_processes(runner, *, deadline: float) -> dict:
+    """Read exact argv and its generation on the owning host; ps is fallback text only."""
+    proc = runner(["ps", "-ww", "-eo", "pid=,args="], timeout=remaining_timeout(deadline))
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or "cannot list Factory processes")
+    commands = {}
+    for line in proc.stdout.splitlines():
+        fields = line.split(maxsplit=1)
+        if fields and fields[0].isdigit():
+            commands[fields[0]] = fields[1] if len(fields) == 2 else ""
+        elif fields:
+            raise ValueError("invalid Linux ps process row")
+    script = r"""
+import json,os,pathlib,sys
+root = pathlib.Path('/proc/')
+commands = json.loads(sys.argv[1])
+rows = {}
+for pid in {p.name for p in root.iterdir() if p.name.isdigit()} | commands.keys():
+    directory = root / pid
+    try:
+        stat = (directory / 'stat').read_text().rsplit(')', 1)[1].split()
+        try:
+            raw = (directory / 'cmdline').read_bytes()
+            argv = [os.fsdecode(word) for word in raw[:-1].split(b'\0')] if raw.endswith(b'\0') else None
+        except OSError:
+            argv = None
+        after = (directory / 'stat').read_text().rsplit(')', 1)[1].split()
+        if stat[19] != after[19]:
+            raise RuntimeError(f"pid {pid} process identity changed")
+        rows[pid] = [stat[19], stat[1], argv, commands.get(pid, '')]
+    except FileNotFoundError:
+        continue
+    except (OSError, IndexError):
+        rows[pid] = ['', '', None, commands.get(pid, '')]
+print(json.dumps(rows))
+"""
+    proc = runner(["python3", "-c", script, json.dumps(commands)], timeout=remaining_timeout(deadline))
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or "cannot inspect Factory process argv")
+    rows = json.loads(proc.stdout)
+    if not isinstance(rows, dict):
+        raise ValueError("invalid Linux process observations")
+    for pid, row in rows.items():
+        if (not pid.isdigit() or not isinstance(row, list) or len(row) != 4
+                or not all(isinstance(value, str) for value in (row[0], row[1], row[3]))
+                or row[2] is not None and (not isinstance(row[2], list)
+                                          or not all(isinstance(word, str) for word in row[2]))):
+            raise ValueError("invalid Linux process observation")
+    return rows
+
+
+def _ps_identities(output: str) -> tuple[dict, list[tuple[str, str]]]:
+    """Parse C-locale macOS ps rows; an unknown layout must never hide work."""
+    identities, commands = {}, []
+    for line in output.splitlines():
+        fields = line.split(maxsplit=7)
+        if not fields:
+            continue
+        if (len(fields) < 7 or not fields[0].isdigit() or not fields[1].isdigit()
+                or not re.fullmatch(
+                    r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+                    r"(0?[1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}",
+                    " ".join(fields[2:7]))):
+            raise ValueError(f"invalid C-locale ps row for pid {fields[0]}")
+        identities[fields[0]] = [" ".join(fields[2:7]), fields[1]]
+        if len(fields) == 8:
+            commands.append((fields[0], fields[7]))
+    return identities, commands
+
+
+def _factory_processes(tool: Path, cli: Path, run_cmd, *, platform: str, deadline: float) -> tuple[list[str], dict]:
+    real_tool, real_cli = _resolved_paths([tool, cli], run_cmd, timeout=remaining_timeout(deadline))
+    tool_bins = {tool / "bin", real_tool / "bin"}
+    launchers = {str(cli), str(real_cli), *(str(directory / "factory") for directory in tool_bins)}
+    paths = {str(tool), str(real_tool), *launchers}
+    busy = []
+    if platform == "linux":
+        rows = _linux_processes(run_cmd, deadline=deadline)
+        identities = {pid: row[:2] for pid, row in rows.items()}
+        for pid, (_, _, argv, text) in rows.items():
+            work = (_factory_work(argv, tool_bins, launchers) if argv
+                    else "ambiguous Factory command text" if any(path in text for path in paths) else None)
+            if work:
+                busy.append(f"pid {pid} {work}")
+        return busy, identities
+    if platform != "macos":
+        raise ValueError(f"unsupported process observation platform: {platform}")
+    proc = run_cmd(["env", "LC_ALL=C", "ps", "-ww", "-eo", "pid=,ppid=,lstart=,args="],
+                   timeout=remaining_timeout(deadline))
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or "cannot inspect Factory processes")
+    identities, commands = _ps_identities(proc.stdout)
+    return [f"pid {pid} ambiguous Factory command text" for pid, text in commands
+            if any(path in text for path in paths)], identities
+
+
+def _managed_processes(processes: list[str], identities: dict, runner, backend, repos: dict,
+                       *, deadline: float) -> dict[str, str]:
+    """Map only unchanged PID/start-time identities to owning-host units."""
+    units = set(backend.factory_units(timeout=remaining_timeout(deadline)))
+    units.update(f"{host.unit_name(slug)}{suffix}.service" for slug in repos for suffix in ("", "-dashboard"))
+    services = sorted(unit for unit in units if unit.endswith(".service"))
+    config = backend.configuration()
+
+    def probe(argv):
+        proc = runner(argv, timeout=remaining_timeout(deadline))
+        if proc.returncode:
+            raise OSError(proc.stderr.strip() or f"{argv[0]} ownership probe failed")
+        return proc.stdout
+
+    pids = [work.split()[1] for work in processes]
+
+    def unchanged(pid, current):
+        if pid not in identities or pid not in current or identities[pid] != current[pid]:
+            raise OSError(f"pid {pid} process identity changed or disappeared")
+
+    if config.get("platform") == "linux":
+        output = probe([str(config.get("executable", "systemctl")), "--user", "show",
+                        "-p", "Id", "-p", "ControlGroup", *services])
+        groups = {}
+        for block in output.strip().split("\n\n"):
+            values = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+            if values.get("Id") in services and values.get("ControlGroup", "").startswith("/"):
+                groups[values["ControlGroup"]] = values["Id"]
+        if not groups:
+            return {}
+        current = _linux_identities(runner, deadline=deadline, pids=pids)
+        owners = {}
+        for pid in pids:
+            if pid not in identities or pid not in current or identities[pid][0] != current[pid][0]:
+                raise OSError(f"pid {pid} process identity changed or disappeared")
+            paths = [line.split(":", 2)[2] for line in current[pid][1].splitlines()]
+            for group, unit in groups.items():
+                if any(path == group or path.startswith(group + "/") for path in paths):
+                    owners[pid] = unit
+        return owners
+    if config.get("platform") == "macos":
+        labels = {unit.removesuffix(".service"): unit for unit in services}
+        owners = {}
+        for line in probe([str(config.get("executable", "launchctl")), "list"]).splitlines():
+            fields = line.split()
+            if len(fields) == 3 and fields[0].isdigit() and fields[2] in labels:
+                owners[fields[0]] = labels[fields[2]]
+        current, _ = _ps_identities(probe(["env", "LC_ALL=C", "ps", "-eo", "pid=,ppid=,lstart="]))
+        anchors = dict(owners)
+        for pid in pids:
+            ancestor, seen = pid, set()
+            while ancestor not in seen:
+                seen.add(ancestor)
+                unchanged(ancestor, current)
+                if ancestor in anchors:
+                    owners[pid] = anchors[ancestor]
+                    break
+                parent = identities[ancestor][1]
+                if parent in ("0", "1"):
+                    break
+                ancestor = parent
+        return owners
+    raise OSError(f"unsupported ownership platform: {config.get('platform')}")
+
+
+def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> tuple[list[str], list[str]]:
+    try:
+        processes, identities = _factory_processes(
+            tool, cli, runner, platform=backend.configuration().get("platform"), deadline=deadline)
+    except ValueError as exc:
+        unknown = [f"Factory process observation unavailable: {exc}"]
+        return unknown, unknown
+    if not processes:
+        return [], []
+    try:
+        owners = _managed_processes(processes, identities, runner, backend, repos, deadline=deadline)
+        remaining_timeout(deadline)
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
+            host.RemoteHostError) as exc:
+        return [f"Factory process ownership unavailable: {exc}", *processes], processes
+    mains, dashboards = _engine_roles(repos)
+    processes = [work for work in processes if not (
+        work.endswith("ambiguous Factory command text") and owners.get(work.split()[1]) in dashboards)]
+    outside = [work for work in processes
+               if owners.get(work.split()[1]) not in mains
+               and work.endswith(("factory gate", "factory dispatch", "ambiguous Factory command text"))]
+    return outside, processes
+
+
+def _hand_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> list[str]:
+    busy = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
+    outside, _ = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
+    return busy + outside
+
+
+def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
+    paused = (host.engine(data, name) or {}).get("paused_timers", [])
+    if not paused:
+        return
+    blocked = (host.engine(data, name) or {}).get("install_pending", {}).get("rollback_blocked")
+    if blocked:
+        print(f"engine:{name} FAIL keeping timers paused after blocked rollback: {', '.join(paused)}: {blocked}")
+        return
+    if deadline is None:
+        deadline = time.monotonic() + RESTORE_TIMEOUT
+    try:
+        tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+        _verify_engine(_receipt_sha(tool, runner, timeout=remaining_timeout(deadline)),
+                       tool, cli, runner, deadline=deadline)
+    except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+        print(f"engine:{name} FAIL verification; keeping timers paused: {', '.join(paused)}: {exc}")
+        raise
+    remaining = list(paused)
+    for timer in paused:
+        try:
+            proc = backend.resume_timer(timer, timeout=min(SMOKE_TIMEOUT, remaining_timeout(deadline)))
+            if proc.returncode:
+                raise OSError(f"exited {proc.returncode}")
+        except (Exception, DistrictError) as exc:
+            print(f"engine:{name} FAIL restoring {timer}: {exc}")
+            continue
+        remaining.remove(timer)
+        if record:
+            record.reenabled.add(timer)
+    _save_engine(data, name, runner, deadline=deadline, paused_timers=remaining)
+    if remaining:
+        raise DistrictError(f"could not restore paused timers: {', '.join(remaining)}")
+
+
+@contextmanager
+def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, *, deadline: float | None = None):
+    target = "engine" if name == "local" else f"engine:{name}"
+    if deadline is None:
+        timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
+        deadline = time.monotonic() + timeout
+    try:
+        ready = False
+        try:
+            services, timers = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
+            active = [timer for timer in timers
+                      if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
+            tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+            hand_work = _hand_work(tool, cli, runner, backend, repos, deadline=deadline)
+            if hand_work:
+                _defer(record, target, hand_work)
+            else:
+                if record:
+                    record.observe(data)
+                for timer in active:
+                    remaining_timeout(deadline)
+                    paused = list((host.engine(data, name) or {}).get("paused_timers", []))
+                    _save_engine(data, name, runner, deadline=deadline,
+                                 paused_timers=paused if timer in paused else paused + [timer])
+                    remaining = remaining_timeout(deadline)
+                    if record:
+                        record.disabled.add(timer)
+                    backend.pause_timer(timer, timeout=remaining)
+                while True:
+                    hand_work = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
+                    if hand_work:
+                        _defer(record, target, hand_work)
+                        break
+                    busy = [unit for unit in services if backend.is_active(
+                        unit, timeout=remaining_timeout(deadline)) in ("active", "activating", "deactivating")]
+                    hand_work, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
+                    busy += processes
+                    if hand_work:
+                        _defer(record, target, hand_work)
+                        break
+                    if not busy:
+                        ready = True
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _defer(record, target, busy)
+                        break
+                    time.sleep(min(1, remaining))
+        except subprocess.TimeoutExpired:
+            _defer(record, target, ["idle wait timed out"])
+        yield deadline if ready else None
+    finally:
+        _restore_engine_timers(data, name, runner, backend, record)
+
+def _finish_dashboards(data: dict, name: str, runner, repos: dict, backend, *, deadline: float | None = None) -> None:
+    if (host.engine(data, name) or {}).get("dashboards_pending"):
+        if deadline is None:
+            deadline = time.monotonic() + RESTORE_TIMEOUT
+        tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+        _verify_engine(_receipt_sha(tool, runner, timeout=remaining_timeout(deadline)),
+                       tool, cli, runner, deadline=deadline)
+        restart_dashboards(repos, backend, deadline=deadline)
+        _save_engine(data, name, runner, deadline=deadline, dashboards_pending=False)
+
+
+
+def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: str,
+                    previous: str | None, tool: Path, cli: Path, *, backend, repos: dict, deadline: float) -> str:
+    extras = factory_extras(data)
+    install_url = "ssh://" + origin.replace(":", "/", 1) if origin.startswith("git@") else origin
+    _save_engine(data, name, runner, install_pending={
+        "target": sha, "ref": ref, **({"previous": previous} if previous else {})})
+
+    def install(revision):
+        source = f"git+{install_url}@{revision}" + (f"[{','.join(extras)}]" if extras else "")
+        proc = runner(["uv", "tool", "install", "--force", "--from", source, "factory"], timeout=DRAIN_TIMEOUT)
+        if proc.returncode:
+            raise OSError((proc.stderr or proc.stdout).strip() or "uv tool install failed")
+        _verify_engine(revision, tool, cli, runner)
+
+    try:
+        install(sha)
+    except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as exc:
+        print(f"engine failed {previous or 'unknown'} -> {sha}: {exc}")
+        if previous:
+            try:
+                busy = _hand_work(tool, cli, runner, backend, repos, deadline=deadline)
+                if busy:
+                    raise OSError(f"outside work blocks rollback: {', '.join(busy)}")
+            except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as rollback:
+                reason = ("original idle deadline expired" if isinstance(rollback, subprocess.TimeoutExpired)
+                          else str(rollback))
+                pending = dict((host.engine(data, name) or {})["install_pending"], rollback_blocked=reason)
+                _save_engine(data, name, runner, install_pending=pending)
+                print(f"engine rollback FAIL {sha} -> {previous} on {name}: {reason}; retaining recovery intent")
+                return "failed"
+            try:
+                install(previous)
+            except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as rollback:
+                print(f"engine rollback FAIL {sha} -> {previous}: {rollback}")
+            else:
+                _save_engine(data, name, runner, sha=previous, dashboards_pending=True, install_pending={})
+                print(f"engine rolled back {sha} -> {previous}")
+        return "failed"
+    _save_engine(data, name, runner, ref=ref, sha=sha, installed_at=iso(now()), dashboards_pending=True,
+                 install_pending={}, **({"previous": previous} if previous else {}))
+    print(f"installed factory engine {sha[:12]} ({ref})")
+    return "applied"
+
+
+def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record) -> str | None:
+    """Finish the durable transaction before consulting a new remote policy."""
+    engine = host.engine(data, name) or {}
+    pending = engine.get("install_pending") or {}
+    if not pending and not engine.get("paused_timers") and not engine.get("dashboards_pending"):
+        return None
+    deadline = time.monotonic() + RESTORE_TIMEOUT
+    stored = installed_engine_commit(data, name)
+    try:
+        tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+        receipt = _receipt_sha(tool, runner, timeout=remaining_timeout(deadline))
+        try:
+            _verify_engine(pending.get("target") or receipt, tool, cli, runner, deadline=deadline)
+        except (OSError, subprocess.TimeoutExpired):
+            target = pending.get("target") or engine.get("target") or receipt or stored
+            if not isinstance(target, str) or not SHA.fullmatch(target):
+                raise OSError("no recorded revision available for recovery")
+            previous = (pending.get("previous") if pending else
+                        stored if stored != target else engine.get("previous"))
+            with _engine_window(data, name, runner, backend, repos, record) as window_deadline:
+                if window_deadline is None:
+                    return "deferred"
+                result = _replace_engine(data, name, runner, host.default(data, "factory_repo"),
+                                         pending.get("ref") or engine.get("target_ref", engine.get("ref", "main")),
+                                         target, previous, tool, cli, backend=backend, repos=repos,
+                                         deadline=window_deadline)
+            _finish_dashboards(data, name, runner, repos, backend)
+            return result
+        if receipt != stored or pending:
+            _save_engine(data, name, runner, sha=receipt, install_pending={},
+                         ref=pending.get("ref") or engine.get("target_ref", engine.get("ref", "unknown")),
+                         installed_at=iso(now()), dashboards_pending=True, deadline=deadline)
+        if engine.get("paused_timers"):
+            _restore_engine_timers(data, name, runner, backend, record, deadline=deadline)
+        _finish_dashboards(data, name, runner, repos, backend, deadline=deadline)
+    except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as exc:
+        print(f"engine:{name} recovery failed: {exc}; retaining recovery state")
+        paused = (host.engine(data, name) or {}).get("paused_timers", [])
+        if paused:
+            print(f"engine:{name} FAIL keeping timers paused: {', '.join(paused)}")
+        return "failed"
+    return None
 
 
 def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *, backend=None,
                      host_name: str = "local", repos: dict[str, dict] | None = None,
-                     run_cmd=None, pin: tuple[str, str] | None = None, verify_ci: bool = True) -> str:
-    """Install a changed, CI-green remote Factory ref without modifying its checkout.
-
-    `pin` = (ref, sha) installs that commit instead of resolving `factory_ref` here; a fleet
-    passes the sha every host agreed on, and a rollback passes the previous one with no CI check."""
+                     run_cmd=None, pin: tuple[str, str] | None = None, verify_ci: bool = True,
+                     allow_downgrade: bool = False, ref: str | None = None,
+                     window_deadline: float | None = None) -> str:
+    """Converge this host's one uv tool to its recorded, remote CI-green target."""
     run_cmd = run if run_cmd is None else run_cmd
     backend = backend or host.service_backend()
     repos = _host_repos(data, host_name) if repos is None else repos
     engine_target = "engine" if host_name == "local" else f"engine:{host_name}"
-    ref = data.get("defaults", {}).get("factory_ref")
+    if window_deadline is None:
+        recovery = _recover_engine(data, host_name, run_cmd, backend, repos, record)
+        if recovery is not None:
+            return recovery
+    explicit_ref = ref is not None
     if ref is None:
+        ref = pin[0] if pin is not None else data.get("defaults", {}).get("factory_ref")
+    if ref is None and pin is None:
         if record:
             record.clear_deferred(engine_target)
         return "unchanged"
     if not isinstance(ref, str) or not ref.strip():
         raise DistrictError("[defaults].factory_ref must be a non-empty string")
-    extras = factory_extras(data)
-    source_cmd, src = _engine_source(data, host_name, run_cmd)
+    factory_extras(data)
+    origin = host.default(data, "factory_repo")
     try:
-        origin, slug, resolved_ref, sha = _resolve_engine(ref, source_cmd, src, pin)
-    except OSError as exc:
-        if host_name != "local" or pin is not None:
-            print(f"{engine_target} FAIL factory source {src}: {exc}")
-            return "failed"
-        print(f"engine {ref} unresolved: {exc}; keeping installed engine")
-        return "unchanged"
-    if installed_engine_commit(data, host_name) == sha:
-        if record:
-            record.clear_deferred(engine_target)
-        print(f"engine {sha[:7]} ({resolved_ref})")
-        return "unchanged"
-    state = _ci_state(source_cmd, slug, sha) if verify_ci else "success"
-    if state == "unavailable":
-        print(f"engine {sha[:12]} CI unavailable; keeping installed engine")
-        return "unchanged"
-    if state != "success":
-        print(f"engine {sha[:12]} CI {state}; keeping installed engine")
-        return "unchanged"
-
-    services = [f"{host.unit_name(slug)}.service" for slug in repos]
-    if busy := busy_engine(services, backend, run_cmd):
-        _defer(record, engine_target, busy)
-        return "deferred"
-    timers = [f"{host.unit_name(slug)}.timer" for slug in repos]
-    active_timers = [timer for timer in timers if backend.is_active(timer) == "active"]
-    install_url = origin
-    if origin.startswith("git@"):
-        install_url = "ssh://" + origin.replace(":", "/", 1)
-    install_source = f"git+{install_url}@{sha}"
-    if extras:
-        install_source += f"[{','.join(extras)}]"
-    try:
-        if busy := (drain(active_timers, services, data, record, backend=backend)
-                    or busy_engine(services, backend, run_cmd)):
-            _defer(record, engine_target, busy)
-            return "deferred"
-        try:
-            proc = run_cmd(
-                ["uv", "tool", "install", "--reinstall", "--from", install_source, "factory"],
-                timeout=DRAIN_TIMEOUT if active_timers else None,
-            )
-        except subprocess.TimeoutExpired:
-            print(f"engine {sha[:12]} install timed out after {DRAIN_TIMEOUT}s")
-            return "failed"
-    finally:
-        restore(active_timers, repos, record, backend=backend)
-    if proc.returncode:
-        detail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
-        print(f"engine {sha[:12]} install failed" + (f": {detail[-1]}" if detail else ""))
+        origin, slug, resolved_ref, sha = _resolve_engine(ref, run_cmd, origin, pin, verify_ci=verify_ci)
+    except subprocess.TimeoutExpired as exc:
+        print(f"{engine_target} {ref} unresolved: {exc}; keeping installed engine")
         return "failed"
-    previous = (host.engine(data, host_name) or {}).get("sha")
-    host.set_engine(data, host_name, {
-        "ref": resolved_ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
-    })
-    host.save(data)
-    if isinstance(run_cmd, host.RemoteRunner):
-        host.sync_remote_config(data, host_name, run_cmd)
-    restart_dashboards(repos, backend)
-    if record:
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"{engine_target} {ref} unresolved: {exc}; keeping installed engine")
+        return "failed" if explicit_ref or host_name != "local" or pin is not None else "unchanged"
+    try:
+        _save_engine(data, host_name, run_cmd, target=sha, target_ref=resolved_ref, resolved_at=iso(now()))
+        tool, cli = host.factory_tool_paths(run_cmd)
+        receipt = _receipt_sha(tool, run_cmd)
+        stored_sha = installed_engine_commit(data, host_name)
+        previous = receipt or stored_sha
+        if _engine_current(sha, tool, cli, run_cmd):
+            if stored_sha != sha:
+                _save_engine(data, host_name, run_cmd, sha=sha, ref=resolved_ref,
+                             installed_at=iso(now()), dashboards_pending=True)
+            if window_deadline is None:
+                _finish_dashboards(data, host_name, run_cmd, repos, backend)
+            if record:
+                record.clear_deferred(engine_target)
+            print(f"engine {sha[:7]} ({resolved_ref})")
+            return "unchanged"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"{engine_target} failed preparing {sha}: {exc}; retaining recovery state")
+        return "failed"
+    if receipt == sha:
+        previous = stored_sha if stored_sha != sha else (host.engine(data, host_name) or {}).get("previous")
+    try:
+        _downgrade_guard(slug, previous, sha, run_cmd, allow_downgrade)
+    except subprocess.TimeoutExpired as exc:
+        print(f"{engine_target} failed ancestry {previous} -> {sha}: {exc}; keeping installed engine")
+        return "failed"
+    try:
+        if window_deadline is not None:
+            result = _replace_engine(data, host_name, run_cmd, origin, resolved_ref, sha, previous, tool, cli,
+                                     backend=backend, repos=repos, deadline=window_deadline)
+        else:
+            with _engine_window(data, host_name, run_cmd, backend, repos, record) as window_deadline:
+                if window_deadline is None:
+                    return "deferred"
+                result = _replace_engine(data, host_name, run_cmd, origin, resolved_ref, sha, previous, tool, cli,
+                                         backend=backend, repos=repos, deadline=window_deadline)
+            _finish_dashboards(data, host_name, run_cmd, repos, backend)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"{engine_target} failed {previous or 'unknown'} -> {sha}: {exc}")
+        return "failed"
+    if result == "applied" and record:
         record.clear_deferred(engine_target)
-    print(f"installed factory engine {sha[:12]} ({resolved_ref})")
-    return "applied"
+    return result
 
 
 
 
 def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
-                           contexts: dict[str, tuple]) -> str:
-    """One engine sha on every host that shares a repo: resolve `factory_ref` on each host, check
-    CI and running passes on every host that needs the sha, install only when all of that agrees,
-    and roll moved hosts back when an install still fails or defers.
-
-    `contexts` maps host name to (run_cmd, backend, repos)."""
-    ref = data.get("defaults", {}).get("factory_ref")
+                           contexts: dict[str, tuple], *, allow_downgrade: bool = False,
+                           ref: str | None = None) -> str:
+    """Hold every changed host's upgrade window before moving any shared-repo engine."""
+    recovery_result = None
+    for name, (runner, backend, repos) in contexts.items():
+        try:
+            recovered = _recover_engine(data, name, runner, backend, repos, record)
+        except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+            print(f"engine:{name} recovery failed: {exc}; retaining recovery state")
+            recovered = "failed"
+        if recovered in ("failed", "deferred"):
+            recovery_result = recovered
+    if recovery_result:
+        return recovery_result
+    ref = ref if ref is not None else data.get("defaults", {}).get("factory_ref")
+    if ref == "HEAD":
+        ref = data.get("defaults", {}).get("factory_ref", "main")
     if ref is None:
         return "unchanged"
     names = ", ".join(contexts)
-    resolved, sources = {}, {}
-    for name, (run_cmd, _, _) in contexts.items():
-        source_cmd, src = _engine_source(data, name, run_cmd)
+    origin = host.default(data, "factory_repo")
+    resolved, previous = {}, {}
+    for name, (runner, backend, _) in contexts.items():
         try:
-            _, slug, resolved_ref, sha = _resolve_engine(ref, source_cmd, src)
-        except (OSError, host.RemoteHostError) as exc:
-            print(f"engine fleet ({names}) held: {name} cannot resolve {ref}: {exc}; every host keeps its engine")
+            _, slug, resolved_ref, sha = _resolve_engine(ref, runner, origin)
+            tool, _ = host.factory_tool_paths(runner)
+            receipt = _receipt_sha(tool, runner)
+            stored = installed_engine_commit(data, name)
+            previous[name] = stored if receipt == sha and stored != sha else receipt or stored
+            _downgrade_guard(slug, previous[name], sha, runner, allow_downgrade)
+        except (OSError, ValueError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+            print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
             return "failed"
         resolved[name] = (resolved_ref, sha)
-        sources[name] = (source_cmd, slug)
-    if len({sha for _, sha in resolved.values()}) > 1:
+    if len(set(resolved.values())) > 1:
         detail = ", ".join(f"{name} {sha[:12]}" for name, (_, sha) in resolved.items())
         print(f"engine fleet ({names}) held: {ref} resolves differently ({detail}); every host keeps its engine")
         return "failed"
     pin = next(iter(resolved.values()))
-    for name, (run_cmd, backend, repos) in contexts.items():
-        if installed_engine_commit(data, name) == pin[1]:
-            continue
-        held = None
+    for name, (runner, _, _) in contexts.items():
         try:
-            if (state := _ci_state(*sources[name], pin[1])) != "success":
-                held, result = f"CI {state}", "unchanged"
-            elif busy := busy_engine([f"{host.unit_name(slug)}.service" for slug in repos], backend, run_cmd):
-                _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
-                held, result = f"busy: {', '.join(busy)}", "deferred"
-        except host.RemoteHostError as exc:
-            held, result = str(exc), "failed"
-        if held:
-            print(f"engine fleet ({names}) held by {name} ({held}): every host keeps its engine")
-            return result
-    before = {name: copy.deepcopy(host.engine(data, name)) for name in contexts}
-    moved = []
-    for name, (run_cmd, backend, repos) in contexts.items():
-        # A host that drops (ssh 255) or errors mid-step fails like a failed install, so the
-        # hosts already moved still roll back and the row names it (#134).
+            _save_engine(data, name, runner, target=pin[1], target_ref=pin[0], resolved_at=iso(now()))
+        except subprocess.TimeoutExpired as exc:
+            print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
+            return "failed"
+    moved, attempted = [], []
+    result = "unchanged"
+    opened = set()
+    deadlines = {}
+
+    def hand_ready(name):
+        runner, backend, repos = contexts[name]
         try:
-            result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
-                                      run_cmd=run_cmd, pin=pin, verify_ci=False)
-            why = result
-        except (host.RemoteHostError, DistrictError) as exc:
-            result, why = "failed", f"failed: {exc}"
-        if result == "applied":
-            moved.append(name)
-            continue
-        if result == "unchanged" and installed_engine_commit(data, name) == pin[1]:
-            continue
-        stuck = []
-        for back in moved:
-            previous = before[back]
-            back_cmd, back_backend, back_repos = contexts[back]
-            try:
-                restored = bool(previous and previous.get("sha")) and reconcile_engine(
-                    data, record, backend=back_backend, host_name=back, repos=back_repos, run_cmd=back_cmd,
-                    pin=(previous.get("ref", "previous"), previous["sha"]), verify_ci=False,
-                ) == "applied"
-            except (host.RemoteHostError, DistrictError) as exc:
-                print(f"engine:{back} rollback FAIL: {exc}")
-                restored = False
-            if not restored:
-                stuck.append(back)
+            tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadlines[name]))
+            busy = _hand_work(tool, cli, runner, backend, repos, deadline=deadlines[name])
+        except subprocess.TimeoutExpired:
+            busy = ["idle wait timed out"]
+        if busy:
+            _defer(record, "engine" if name == "local" else f"engine:{name}", busy)
+        return not busy
+
+    # Preflight every changed host before pausing any host's timers.
+    for name, (runner, backend, _) in contexts.items():
+        try:
+            tool, cli = host.factory_tool_paths(runner)
+            if (_engine_current(pin[1], tool, cli, runner)
+                    and not (host.engine(data, name) or {}).get("paused_timers")):
                 continue
-            host.set_engine(data, back, previous)
-        host.save(data)
-        rolled = [back for back in moved if back not in stuck]
-        print(f"engine fleet ({names}) held by {name} ({why}): every host keeps its engine"
-              + (f"; rolled back {', '.join(rolled)}" if rolled else "")
-              + (f"; FAIL could not roll back {', '.join(stuck)}" if stuck else ""))
-        return "failed" if result == "failed" or stuck else result
-    return "applied" if moved else "unchanged"
+            timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
+            deadlines[name] = time.monotonic() + timeout
+            if not hand_ready(name):
+                print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
+                return "deferred"
+        except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+            print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
+            return "failed"
+    with ExitStack() as windows:
+        for name, (runner, backend, repos) in contexts.items():
+            if name not in deadlines:
+                continue
+            try:
+                ready = windows.enter_context(_engine_window(
+                    data, name, runner, backend, repos, record, deadline=deadlines[name]))
+            except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+                print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
+                return "failed"
+            if not ready:
+                print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
+                return "deferred"
+            opened.add(name)
+        # A later host's drain can outlive an earlier host's readiness probe.
+        for name in deadlines:
+            try:
+                if not hand_ready(name):
+                    print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
+                    return "deferred"
+            except (OSError, host.RemoteHostError, DistrictError) as exc:
+                print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
+                return "failed"
+        for name, (runner, backend, repos) in contexts.items():
+            attempted.append(name)
+            try:
+                if name in opened and not hand_ready(name):
+                    result = "deferred"
+                else:
+                    result = reconcile_engine(data, record, backend=backend, host_name=name, repos=repos,
+                                              run_cmd=runner, pin=pin, verify_ci=False, window_deadline=deadlines.get(name),
+                                              allow_downgrade=allow_downgrade)
+                why = result
+            except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+                result, why = "failed", f"failed: {exc}"
+            if result == "applied":
+                moved.append(name)
+                continue
+            if result == "unchanged" and installed_engine_commit(data, name) == pin[1]:
+                continue
+            stuck = []
+            for back in moved:
+                back_cmd, back_backend, back_repos = contexts[back]
+                tool, cli = host.factory_tool_paths(back_cmd)
+                try:
+                    if back not in opened:
+                        deadlines[back] = windows.enter_context(_engine_window(
+                            data, back, back_cmd, back_backend, back_repos, record))
+                        if deadlines[back] is None:
+                            raise OSError("rollback idle wait timed out")
+                        opened.add(back)
+                    if not hand_ready(back):
+                        raise OSError("hand work or expired idle deadline blocks rollback")
+                    restored = bool(previous[back]) and _replace_engine(
+                        data, back, back_cmd, origin, "previous", previous[back], pin[1], tool, cli,
+                        backend=back_backend, repos=back_repos, deadline=deadlines[back],
+                    ) == "applied"
+                except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+                    print(f"engine:{back} rollback FAIL: {exc}")
+                    restored = False
+                if not restored:
+                    stuck.append(back)
+            rolled = [back for back in moved if back not in stuck]
+            print(f"engine fleet ({names}) held by {name} ({why}): every host keeps its engine"
+                  + (f"; rolled back {', '.join(rolled)}" if rolled else "")
+                  + (f"; FAIL could not roll back {', '.join(stuck)}" if stuck else ""))
+            result = "failed"
+            break
+    for name in attempted:
+        runner, backend, repos = contexts[name]
+        try:
+            _finish_dashboards(data, name, runner, repos, backend)
+        except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
+            print(f"engine:{name} dashboard restart FAIL: {exc}")
+            result = "failed"
+    return "failed" if result == "failed" else ("applied" if moved else "unchanged")
 
 
 def now() -> datetime:
@@ -428,100 +1021,158 @@ def _units_changed(slug: str, output: str, backend) -> bool:
     return backend.definitions_changed(unit, wanted)
 
 
-def plan_apply(targets: dict[str, dict], backend, *, run_cmd=None, env=None) -> dict[str, bool]:
+def _argv_error(argv, tool: Path, cli: Path, runner) -> str | None:
+    if not argv:
+        return "missing Factory argv"
+    executable = Path(argv[0])
+    offset = 2 if len(argv) > 1 and argv[1] == "-P" else 1
+    if re.fullmatch(r"python(?:3(?:\.\d+)?)?", executable.name):
+        parent, tool_bin = _resolved_paths([executable.parent, tool / "bin"], runner)
+        if parent == tool_bin and list(argv[offset:offset + 2]) == ["-m", "factory"]:
+            return None
+    else:
+        resolved, real_cli = _resolved_paths([executable, cli], runner)
+        if resolved == real_cli:
+            return None
+    return f"Factory argv must use {cli} or {tool}/bin/python -m factory; got {shlex.join(argv)}"
+
+
+def _render_errors(output: str, tool: Path, cli: Path, runner) -> list[str]:
+    units = _rendered_units(output)
+    if not any(name.endswith((".service", ".plist")) for name in units):
+        return ["factory install --print: no rendered Factory service"]
+    errors = []
+    for name, body in units.items():
+        if name.endswith(".timer"):
+            continue
+        try:
+            if name.endswith(".plist"):
+                argv = plistlib.loads(body.encode()).get("ProgramArguments")
+            else:
+                commands = [line.removeprefix("ExecStart=").strip() for line in body.splitlines()
+                            if line.startswith("ExecStart=")]
+                argv = ([word.replace("%%", "%").replace("$$", "$") for word in systemd.words(commands[0])]
+                        if len(commands) == 1 else None)
+            error = _argv_error(argv, tool, cli, runner)
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError,
+                plistlib.InvalidFileException) as exc:
+            error = f"invalid Factory argv: {exc}"
+        if error:
+            errors.append(f"{name}: {error}")
+    return errors
+
+
+def plan_apply(targets: dict[str, dict], backend, *, run_cmd=None, env=None,
+               errors: dict[str, list[str]] | None = None) -> dict[str, bool]:
     run_cmd = run if run_cmd is None else run_cmd
     backend = backend or host.service_backend()
     changes = {}
+    tool, cli = host.factory_tool_paths(run_cmd)
     for slug, table in targets.items():
         if table.get("disabled_at"):
             changes[slug] = False
             continue
         kwargs = {"env": env} if env is not None else {}
-        proc = run_cmd(["factory", "install", "--print"], cwd=Path(table["path"]), **kwargs)
-        changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout, backend)
+        proc = run_cmd([str(cli), "install", "--print"], cwd=Path(table["path"]), **kwargs)
+        if errors is not None:
+            failures = ([f"factory install --print exited {proc.returncode}: {proc.stderr.strip()}"]
+                        if proc.returncode else _render_errors(proc.stdout, tool, cli, run_cmd))
+            if failures:
+                errors[slug] = failures
+        try:
+            changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout, backend)
+        except OSError as exc:
+            if errors is None:
+                raise DistrictError(str(exc)) from exc
+            errors.setdefault(slug, []).append(str(exc))
+            changes[slug] = True
     return changes
 
 
-def busy_units(services: list[str], backend=None) -> list[str]:
+def busy_units(services: list[str], backend=None, *, timeout: float | None = None) -> list[str]:
     backend = backend or host.service_backend()
+    kwargs = {"timeout": timeout} if timeout is not None else {}
     return [service for service in services
-            if backend.is_active(service) in ("active", "activating", "deactivating")]
+            if backend.is_active(service, **kwargs) in ("active", "activating", "deactivating")]
 
 
-def _python_entrypoint(argv: list[str]) -> list[str]:
-    """Stop at Python's module/script boundary, not text in script arguments."""
+@dataclass(frozen=True)
+class _PythonEntrypoint:
+    kind: Literal["script", "module", "command", "stdin", "none"]
+    target: str | None = None
+    args: tuple[str, ...] = ()
+
+
+# Value-taking options end a short-option group; only c/m select an entrypoint.
+_PYTHON_VALUE_OPTIONS = {"c": "command", "m": "module", "W": None, "X": None,
+                         "--check-hash-based-pycs": None}
+
+
+def _python_entrypoint(argv: Iterable[str]) -> _PythonEntrypoint:
+    """Parse exact CPython argv once, keeping script/module/command boundaries distinct."""
     args = iter(argv)
     for arg in args:
-        if arg in {"-", "--"}:
-            return []
-        if arg == "--check-hash-based-pycs":
-            next(args, None)
-        elif not arg.startswith("-"):
-            return [arg, *args]
-        elif option := re.match(r"^-[^-]*?([cmWX])(.*)$", arg):
-            # Short options can group; c/m/W/X consume the rest or the next token.
-            flag, value = option.groups()
-            if flag == "c":
-                return []
-            value = value or next(args, "")
-            if flag == "m":
-                return ["-m", value, *args]
-    return []
+        if arg == "--":
+            target = next(args, None)
+            return (_PythonEntrypoint("script", target, tuple(args)) if target is not None
+                    else _PythonEntrypoint("none"))
+        if arg == "-":
+            return _PythonEntrypoint("stdin", args=tuple(args))
+        if not arg.startswith("-"):
+            return _PythonEntrypoint("script", arg, tuple(args))
+        if arg.startswith("--"):
+            if arg in _PYTHON_VALUE_OPTIONS:
+                next(args, None)
+            continue  # Long flags (including unknown ones) consume no following value.
+        for index, flag in enumerate(arg[1:], 2):
+            if flag not in _PYTHON_VALUE_OPTIONS:
+                continue  # Short flags may repeat or group, e.g. -bBOO.
+            value = arg[index:] or next(args, None)
+            kind = _PYTHON_VALUE_OPTIONS[flag]
+            if kind is not None:
+                return _PythonEntrypoint(kind, value, tuple(args))
+            break
+    return _PythonEntrypoint("none")
 
 
-def _python_factory_args(argv: list[str], tool_bin: Path, launchers: set[str]) -> list[str]:
-    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(argv[0]).name):
+def _python_factory_args(executable: str, words: Iterable[str], tool_bins: set[Path],
+                         launchers: set[str]) -> list[str]:
+    if not re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", Path(executable).name):
         return []
-    args = _python_entrypoint(argv[1:])
-    if args and args[0] in launchers:
-        return args[1:]
-    if Path(argv[0]).parent == tool_bin and args[:2] == ["-m", "factory"]:
-        return args[2:]
+    entrypoint = _python_entrypoint(words)
+    if entrypoint.kind == "script" and entrypoint.target in launchers:
+        return list(entrypoint.args)
+    if (entrypoint.kind == "module" and entrypoint.target == "factory"
+            and Path(executable).parent in tool_bins):
+        return list(entrypoint.args)
     return []
 
 
-def _factory_work(command: str, home: Path) -> str | None:
-    """Recognize uv-tool gate/dispatch entrypoints, not text mentioning those commands."""
-    argv = command.split()
-    if not argv:
-        return None
-    tool_bin = home / ".local/share/uv/tools/factory/bin"
-    launchers = {str(home / ".local/bin/factory"), str(tool_bin / "factory")}
-    if argv[0] in launchers or argv[0] == "factory":
-        args = argv[1:]
+def _factory_work(argv: list[str], tool_bins: set[Path], launchers: set[str]) -> str | None:
+    """Classify exact argv only; command text is never tokenized."""
+    executable, *words = argv
+    if executable in launchers or executable == "factory":
+        args = words
     else:
-        args = _python_factory_args(argv, tool_bin, launchers)
-    if args and args[0] in {"gate", "dispatch"}:
+        args = _python_factory_args(executable, words, tool_bins, launchers)
+    if args and args[0] != "dashboard":
         return f"factory {args[0]}"
     return None
 
 
-def _busy_handland(backend, run_cmd) -> list[str]:
+def _busy_handland(backend, run_cmd, *, timeout: float) -> list[str]:
     config = backend.configuration()
     if config.get("platform") == "linux":
         units = run_cmd([
-            str(config["executable"]), "--user", "list-units", "--no-legend", "--plain",
+            str(config.get("executable", "systemctl")), "--user", "list-units", "--no-legend", "--plain",
             "--state=active,activating,deactivating", "handland-*",
-        ], check=True)
+        ], timeout=timeout)
+        if units.returncode:
+            raise OSError(units.stderr.strip() or "cannot inspect handland user units")
         return [line.split()[0] for line in units.stdout.splitlines() if line.strip()]
     return []
 
 
-def busy_engine(services: list[str], backend, run_cmd) -> list[str]:
-    """All known users of the target host's engine, checked again after timers drain."""
-    if busy := (busy_units(services, backend) or _busy_handland(backend, run_cmd)):
-        return busy
-    if isinstance(run_cmd, host.RemoteRunner):
-        facts = run_cmd.facts()
-        home, uid = Path(facts["home"]), facts["uid"]
-    else:
-        home, uid = Path.home(), os.getuid()
-    processes = run_cmd(["ps", "-ww", "-u", str(uid), "-o", "pid=,args="], check=True)
-    for line in processes.stdout.splitlines():
-        fields = line.split(maxsplit=1)
-        if len(fields) == 2 and fields[0].isdigit() and (work := _factory_work(fields[1], home)):
-            busy.append(f"pid {fields[0]} {work}")
-    return busy
 
 
 def disable_timers(timers: list[str], timeout: float, backend, *, check: bool = True,
@@ -551,103 +1202,26 @@ def drain(timers: list[str], services: list[str], data: dict,
     return busy_units(services, backend)
 
 
-def restart_dashboards(repos: dict[str, dict], backend=None) -> None:
+def restart_dashboards(repos: dict[str, dict], backend=None, *, deadline: float | None = None) -> None:
     backend = backend or host.service_backend()
-    for slug in repos:
-        dash = f"{host.unit_name(slug)}-dashboard.service"
-        if backend.status(dash).loaded:
-            backend.start(dash, restart=True, check=False)
+    if deadline is None:
+        deadline = time.monotonic() + RESTORE_TIMEOUT
+    _, dashboards = _engine_roles(repos)
+    for dash in sorted(dashboards):
+        if backend.status(dash, timeout=remaining_timeout(deadline)).loaded:
+            proc = backend.start(dash, restart=True, check=False, timeout=remaining_timeout(deadline))
+            if proc.returncode:
+                raise OSError(f"{dash}: restart exited {proc.returncode}")
 
 
-def upgrade(data: dict, ref: str = "HEAD", record: install_state.ApplyRun | None = None, *,
+def upgrade(data: dict, ref: str | None = None, record: install_state.ApplyRun | None = None, *,
             backend=None, host_name: str = "local", repos: dict[str, dict] | None = None,
-            run_cmd=None) -> str:
-    """Reinstall an export of `ref` only while every Factory service on the target host is idle."""
-    run_cmd = run if run_cmd is None else run_cmd
-    backend = backend or host.service_backend()
-    repos = _host_repos(data, host_name) if repos is None else repos
-    engine_target = "engine" if host_name == "local" else f"engine:{host_name}"
-    extras = factory_extras(data)
-    source_path = host.factory_source(data, host_name)
-    source_cmd = run_cmd
-    if source_path is None:
-        source_path = str(host.default(data, "factory_source"))
-        source_cmd = run
-    if isinstance(source_cmd, host.RemoteRunner) and source_path.startswith("~/"):
-        source_path = str(Path(source_cmd.facts()["home"]) / source_path[2:])
-    src = (
-        Path(os.path.expanduser(source_path))
-        if not isinstance(source_cmd, host.RemoteRunner)
-        else Path(source_path)
-    )
-    proc = source_cmd(["git", "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=src)
-    if proc.returncode != 0:
-        raise DistrictError(f"{ref}: not a commit in {src}")
-    sha = proc.stdout.strip()
-    if ref == "HEAD" and source_cmd(
-        ["git", "status", "--porcelain"], cwd=src, check=True
-    ).stdout.strip():
-        raise DistrictError(f"{src} has uncommitted changes; the installed snapshot must match a commit")
-    services = [f"{host.unit_name(slug)}.service" for slug in repos]
-    if busy := busy_engine(services, backend, run_cmd):
-        _defer(record, engine_target, busy)
-        return "deferred"
-    timers = [f"{host.unit_name(slug)}.timer" for slug in repos]
-    temporary = (
-        run_cmd.temporary_directory()
-        if isinstance(run_cmd, host.RemoteRunner)
-        else tempfile.TemporaryDirectory(prefix="district-engine-")
-    )
-    with temporary as tmp:
-        base = tmp if isinstance(tmp, host.RemotePath) else Path(tmp)
-        tar, tree = base / "engine.tar", base / sha
-        tree.mkdir()
-        if source_cmd is run_cmd:
-            source_cmd(["git", "archive", "-o", str(tar), sha], cwd=src, check=True)
-        else:
-            with tempfile.TemporaryDirectory(prefix="district-engine-export-") as export_tmp:
-                controller_tar = Path(export_tmp) / "engine.tar"
-                source_cmd(
-                    ["git", "archive", "-o", str(controller_tar), sha], cwd=src, check=True
-                )
-                tar.write_bytes(controller_tar.read_bytes())
-        run_cmd(["tar", "-x", "-C", str(tree), "-f", str(tar)], check=True)
-        source = f"{tree}[{','.join(extras)}]" if extras else str(tree)
-        active_timers = [timer for timer in timers if backend.is_active(timer) == "active"]
-        try:
-            if busy := (drain(active_timers, services, data, record, backend=backend)
-                        or busy_engine(services, backend, run_cmd)):
-                _defer(record, engine_target, busy)
-                return "deferred"
-            try:
-                proc = run_cmd(
-                    ["uv", "tool", "install", "--reinstall", "--from", source, "factory"],
-                    timeout=DRAIN_TIMEOUT if active_timers else None,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise DistrictError(f"uv tool install timed out after {DRAIN_TIMEOUT}s") from exc
-        finally:
-            restore(active_timers, repos, record, backend=backend)
-    sys.stdout.write(proc.stdout)
-    if proc.returncode != 0:
-        sys.stderr.write(proc.stderr)
-        raise DistrictError("uv tool install failed")
-    version = run_cmd(["factory", "--version"], check=True).stdout.strip()
-    print(f"installed factory {version} from {src}@{sha[:7]} ({ref})")
-    previous = (host.engine(data, host_name) or {}).get("sha")
-    engine = {
-        "ref": ref, "sha": sha, **({"previous": previous} if previous else {}), "installed_at": iso(now()),
-    }
-    host.set_engine(data, host_name, engine)
-    host.save(data)
-    if isinstance(run_cmd, host.RemoteRunner):
-        host.sync_remote_config(data, host_name, run_cmd)
-    if previous:
-        print(f"rollback: district apply --upgrade {previous}")
-    restart_dashboards(repos, backend)
-    if record:
-        record.clear_deferred(engine_target)
-    return "applied"
+            run_cmd=None, allow_downgrade: bool = False) -> str:
+    """Explicit upgrades use the same remote target and verified uv tool as plain apply."""
+    if ref in (None, "HEAD"):
+        ref = data.get("defaults", {}).get("factory_ref", "main")
+    return reconcile_engine(data, record, backend=backend, host_name=host_name, repos=repos,
+                            run_cmd=run_cmd, ref=ref, allow_downgrade=allow_downgrade)
 
 
 def restore(timers: list[str], repos: dict[str, dict],
@@ -819,7 +1393,7 @@ def _host_context(data: dict, host_name: str):
 
 
 def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argparse.Namespace,
-                record: install_state.ApplyRun, status: str, engine_done: bool = False,
+                record: install_state.ApplyRun, status: str, engine_result: str | None = None,
                 context: tuple | None = None) -> tuple[list[dict], int, tuple[int, list[str]]]:
     """`context` is the (run_cmd, backend) the fleet engine step already built for this host."""
     all_repos = _host_repos(data, host_name)
@@ -832,28 +1406,53 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     rows = []
     completed = {}
     code = 0
-    engine_result = "unchanged" if engine_done else (
+    engine_result = engine_result or (
         upgrade(
             data, args.upgrade, record, backend=backend, host_name=host_name,
-            repos=all_repos, run_cmd=run_cmd,
+            repos=all_repos, run_cmd=run_cmd, allow_downgrade=args.allow_downgrade,
         )
         if args.upgrade
         else reconcile_engine(
             data, record, backend=backend, host_name=host_name,
-            repos=all_repos, run_cmd=run_cmd,
+            repos=all_repos, run_cmd=run_cmd, allow_downgrade=args.allow_downgrade,
         )
     )
     if engine_result == "failed":
         code = 1
+    tool, cli = host.factory_tool_paths(run_cmd)
+    try:
+        usable = _tool_cli(tool, cli, run_cmd) and _receipt_sha(tool, run_cmd) is not None
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        usable = False
+        print(f"engine validation at {cli}: {exc}")
+    if not usable:
+        reason = f"engine unavailable at {cli}: must resolve into {tool} with a valid uv receipt; repository checks skipped"
+        for slug, table in targets.items():
+            row = {"slug": slug, "version": None, "doctor": "?", "drift": [], "failures": None,
+                   "fail": [reason], "disabled": table.get("disabled_at"), "timer": "unknown"}
+            rows.append(row)
+            print(line(row, status))
+        return rows, 1, (0, [])
 
     record.observe(data)
     for slug, table in targets.items():
         if args.reset and not reset(slug, table, data, record, backend=backend):
             code = 1
-    changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env)
+    render_errors = {}
+    changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env, errors=render_errors)
+    _, factory_cli = host.factory_tool_paths(run_cmd)
     for slug, table in targets.items():
-        if table.get("disabled_at"):
+        if engine_result == "failed":
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            row["fail"].append("engine step failed; install skipped")
+        elif slug in render_errors:
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            row["fail"].extend(render_errors[slug])
+        elif table.get("disabled_at"):
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+        elif not changes[slug] and backend.is_active(f"{host.unit_name(slug)}.timer") == "active":
+            row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
+            record.clear_deferred(slug)
         else:
             service = f"{host.unit_name(slug)}.service"
             changed = changes[slug]
@@ -876,7 +1475,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                     continue
                 try:
                     proc = run_cmd(
-                        ["factory", "install"],
+                        [str(factory_cli), "install"],
                         cwd=Path(table["path"]),
                         timeout=DRAIN_TIMEOUT if active_timers else None,
                         **({"env": install_env} if install_env is not None else {}),
@@ -902,9 +1501,13 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
 
     if isinstance(run_cmd, host.RemoteRunner):
         host.sync_remote_config(data, host_name, run_cmd)
+    tool, cli = host.factory_tool_paths(run_cmd)
+    if engine_result in ("applied", "unchanged") and _receipt_sha(tool, run_cmd) and _tool_cli(tool, cli, run_cmd):
+        cleanup(data, run_cmd=run_cmd)
     current_engine = host.engine(data, host_name)
     if current_engine and not args.upgrade and "factory_ref" not in data.get("defaults", {}):
-        print(f"engine {current_engine['sha'][:7]} ({current_engine['ref']})")
+        installed = installed_engine_commit(data, host_name)
+        print(f"engine {installed[:7] if installed else 'unknown'} ({current_engine.get('ref', 'unknown')})")
     for row in rows:
         print(line(row, status))
     converged = [row for row in rows if "deferred" not in row]
@@ -935,6 +1538,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             host.factory_host(data, slug)
         selected = host.select(data, args.reset or args.slug)
         if not selected:
+            host.save(data)
             print("no repositories registered (district add)")
             return 0
         groups: dict[str, dict[str, dict]] = {}
@@ -950,11 +1554,11 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         if fleet:
             if blocked := host.claims_blockers(data, fleet_hosts):
                 raise DistrictError(f"{', '.join(fleet)} lists several hosts, but {blocked}; list one host until it does")
-            if args.upgrade:
-                raise DistrictError(
-                    f"{', '.join(fleet)} lists several hosts; --upgrade installs per host, so set "
-                    "[defaults].factory_ref and run `district apply` to move every host to one engine sha"
-                )
+        engine_hosts = list(dict.fromkeys([*fleet_hosts, *groups])) if (
+            fleet_hosts or data.get("defaults", {}).get("factory_ref") or args.upgrade
+        ) else []
+        if len(engine_hosts) < 2 and not fleet_hosts:
+            engine_hosts = []
         host.sync_local_claims(data)
         status, warnings = policy(data)
         host.save(data)
@@ -963,26 +1567,48 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         smokes = []
         code = 0
         contexts = {}
-        if fleet_hosts:
-            try:
-                for name in fleet_hosts:
+        fleet_result = None
+        context_failures = {}
+        if engine_hosts:
+            for name in engine_hosts:
+                try:
                     run_cmd, backend = _host_context(data, name)
                     contexts[name] = (run_cmd, backend, _host_repos(data, name))
-                if reconcile_fleet_engine(data, record, contexts) == "failed":
+                except (host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
+                    context_failures[name] = exc
+            try:
+                if context_failures:
+                    failures = "; ".join(f"{name}: {exc}" for name, exc in context_failures.items())
+                    raise DistrictError(f"host setup failed: {failures}")
+                options = {}
+                if args.upgrade:
+                    options["ref"] = args.upgrade
+                if args.allow_downgrade:
+                    options["allow_downgrade"] = True
+                fleet_result = reconcile_fleet_engine(data, record, contexts, **options)
+                if fleet_result == "failed":
                     code = 1
-            except (host.RemoteHostError, DistrictError) as exc:
-                contexts = {}
-                print(f"engine fleet ({', '.join(fleet_hosts)}) held: {exc}; every host keeps its engine")
+            except (OSError, host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
+                fleet_result = "failed"
+                print(f"engine fleet ({', '.join(engine_hosts)}) held: {exc}; every host keeps its engine")
                 code = 1
         for host_name, targets in groups.items():
             try:
+                if host_name in context_failures:
+                    raise context_failures[host_name]
                 host_rows, host_code, host_smoke = _apply_host(
-                    data, host_name, targets, args, record, status, engine_done=host_name in fleet_hosts,
+                    data, host_name, targets, args, record, status,
+                    engine_result=fleet_result if host_name in engine_hosts else None,
                     context=contexts[host_name][:2] if host_name in contexts else None,
                 )
             except host.RemoteHostError as exc:
                 for slug in targets:
                     print(f"{slug}: {exc}")
+                code = 1
+                continue
+            except subprocess.TimeoutExpired as exc:
+                for slug in targets:
+                    print(f"{slug}: host {host_name} operation failed: {exc}")
                 code = 1
                 continue
             except DistrictError as exc:
@@ -1013,7 +1639,9 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district apply", description=__doc__.split("\n", 1)[0])
     parser.add_argument("slug", nargs="?", help="one repo (owner/name or basename); default all")
     parser.add_argument("--upgrade", nargs="?", const="HEAD", metavar="REF",
-                        help="reinstall factory from [defaults].factory_source first, at REF (tag, branch, sha; default HEAD)")
+                        help="install the newest green remote REF (default factory_ref, or main)")
+    parser.add_argument("--allow-downgrade", action="store_true",
+                        help="allow a target that is an ancestor of the installed engine")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
     args = parser.parse_args(argv)
     record = install_state.ApplyRun.start()

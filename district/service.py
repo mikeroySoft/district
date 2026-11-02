@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import plistlib
 import re
@@ -12,9 +14,16 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping
+from xml.parsers.expat import ExpatError
+
+if __package__:
+    from . import systemd
+else:
+    import systemd
 
 Runner = Callable[..., subprocess.CompletedProcess]
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
+LAUNCHD_CLEANUP_TIMEOUT = 3
 
 
 @dataclass(frozen=True)
@@ -95,11 +104,11 @@ class ServiceBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def is_active(self, name: str) -> str:
+    def is_active(self, name: str, *, timeout: float | None = None) -> str:
         raise NotImplementedError
 
     @abstractmethod
-    def status(self, name: str) -> ServiceStatus:
+    def status(self, name: str, *, timeout: float | None = None) -> ServiceStatus:
         raise NotImplementedError
 
     @abstractmethod
@@ -115,6 +124,44 @@ class ServiceBackend(ABC):
     @abstractmethod
     def manager_status(self) -> str:
         raise NotImplementedError
+
+    def factory_units(self, *, timeout: float = 10) -> set[str]:
+        """Every Factory service/timer, including auxiliary and unregistered units."""
+        raise NotImplementedError
+
+    def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
+        return self.enable(name, False, timeout=timeout)
+
+    def resume_timer(self, name: str, *, timeout: float = 10) -> subprocess.CompletedProcess:
+        return self.enable(name, check=False, timeout=timeout)
+
+def remaining_timeout(deadline: float) -> float:
+    """Reject an expired shared deadline before issuing another command."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired("engine idle window", 0)
+    return remaining
+
+
+
+def _definition_bytes(directory, pattern: str, *, deadline: float | None = None) -> dict[str, bytes]:
+    timeout = remaining_timeout(deadline) if deadline is not None else 10
+    if isinstance(directory, Path):
+        return {path.name: path.read_bytes() for path in directory.glob(pattern)}
+    script = (
+        "import base64,json,pathlib,sys; "
+        "print(json.dumps({p.name:base64.b64encode(p.read_bytes()).decode() "
+        "for p in pathlib.Path(sys.argv[1]).glob(sys.argv[2])}))"
+    )
+    proc = directory.runner(["python3", "-c", script, str(directory), pattern], timeout=timeout)
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or f"cannot scan {directory}")
+    return {name: base64.b64decode(body) for name, body in json.loads(proc.stdout).items()}
+
+
+def _definition_bodies(directory, pattern: str, *, deadline: float | None = None) -> dict[str, str]:
+    return {name: body.decode() for name, body in
+            _definition_bytes(directory, pattern, deadline=deadline).items()}
 
 
 def _home_local_bin(home: Path) -> Path:
@@ -194,12 +241,11 @@ def _exec_start(raw: str) -> tuple[str, ...] | None:
     match = re.fullmatch(
         r"\{\s*path=(.*?)\s+;\s+argv\[]=(.*?)\s+;\s+ignore_errors=(?:yes|no)\s+;[^{}]*\}", raw,
     )
-    if not match:
+    # systemctl's debug format is flattened argv, not shell-quoted text.
+    # Quoting/escapes cannot recover boundaries; leave ambiguous identity unknown.
+    if not match or any(char in match[2] for char in "\"'\\"):
         return None
-    try:
-        argv = tuple(shlex.split(match[2]))
-    except ValueError:
-        return None
+    argv = tuple(match[2].split())
     return argv if argv and argv[0] == match[1] else None
 
 
@@ -230,6 +276,17 @@ class SystemdUserBackend(ServiceBackend):
             (self.unit_dir / name).read_text() != body for name, body in wanted.items()
         )
 
+    def factory_units(self, *, timeout: float = 10) -> set[str]:
+        deadline = time.monotonic() + timeout
+        units = set(_definition_bodies(self.unit_dir, "factory-*.service", deadline=deadline))
+        units.update(_definition_bodies(self.unit_dir, "factory-*.timer", deadline=deadline))
+        proc = self._run("list-units", "--all", "--plain", "--no-legend",
+                         "factory-*.service", "factory-*.timer", check=False, timeout=remaining_timeout(deadline))
+        if proc.returncode:
+            raise OSError(proc.stderr.strip() or "cannot list Factory units")
+        units.update(line.split()[0] for line in proc.stdout.splitlines() if line.split())
+        return {name for name in units if name.endswith((".service", ".timer"))}
+
 
     def _run(self, *args: str, check: bool = True,
              timeout: float | None = None) -> subprocess.CompletedProcess:
@@ -242,13 +299,15 @@ class SystemdUserBackend(ServiceBackend):
     def _service(definition: ServiceDefinition) -> str:
         after = "After=network.target\n" if definition.after_network else ""
         kind = "Type=oneshot\n" if definition.interval else ""
-        working = f"WorkingDirectory={definition.root}\n" if definition.working_directory else ""
-        environment = "".join(f"Environment={key}={value}\n" for key, value in definition.environment.items())
+        working = f"WorkingDirectory={systemd.quote(str(definition.root))}\n" if definition.working_directory else ""
+        environment = "".join(f"Environment={systemd.quote(f'{key}={value}')}\n"
+                              for key, value in definition.environment.items())
+        argv = " ".join(systemd.quote(arg.replace("$", "$$")) for arg in definition.argv)
         restart = "Restart=on-failure\nRestartSec=5\n" if definition.keep_alive else ""
         install = "\n[Install]\nWantedBy=default.target\n" if definition.keep_alive else ""
         return (
             f"[Unit]\nDescription={definition.description}\n{after}\n"
-            f"[Service]\n{kind}{working}{environment}ExecStart={' '.join(definition.argv)}\n"
+            f"[Service]\n{kind}{working}{environment}ExecStart={argv}\n"
             f"{restart}{install}"
         )
 
@@ -294,55 +353,67 @@ class SystemdUserBackend(ServiceBackend):
 
     def start(self, name: str, *, restart: bool = False, check: bool = True,
               timeout: float = 0) -> subprocess.CompletedProcess:
-        return self._run("restart" if restart else "start", name, check=check)
+        return self._run("restart" if restart else "start", name, check=check, timeout=timeout or None)
 
     def stop(self, name: str, *, check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
-        return self._run("stop", name, check=check)
+        return self._run("stop", name, check=check, timeout=timeout or None)
 
     def enable(self, name: str, enabled: bool = True, *, now: bool = True,
-               check: bool = True, timeout: float = 0) -> subprocess.CompletedProcess:
+               check: bool = True, timeout: float | None = None) -> subprocess.CompletedProcess:
+        if timeout is not None and timeout <= 0:
+            raise subprocess.TimeoutExpired([self.executable, "enable" if enabled else "disable", name], timeout)
         args = ["enable" if enabled else "disable"]
         if now:
             args.append("--now")
         args.append(name)
-        return self._run(*args, check=check)
+        return self._run(*args, check=check, timeout=timeout)
 
-    def is_active(self, name: str) -> str:
-        return self._run("is-active", name, check=False).stdout.strip()
+    def is_active(self, name: str, *, timeout: float | None = None) -> str:
+        return self._run("is-active", name, check=False, timeout=timeout).stdout.strip()
 
-    def _property(self, name: str, prop: str) -> str:
-        value = self._run("show", name, f"--property={prop}", "--value", "--no-pager").stdout.strip()
+    def _property(self, name: str, prop: str, *, deadline: float | None = None) -> str:
+        value = self._run("show", name, f"--property={prop}", "--value", "--no-pager",
+                          timeout=remaining_timeout(deadline) if deadline is not None else None).stdout.strip()
         if not value:
-            value = self._run("show", "-p", prop, "--value", name).stdout.strip()
+            value = self._run("show", "-p", prop, "--value", name,
+                              timeout=remaining_timeout(deadline) if deadline is not None else None).stdout.strip()
         return value
 
-    def status(self, name: str) -> ServiceStatus:
-        path = self.unit_dir / name
-        load = self._property(name, "LoadState")
-        if not load and path.exists():
+    def status(self, name: str, *, timeout: float | None = None) -> ServiceStatus:
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        load = self._property(name, "LoadState", deadline=deadline)
+        body = _definition_bodies(self.unit_dir, name, deadline=deadline).get(name)
+        if not load and body is not None:
             load = "loaded"
         environment = {}
         file_argv = None
-        if path.exists():
-            for line in path.read_text().splitlines():
-                if line.startswith("Environment=") and "=" in line.removeprefix("Environment="):
-                    key, value = line.removeprefix("Environment=").split("=", 1)
-                    environment[key] = value
+        if body is not None:
+            for line in body.splitlines():
+                if line.startswith("Environment="):
+                    try:
+                        assignments = systemd.words(line.removeprefix("Environment="))
+                    except ValueError as exc:
+                        raise OSError(f"{name}: invalid Environment: {exc}") from exc
+                    for assignment in assignments:
+                        key, separator, value = assignment.replace("%%", "%").partition("=")
+                        if separator:
+                            environment[key] = value
                 elif line.startswith("ExecStart="):
                     try:
-                        file_argv = tuple(shlex.split(line.removeprefix("ExecStart=").lstrip("-")))
+                        file_argv = tuple(word.replace("%%", "%").replace("$$", "$") for word in
+                                          systemd.words(line.removeprefix("ExecStart=").lstrip("-")))
                     except ValueError:
-                        pass
+                        file_argv = None
         if load in ("", "not-found"):
-            pid = self._property(name, "MainPID") if name.endswith(".service") else ""
+            pid = self._property(name, "MainPID", deadline=deadline) if name.endswith(".service") else ""
             return ServiceStatus(
                 load or "not-found", "inactive", "not-found", int(pid) if pid.isdigit() else 0,
                 environment=environment,
             )
-        active = self._property(name, "ActiveState")
-        enabled = self._property(name, "UnitFileState")
-        pid = self._property(name, "MainPID")
-        raw = self._property(name, "ExecStart") if name.endswith(".service") else ""
+        active = self._property(name, "ActiveState", deadline=deadline)
+        enabled = self._property(name, "UnitFileState", deadline=deadline)
+        pid = self._property(name, "MainPID", deadline=deadline)
+        raw = self._property(name, "ExecStart", deadline=deadline) if name.endswith(".service") else ""
         return ServiceStatus(
             load, active, enabled, int(pid) if pid.isdigit() else 0,
             _exec_start(raw) if raw else file_argv, environment,
@@ -404,10 +475,40 @@ class LaunchdBackend(ServiceBackend):
     def definitions_changed(self, label: str, wanted: Mapping[str, str]) -> bool:
         optional = ("-dashboard", "-triage-probe", "-eval")
         known = {f"{label}.plist", *(f"{label}{suffix}.plist" for suffix in optional)}
-        existing = {name for name in known if (self.agent_dir / name).exists()}
-        return existing != set(wanted) or any(
-            (self.agent_dir / name).read_text() != body for name, body in wanted.items()
-        )
+        existing = {name: body for name, body in
+                    _definition_bytes(self.agent_dir, f"{label}*.plist").items() if name in known}
+
+        def parsed(bodies):
+            documents = {}
+            for name, body in bodies.items():
+                try:
+                    documents[name] = plistlib.loads(body)
+                except (plistlib.InvalidFileException, ValueError, ExpatError) as exc:
+                    raise OSError(f"invalid launchd plist {name}: {exc}") from exc
+            return documents
+
+        return parsed(existing) != parsed({name: body.encode() for name, body in wanted.items()})
+
+    def factory_units(self, *, timeout: float = 10) -> set[str]:
+        deadline = time.monotonic() + timeout
+        units = set()
+        for name, body in _definition_bytes(self.agent_dir, "*factory*.plist", deadline=deadline).items():
+            try:
+                document = plistlib.loads(body)
+            except (plistlib.InvalidFileException, ValueError, ExpatError) as exc:
+                raise OSError(f"invalid launchd plist {name}: {exc}") from exc
+            label = document.get("Label", name.removesuffix(".plist"))
+            units.add(f"{label}.service")
+            if "StartInterval" in document or "StartCalendarInterval" in document:
+                units.add(f"{label}.timer")
+        return units
+
+    def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
+        # Disable scheduling without bootout, which would kill the in-flight pass.
+        return self._run("disable", f"{self.domain}/{self._label(name)}", timeout=timeout)
+
+    def resume_timer(self, name: str, *, timeout: float = 10) -> subprocess.CompletedProcess:
+        return self._run("enable", f"{self.domain}/{self._label(name)}", check=False, timeout=timeout)
 
 
     @property
@@ -480,49 +581,53 @@ class LaunchdBackend(ServiceBackend):
 
     def start(self, name: str, *, restart: bool = False, check: bool = True,
               timeout: float = 0) -> subprocess.CompletedProcess:
+        deadline = time.monotonic() + timeout
+
+        def budget():
+            return remaining_timeout(deadline) if timeout else None
+
         label = self._label(name)
         path = self._path(label)
         target = f"{self.domain}/{label}"
         try:
-            scheduled = "StartInterval" in plistlib.loads(path.read_bytes())
+            body = path.read_bytes(timeout=budget() or 10) if not isinstance(path, Path) else path.read_bytes()
+            scheduled = "StartInterval" in plistlib.loads(body)
         except (OSError, plistlib.InvalidFileException):
             scheduled = False
-        was_loaded = self.status(name).loaded
+        was_loaded = self.status(name, timeout=budget()).loaded
         if was_loaded and name.endswith(".timer"):
-            return self._run("print", target, check=check)
-        if not was_loaded:
-            proc = self._run("bootstrap", self.domain, str(path), check=check)
-        else:
-            args = ["kickstart"]
-            if restart:
-                args.append("-k")
-            args.append(target)
-            proc = self._run(*args, check=check)
-        if proc.returncode or not scheduled:
-            return proc
-        deadline = time.monotonic() + timeout
-        while True:
-            status = self._run("print", target, check=False)
-            if status.returncode:
-                result = subprocess.CompletedProcess(proc.args, status.returncode, proc.stdout, status.stderr)
-            else:
-                running = re.search(r"^\s*state\s*=\s*running\s*$", status.stdout, re.MULTILINE)
-                exit_code = re.search(r"^\s*last exit code\s*=\s*(-?\d+)\s*$", status.stdout, re.MULTILINE)
-                if not running and exit_code:
-                    result = subprocess.CompletedProcess(proc.args, int(exit_code.group(1)), proc.stdout, proc.stderr)
-                else:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        if not was_loaded:
-                            self._run("bootout", target, check=False)
-                        raise subprocess.TimeoutExpired(
-                            proc.args, timeout, output=proc.stdout, stderr=status.stderr,
-                        )
-                    time.sleep(min(0.1, remaining))
-                    continue
+            return self._run("print", target, check=check, timeout=budget())
+        try:
             if not was_loaded:
-                self._run("bootout", target, check=False)
-            return result
+                proc = self._run("bootstrap", self.domain, str(path), check=check, timeout=budget())
+            else:
+                args = ["kickstart"]
+                if restart:
+                    args.append("-k")
+                args.append(target)
+                proc = self._run(*args, check=check, timeout=budget())
+            if proc.returncode or not scheduled:
+                return proc
+            while True:
+                status = self._run("print", target, check=False, timeout=remaining_timeout(deadline))
+                if status.returncode:
+                    result = subprocess.CompletedProcess(proc.args, status.returncode, proc.stdout, status.stderr)
+                else:
+                    running = re.search(r"^\s*state\s*=\s*running\s*$", status.stdout, re.MULTILINE)
+                    exit_code = re.search(r"^\s*last exit code\s*=\s*(-?\d+)\s*$", status.stdout, re.MULTILINE)
+                    if not running and exit_code:
+                        result = subprocess.CompletedProcess(proc.args, int(exit_code.group(1)), proc.stdout, proc.stderr)
+                    else:
+                        time.sleep(min(0.1, remaining_timeout(deadline)))
+                        continue
+                return result
+        finally:
+            if scheduled and not was_loaded:
+                try:
+                    self._run("bootout", target, check=False, timeout=LAUNCHD_CLEANUP_TIMEOUT)
+                except Exception:
+                    # Cleanup must not replace the pass's result or exception.
+                    pass
 
     def _unload_when_idle(self, label: str, *, check: bool,
                           timeout: float) -> subprocess.CompletedProcess:
@@ -553,28 +658,35 @@ class LaunchdBackend(ServiceBackend):
         return self._run("bootout", f"{self.domain}/{label}", check=check)
 
     def status(self, name: str, *, timeout: float | None = None) -> ServiceStatus:
+        deadline = time.monotonic() + timeout if timeout is not None else None
         label = self._label(name)
-        path = self._path(label)
+        body = None
         try:
-            document = plistlib.loads(path.read_bytes())
-        except (OSError, plistlib.InvalidFileException):
+            filename = f"{label}.plist"
+            body = _definition_bytes(self.agent_dir, filename, deadline=deadline).get(filename)
+            document = plistlib.loads(body or b"")
+        except (OSError, plistlib.InvalidFileException, ValueError, ExpatError):
             document = {}
         environment = document.get("EnvironmentVariables")
         if not isinstance(environment, dict):
             environment = {}
-        proc = self._run("print", f"{self.domain}/{label}", check=False, timeout=timeout)
+        proc = self._run("print", f"{self.domain}/{label}", check=False,
+                         timeout=remaining_timeout(deadline) if deadline is not None else None)
         if proc.returncode:
             return ServiceStatus(
                 "not-found",
                 "inactive",
-                "disabled" if path.exists() else "not-found",
+                "disabled" if body is not None else "not-found",
                 environment=environment,
             )
         running = re.search(r"^\s*state\s*=\s*running\s*$", proc.stdout, re.MULTILINE) is not None
         pid_match = re.search(r"^\s*pid\s*=\s*(\d+)\s*$", proc.stdout, re.MULTILINE)
         scheduled = "StartInterval" in document
         if name.endswith(".timer"):
-            active = "active"
+            disabled = self._run("print-disabled", self.domain, check=False,
+                                 timeout=remaining_timeout(deadline) if deadline is not None else None)
+            held = re.search(r'["\']?' + re.escape(label) + r'["\']?\s*=>\s*true', disabled.stdout)
+            active = "inactive" if held else "active"
         elif running:
             active = "activating" if scheduled else "active"
         else:
@@ -613,8 +725,8 @@ class LaunchdBackend(ServiceBackend):
             )
         return result
 
-    def is_active(self, name: str) -> str:
-        return self.status(name).active_state
+    def is_active(self, name: str, *, timeout: float | None = None) -> str:
+        return self.status(name, timeout=timeout).active_state
 
     def manager_status(self) -> str:
         proc = self._run("print", self.domain, check=False)
