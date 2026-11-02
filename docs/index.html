@@ -138,7 +138,7 @@
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
-      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.5 (October 31, 2026)</a></p>
+      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.6 (November 2, 2026)</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
@@ -296,8 +296,22 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="changelog">
     <div class="kicker">Changelog</div>
     <h2>From fleet registry to operational evidence.</h2>
-    <p class="lede">Selected milestones through October 31, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
+    <p class="lede">Selected milestones through November 2, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
     <ol class="timeline">
+      <li>
+        <div><time datetime="2026-11-02">November 2, 2026</time><span class="status shipped">Release · v0.1.6</span></div>
+        <div>
+          <h3>One Factory install per host, owned by District.</h3>
+          <ul>
+            <li><strong>One install per host:</strong> District owns the single Factory uv tool install on every host. Apply drops the stale <code>factory_source</code> key from the host config, keeping a timestamped backup, and removes per-version <code>factory-*</code> folders that no unit, launchd agent, config, or uv receipt still references; an incomplete reference scan removes nothing. An engine swap is deferred to the next apply while any factory work runs on the host; process state District cannot read counts as busy, and registry dashboards do not block.</li>
+            <li><strong>Operator-stopped timers:</strong> when a repo's units change, <code>district apply</code> stops a timer again if <code>factory install</code> started it after the operator stopped it, and records the stop in <code>last_apply.stopped</code>; apply and upgrade restore only the timers they paused. A first install, or an apply where the repo's units are unchanged, still runs <code>factory install</code>, which re-enables a stopped timer; tracked in factory#549. Hand-run <code>factory gate</code> and <code>factory dispatch</code> work now defers an engine swap.</li>
+            <li><strong>One repo on several hosts:</strong> a repo table may list <code>hosts = [...]</code> with a <code>triage_host</code>. Apply pins the same engine SHA on every host and rolls moved hosts back when one fails; doctor and status flag engine, worker, and model drift.</li>
+            <li><strong>Per-host engine and defaults:</strong> remote hosts get their own engine source and <code>[defaults]</code> overrides (gh config dir, signing key, triage URL).</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> a stale <code>factory_source</code> checkout and leftover per-version Factory folders let hosts drift from the engine District recorded.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/releases/tag/v0.1.6">Release v0.1.6</a> · <a href="https://github.com/mikeroySoft/district/issues/136">One install per host #136</a> · <a href="https://github.com/mikeroySoft/district/issues/111">factory_source #111</a> · <a href="https://github.com/mikeroySoft/district/issues/138">Stopped timers #138</a> · <a href="https://github.com/mikeroySoft/district/issues/134">Multi-host repos #134</a></p>
+        </div>
+      </li>
       <li>
         <div><time datetime="2026-10-31">October 31, 2026</time><span class="status shipped">Release · v0.1.5</span></div>
         <div>
@@ -483,7 +497,7 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district status
 <span class="p">$</span> district report                       <span class="c"># on-demand read-only Markdown review on stdout</span>
 <span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span>
-<span class="p">$</span> district update --to v0.1.5 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
+<span class="p">$</span> district update --to v0.1.6 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
     <p style="color:var(--text-muted)">Factories are local unless their repo table names a <code>host</code> defined under <code>[hosts.NAME]</code> (<code>ssh</code>, <code>platform</code>, optional <code>root</code>); <code>local</code> is reserved for this machine. The single controller keeps the registry and operation lock, reaches remote hosts through BatchMode SSH with a bounded connection attempt, and writes each host's filtered Factory config there. Status, report, health, and Atlas retain every factory, label it by host, and show an unreachable host as unknown/unreachable with its last-seen time while other hosts continue.</p>
