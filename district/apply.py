@@ -319,12 +319,86 @@ def _factory_processes(tool: Path, cli: Path, run_cmd, *, timeout: float) -> lis
     return busy
 
 
-def _hand_work(tool: Path, cli: Path, runner, backend, *, deadline: float) -> list[str]:
+def _managed_processes(processes: list[str], runner, backend, repos: dict, *, deadline: float) -> dict[str, str]:
+    """Map observed PIDs to managed units on their owning host."""
+    units = set(backend.factory_units(timeout=remaining_timeout(deadline)))
+    units.update(f"{host.unit_name(slug)}{suffix}.service" for slug in repos for suffix in ("", "-dashboard"))
+    services = sorted(unit for unit in units if unit.endswith(".service"))
+    config = backend.configuration()
+
+    def probe(argv):
+        proc = runner(argv, timeout=remaining_timeout(deadline))
+        if proc.returncode:
+            raise OSError(proc.stderr.strip() or f"{argv[0]} ownership probe failed")
+        return proc.stdout
+
+    pids = [work.split()[1] for work in processes]
+    if config.get("platform") == "linux":
+        output = probe([str(config.get("executable", "systemctl")), "--user", "show",
+                        "-p", "Id", "-p", "ControlGroup", *services])
+        groups = {}
+        for block in output.strip().split("\n\n"):
+            values = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+            if values.get("Id") in services and values.get("ControlGroup", "").startswith("/"):
+                groups[values["ControlGroup"]] = values["Id"]
+        if not groups:
+            return {}
+        script = (
+            "import json,pathlib,sys; "
+            "print(json.dumps({pid:pathlib.Path('/proc/'+pid+'/cgroup').read_text() for pid in sys.argv[1:]}))"
+        )
+        cgroups = json.loads(probe(["python3", "-c", script, *pids]))
+        owners = {}
+        for pid in pids:
+            paths = [line.split(":", 2)[2] for line in cgroups[pid].splitlines()]
+            for group, unit in groups.items():
+                if any(path == group or path.startswith(group + "/") for path in paths):
+                    owners[pid] = unit
+        return owners
+    if config.get("platform") == "macos":
+        labels = {unit.removesuffix(".service"): unit for unit in services}
+        owners = {}
+        for line in probe([str(config.get("executable", "launchctl")), "list"]).splitlines():
+            fields = line.split()
+            if len(fields) == 3 and fields[0].isdigit() and fields[2] in labels:
+                owners[fields[0]] = labels[fields[2]]
+        parents = {}
+        for line in probe(["ps", "-eo", "pid=,ppid="]).splitlines():
+            fields = line.split()
+            if len(fields) == 2 and all(field.isdigit() for field in fields):
+                parents[fields[0]] = fields[1]
+        for pid in pids:
+            ancestor, seen = pid, set()
+            while ancestor not in owners and ancestor in parents and ancestor not in seen:
+                seen.add(ancestor)
+                ancestor = parents[ancestor]
+            if ancestor in owners:
+                owners[pid] = owners[ancestor]
+        return owners
+    raise OSError(f"unsupported ownership platform: {config.get('platform')}")
+
+
+def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> tuple[list[str], list[str]]:
+    processes = _factory_processes(tool, cli, runner, timeout=remaining_timeout(deadline))
+    if not processes:
+        return [], []
+    try:
+        owners = _managed_processes(processes, runner, backend, repos, deadline=deadline)
+        remaining_timeout(deadline)
+    except (OSError, ValueError, KeyError, TypeError, IndexError, subprocess.TimeoutExpired,
+            host.RemoteHostError) as exc:
+        return [f"Factory process ownership unavailable: {exc}", *processes], processes
+    outside = [work for work in processes if work.split()[1] not in owners
+               and work.endswith(("factory gate", "factory dispatch"))]
+    draining = [work for work in processes
+                if not owners.get(work.split()[1], "").endswith("-dashboard.service")]
+    return outside, draining
+
+
+def _hand_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> list[str]:
     busy = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
-    busy += [work for work in _factory_processes(tool, cli, runner, timeout=remaining_timeout(deadline))
-             if work.endswith(("factory gate", "factory dispatch"))]
-    remaining_timeout(deadline)
-    return busy
+    outside, _ = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
+    return busy + outside
 
 
 def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
@@ -370,7 +444,7 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
             active = [timer for timer in timers
                       if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
             tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
-            hand_work = _hand_work(tool, cli, runner, backend, deadline=deadline)
+            hand_work = _hand_work(tool, cli, runner, backend, repos, deadline=deadline)
             if hand_work:
                 _defer(record, target, hand_work)
             else:
@@ -392,9 +466,9 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
                         break
                     busy = [unit for unit in services if backend.is_active(
                         unit, timeout=remaining_timeout(deadline)) in ("active", "activating", "deactivating")]
-                    busy += _factory_processes(tool, cli, runner, timeout=remaining_timeout(deadline))
-                    remaining_timeout(deadline)
-                    if hand_work := [work for work in busy if work.endswith(("factory gate", "factory dispatch"))]:
+                    hand_work, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
+                    busy += processes
+                    if hand_work:
                         _defer(record, target, hand_work)
                         break
                     if not busy:
@@ -628,10 +702,10 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
     deadlines = {}
 
     def hand_ready(name):
-        runner, backend, _ = contexts[name]
+        runner, backend, repos = contexts[name]
         try:
             tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadlines[name]))
-            busy = _hand_work(tool, cli, runner, backend, deadline=deadlines[name])
+            busy = _hand_work(tool, cli, runner, backend, repos, deadline=deadlines[name])
         except subprocess.TimeoutExpired:
             busy = ["idle wait timed out"]
         if busy:

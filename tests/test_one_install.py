@@ -163,6 +163,8 @@ class OneInstallTest(unittest.TestCase):
                 self.fail(f"unexpected Factory command: {argv}")
         elif argv[:3] == ["systemctl", "--user", "list-units"]:
             self.events.append(("handland", "scan"))
+        elif argv[:3] == ["systemctl", "--user", "show"]:
+            out = "Id=factory-widgets.service\nControlGroup=\n"
         elif argv[0] == "ps":
             self.events.append(("processes", "scan"))
             if self.process_busy and ("pause", "factory-widgets.timer") in self.events:
@@ -1684,6 +1686,135 @@ class OneInstallTest(unittest.TestCase):
                     self.assertIn("factory-broken.plist", self.output.getvalue())
                     self.assertIn("engine", self.output.getvalue())
                 (agents / "factory-broken.plist").unlink()
+
+    def ownership_case(self, *, remote, fleet, platform, work):
+        self.install_receipt(OLD)
+        self.calls.clear()
+        self.events.clear()
+        self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
+        self.data["defaults"]["engine_idle_timeout"] = "5s"
+        self.active = {"factory-widgets.timer", "factory-idle.timer"}
+        self.backend.factory_units.return_value = {
+            "factory-widgets.service", "factory-widgets-dashboard.service",
+            "factory-idle.timer", "factory-stopped.timer"}
+        self.backend.configuration.return_value = {"platform": platform, "uid": 501}
+        runner = None
+        name = "remote" if remote else "local"
+        if remote:
+            self.data["hosts"] = {"remote": {"ssh": "unused", "platform": platform,
+                                           "engine": {"sha": OLD, "ref": "main"}}}
+            self.data["repo"]["acme/widgets"]["host"] = "remote"
+            runner, _, _ = self.timeout_remote("none")
+        else:
+            self.data.pop("hosts", None)
+            self.data["repo"]["acme/widgets"].pop("host", None)
+        clock = [0.0]
+        scans = [0]
+        ownership = []
+        original = self.run_cmd
+
+        def commands(argv, **kwargs):
+            paused = ("pause", "factory-widgets.timer") in self.events
+            live = not paused or scans[0] < 2 or work != "managed"
+            if argv[0] == "ps":
+                if "ppid=" in argv[-1]:
+                    return subprocess.CompletedProcess(argv, 0, "123 42\n42 1\n", "")
+                scans[0] += int(paused)
+                # Dashboard descendants must not hold the drain open.
+                rows = f"456 {self.tool}/bin/python -m factory dispatch\n"
+                if live:
+                    rows += f"123 {self.tool}/bin/python -m factory dispatch\n"
+                return subprocess.CompletedProcess(argv, 0, rows, "")
+            probe = (argv[:3] == ["systemctl", "--user", "show"]
+                     or argv[:2] == ["launchctl", "list"]
+                     or argv[:2] == ["python3", "-c"] and "/proc/" in argv[2])
+            if probe:
+                self.assertGreater(kwargs.get("timeout", 0), 0)
+                self.assertLessEqual(kwargs["timeout"], 5 - clock[0] + 1e-9)
+                ownership.append(list(argv))
+                if work == "probe-failure":
+                    return subprocess.CompletedProcess(argv, 1, "", "fake ownership unavailable")
+                if work == "probe-timeout":
+                    raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+                if argv[0] == "systemctl":
+                    out = ("Id=factory-widgets.service\nControlGroup=/user/factory-widgets.service\n\n"
+                           "Id=factory-widgets-dashboard.service\n"
+                           "ControlGroup=/user/factory-widgets-dashboard.service\n")
+                elif argv[0] == "launchctl":
+                    out = ("PID Status Label\n42 0 factory-widgets\n"
+                           "456 0 factory-widgets-dashboard\n")
+                    if work == "hand":
+                        out = out.replace("42 0 factory-widgets\n", "")
+                else:
+                    group = "/user/session.scope" if work == "hand" else "/user/factory-widgets.service/child"
+                    out = json.dumps({"123": f"0::{group}\n",
+                                      "456": "0::/user/factory-widgets-dashboard.service/child\n"})
+                return subprocess.CompletedProcess(argv, 0, out, "")
+            if argv[:3] == ["systemctl", "--user", "list-units"] and work == "handland":
+                return subprocess.CompletedProcess(
+                    argv, 0, "handland-4242-merge.service loaded active running Hand work\n", "")
+            return original(argv, **kwargs)
+
+        if runner:
+            transport = runner.transport
+
+            def remote_transport(argv, **kwargs):
+                parts = shlex.split(argv[-1])
+                if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                    parts = shlex.split(parts[-1])
+                if parts[:2] == ["python3", "-c"] and "/proc/" in parts[2]:
+                    return commands(parts, **kwargs)
+                return transport(argv, **kwargs)
+
+            runner.transport = remote_transport
+        self.backend.is_active.side_effect = lambda unit, **kw: (
+            "active" if unit == "factory-widgets.service" and
+            (("pause", "factory-widgets.timer") not in self.events or scans[0] < 2)
+            else "active" if unit in self.active else "inactive")
+        record = install_state.ApplyRun("", "", OLD)
+        with mock.patch.object(self, "run_cmd", side_effect=commands), \
+             mock.patch.object(apply, "run", side_effect=commands), \
+             mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+            self.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+            context = (runner or apply.run, self.backend, self.data["repo"])
+            if fleet:
+                result = apply.reconcile_fleet_engine(self.data, record, {name: context})
+            else:
+                result = apply.reconcile_engine(
+                    self.data, record, run_cmd=context[0], backend=self.backend, host_name=name)
+        self.assertEqual(self.active, {"factory-widgets.timer", "factory-idle.timer"})
+        if work == "managed":
+            self.assertEqual(result, "applied", self.output.getvalue())
+            self.assertEqual(len(self.installs()), 1)
+            self.assertGreaterEqual(scans[0], 2)
+            self.assertTrue(ownership)
+            self.assertEqual(record.disabled, {"factory-widgets.timer", "factory-idle.timer"})
+            self.assertEqual(record.reenabled, record.disabled)
+            self.assertEqual(record.deferred, {})
+        else:
+            self.assertEqual(result, "deferred", self.output.getvalue())
+            self.assertEqual(self.installs(), [])
+            reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
+            self.assertIn("handland-4242-merge.service" if work == "handland" else
+                          "ownership" if work.startswith("probe") else "pid 123 factory dispatch", reason)
+        self.assertFalse(host.engine(self.data, name).get("paused_timers"))
+
+    def test_managed_dispatch_ownership_drains_on_owning_host(self):
+        for platform in ("linux", "macos"):
+            for remote in (False, True):
+                for fleet in (False, True):
+                    with self.subTest(platform=platform, remote=remote, fleet=fleet):
+                        self.ownership_case(remote=remote, fleet=fleet, platform=platform, work="managed")
+
+    def test_outside_work_and_unknown_ownership_defer_on_owning_host(self):
+        for platform in ("linux", "macos"):
+            for remote in (False, True):
+                for fleet in (False, True):
+                    for work in ("hand", "probe-failure", "probe-timeout", "handland"):
+                        if platform == "macos" and work == "handland":
+                            continue
+                        with self.subTest(platform=platform, remote=remote, fleet=fleet, work=work):
+                            self.ownership_case(remote=remote, fleet=fleet, platform=platform, work=work)
 
 if __name__ == "__main__":
     unittest.main()

@@ -170,6 +170,11 @@ restores exactly the timers District paused; dashboards restart on the new code.
 If both installs fail, affected repos fail without trying another `factory` on `PATH`.
 Active/activating/deactivating `handland-*` user units and hand-run uv-tool
 `factory gate` / `factory dispatch` processes defer a changed engine install.
+District identifies managed passes on the owning host by systemd cgroup, or
+launchd label PID and descendants. Their dispatch processes drain after timer
+pause rather than deferring the window; managed dashboard descendants do not
+hold the drain open. Ownership probes share the idle deadline; unavailable or
+timed-out ownership defers with a named reason instead of risking a replacement.
 Plain apply and `--upgrade`, locally and across a fleet, check before pausing
 and again after draining under the same idle deadline. Python options before
 `-m factory`, including attached/grouped forms, are recognized; text merely
