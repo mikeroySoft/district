@@ -952,7 +952,13 @@ def plan_apply(targets: dict[str, dict], backend, *, run_cmd=None, env=None,
                         if proc.returncode else _render_errors(proc.stdout, tool, cli, run_cmd))
             if failures:
                 errors[slug] = failures
-        changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout, backend)
+        try:
+            changes[slug] = proc.returncode != 0 or _units_changed(slug, proc.stdout, backend)
+        except OSError as exc:
+            if errors is None:
+                raise DistrictError(str(exc)) from exc
+            errors.setdefault(slug, []).append(str(exc))
+            changes[slug] = True
     return changes
 
 

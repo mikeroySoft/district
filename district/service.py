@@ -14,6 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping
+from xml.parsers.expat import ExpatError
 
 Runner = Callable[..., subprocess.CompletedProcess]
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)\s*(h|d|m|min|s)?$")
@@ -461,10 +462,19 @@ class LaunchdBackend(ServiceBackend):
     def definitions_changed(self, label: str, wanted: Mapping[str, str]) -> bool:
         optional = ("-dashboard", "-triage-probe", "-eval")
         known = {f"{label}.plist", *(f"{label}{suffix}.plist" for suffix in optional)}
-        existing = {name for name in known if (self.agent_dir / name).exists()}
-        return existing != set(wanted) or any(
-            (self.agent_dir / name).read_text() != body for name, body in wanted.items()
-        )
+        existing = {name: body for name, body in
+                    _definition_bytes(self.agent_dir, f"{label}*.plist").items() if name in known}
+
+        def parsed(bodies):
+            documents = {}
+            for name, body in bodies.items():
+                try:
+                    documents[name] = plistlib.loads(body)
+                except (plistlib.InvalidFileException, ValueError, ExpatError) as exc:
+                    raise OSError(f"invalid launchd plist {name}: {exc}") from exc
+            return documents
+
+        return parsed(existing) != parsed({name: body.encode() for name, body in wanted.items()})
 
     def factory_units(self, *, timeout: float = 10) -> set[str]:
         deadline = time.monotonic() + timeout
@@ -472,7 +482,7 @@ class LaunchdBackend(ServiceBackend):
         for name, body in _definition_bytes(self.agent_dir, "*factory*.plist", deadline=deadline).items():
             try:
                 document = plistlib.loads(body)
-            except (plistlib.InvalidFileException, ValueError) as exc:
+            except (plistlib.InvalidFileException, ValueError, ExpatError) as exc:
                 raise OSError(f"invalid launchd plist {name}: {exc}") from exc
             label = document.get("Label", name.removesuffix(".plist"))
             units.add(f"{label}.service")
@@ -642,7 +652,7 @@ class LaunchdBackend(ServiceBackend):
             filename = f"{label}.plist"
             body = _definition_bytes(self.agent_dir, filename, deadline=deadline).get(filename)
             document = plistlib.loads(body or b"")
-        except (OSError, plistlib.InvalidFileException, ValueError):
+        except (OSError, plistlib.InvalidFileException, ValueError, ExpatError):
             document = {}
         environment = document.get("EnvironmentVariables")
         if not isinstance(environment, dict):

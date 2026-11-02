@@ -158,6 +158,10 @@ or legacy-symlink CLIs fail the affected repo rows with the CLI path.
 Ownership compares resolved CLI and tool paths, accepting symlinked UV/XDG
 directories while still rejecting CLIs redirected to legacy checkouts.
 
+Launchd repo drift compares parsed plist bytes on the owning host, including
+binary and XML plists. Encoding or XML formatting alone does not trigger a
+reinstall; malformed definitions fail the repo row by plist name without replacement.
+
 Every host has exactly one Factory installation: the `factory` uv tool, with no
 version in its path. Every managed unit and launchd job uses that tool's Python,
 and District invokes its CLI to render units. When the target changes, District

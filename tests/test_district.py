@@ -1443,7 +1443,7 @@ class ApplyTest(DistrictCase):
         (backend.agent_dir / name).write_text("<plist><dict/></plist>\n")
 
         self.assertTrue(apply._units_changed(
-            "widgets", f"# {name}\n<plist><dict><key>changed</key></dict></plist>\n\n", backend,
+            "widgets", f"# {name}\n<plist><dict><key>StartInterval</key><integer>600</integer></dict></plist>\n\n", backend,
         ))
 
     def test_per_repo_change_drains_only_the_changed_repo(self) -> None:

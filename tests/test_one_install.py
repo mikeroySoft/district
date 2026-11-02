@@ -1889,6 +1889,69 @@ class OneInstallTest(unittest.TestCase):
                                 self.assertFalse(engine.get("paused_timers"))
                                 self.assertEqual(self.active, {"factory-widgets.timer"})
 
+    def test_registered_launchd_plist_bytes_reconcile_full_repo_drift(self):
+        for remote in (False, True):
+            for fmt in (plistlib.FMT_BINARY, plistlib.FMT_XML):
+                for drift in ("unchanged", "changed", "malformed", "malformed-xml"):
+                    with self.subTest(remote=remote, fmt=fmt, drift=drift), contextlib.ExitStack() as stack:
+                        self.install_receipt(TARGET)
+                        self.calls.clear()
+                        self.events.clear()
+                        self.data["defaults"]["engine"] = {"sha": TARGET, "ref": "main"}
+                        if not remote:
+                            self.data.pop("hosts", None)
+                            self.data["repo"]["acme/widgets"].pop("host", None)
+                        backend, runner, agents = self.binary_launchd_backend(remote)
+                        if remote:
+                            self.data["hosts"]["remote"]["engine"]["sha"] = TARGET
+                            stack.enter_context(mock.patch.object(host, "remote_runner", return_value=runner))
+                        stack.enter_context(mock.patch.object(host, "service_backend", return_value=backend))
+                        self.launchd_running = False
+                        filename = "factory-widgets.plist"
+                        document = {"Label": "factory-widgets", "StartInterval": 600,
+                                    "ProgramArguments": [str(self.tool / "bin/python"), "-m", "factory", "dispatch"],
+                                    "EnvironmentVariables": {"PATH": str(self.cli.parent)}}
+                        body = plistlib.dumps(document).decode()
+                        stack.enter_context(mock.patch.object(self, "rendered", return_value=(filename, body)))
+                        existing = dict(document, StartInterval=900) if drift == "changed" else document
+                        raw = (b"not a plist" if drift == "malformed" else b"<plist><dict></plist>"
+                               if drift == "malformed-xml" else plistlib.dumps(existing, fmt=fmt))
+                        (agents / filename).write_bytes(raw)
+                        gh = self.cli.parent / "gh"
+                        gh.write_text("#!/bin/sh\nexit 0\n")
+                        gh.chmod(0o755)
+                        (self.tool / "bin/factory").chmod(0o755)
+                        original = self.run_cmd
+                        repo_installs = []
+
+                        def commands(argv, **kwargs):
+                            if argv == [str(gh), "--version"]:
+                                return subprocess.CompletedProcess(argv, 0, "gh fake\n", "")
+                            if argv == [str(self.cli), "install"]:
+                                repo_installs.append(list(argv))
+                                (agents / filename).write_text(body)
+                                return subprocess.CompletedProcess(argv, 0, "", "")
+                            return original(argv, **kwargs)
+
+                        stack.enter_context(mock.patch.object(self, "run_cmd", side_effect=commands))
+                        stack.enter_context(mock.patch.object(apply, "run", side_effect=commands))
+                        errors = {}
+                        changes = apply.plan_apply(self.data["repo"], backend, run_cmd=runner or apply.run, errors=errors)
+                        self.assertEqual(changes, {"acme/widgets": drift != "unchanged"})
+                        if drift.startswith("malformed"):
+                            self.assertIn(filename, " ".join(errors["acme/widgets"]))
+                        else:
+                            self.assertEqual(errors, {})
+                        self.assertEqual(self.apply(), int(drift.startswith("malformed")), self.output.getvalue())
+                        self.assertEqual(self.installs(), [])
+                        self.assertEqual(len(repo_installs), int(drift == "changed"))
+                        if drift == "changed":
+                            self.assertEqual(plistlib.loads((agents / filename).read_bytes()), document)
+                        else:
+                            self.assertEqual((agents / filename).read_bytes(), raw)
+                        if drift.startswith("malformed"):
+                            self.assertIn(filename, self.output.getvalue())
+
 if __name__ == "__main__":
     unittest.main()
 
