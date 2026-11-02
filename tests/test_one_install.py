@@ -54,7 +54,6 @@ class OneInstallTest(unittest.TestCase):
         self.events = []
         self.active = {"factory-widgets.timer"}
         self.busy = 0
-        self.process_busy = 0
         self.compare_status = "ahead"
         self.tip = TARGET
         self.bad_rev = False
@@ -171,18 +170,11 @@ class OneInstallTest(unittest.TestCase):
         elif argv[:3] == ["systemctl", "--user", "show"]:
             out = "Id=factory-widgets.service\nControlGroup=\n"
         elif argv[:2] == ["python3", "-c"] and "'cmdline'" in argv[2]:
-            rows = {}
-            if self.process_busy and ("pause", "factory-widgets.timer") in self.events:
-                command = [str(self.tool / "bin/python"), "-m", "factory", "install"]
-                rows["123"] = ["100", "1", command, " ".join(command), "/tmp"]
-                self.process_busy -= 1
-            out = json.dumps(rows)
+            out = "{}"
         elif argv[:2] == ["python3", "-c"] and "/proc/" in argv[2]:
             out = "{}"  # Never inspect the real process table from a test.
         elif argv[0] == "ps":
             self.events.append(("processes", "scan"))
-            if self.process_busy and ("pause", "factory-widgets.timer") in self.events:
-                out = f"123 {self.tool}/bin/python -m factory install\n"
         elif argv[:2] == ["git", "rev-parse"]:
             out = OLD + "\n"  # A stale checkout must never be used by --upgrade.
         elif argv[:2] not in (["git", "archive"], ["git", "status"]) and argv[0] != "tar":
@@ -362,7 +354,7 @@ class OneInstallTest(unittest.TestCase):
                 # Owners can touch read-only files; pin mtime to catch write-through locally too.
                 self.assertEqual(outside_python.stat().st_mtime, 1)
 
-    def test_process_path_resolution_failure_defers_engine_and_restores_timers(self):
+    def test_process_path_resolution_failure_defers_engine_without_timer_changes(self):
         runner = self.alias_tool_runner(True)
         transport = runner.transport
         failed = []
@@ -519,31 +511,20 @@ class OneInstallTest(unittest.TestCase):
                 self.assertEqual(self.apply(), 1, "a versioned engine must fail the repo row")
                 self.assertIn("factory-widgets" + (".plist" if plist else ".service"), self.output.getvalue())
 
-    def test_busy_engine_pauses_then_waits_for_services_and_processes(self):
-        self.data["repo"]["acme/disabled"] = {"path": str(self.root / "disabled"), "disabled_at": "hold"}
-        self.busy = 2
-        self.process_busy = 1
-        original = self.run_cmd
+    def test_initial_busy_engine_defers_without_timer_changes(self):
+        self.busy = 1
+        record = install_state.ApplyRun("", "", OLD)
 
-        def managed(argv, **kwargs):
-            if argv[:3] == ["systemctl", "--user", "show"]:
-                return subprocess.CompletedProcess(argv, 0,
-                    "Id=factory-widgets.service\nControlGroup=/user/widgets\n", "")
-            if argv[:2] == ["python3", "-c"] and "'cgroup'" in argv[2]:
-                return subprocess.CompletedProcess(argv, 0,
-                    json.dumps({"123": ["100", "0::/user/widgets\n"]}), "")
-            return original(argv, **kwargs)
+        self.assertEqual(self.reconcile(record=record), "deferred", self.output.getvalue())
 
-        with mock.patch.object(apply, "run", side_effect=managed):
-            self.assertEqual(self.reconcile(), "applied", self.output.getvalue())
+        self.assertEqual(self.installs(), [])
+        self.assertIn("factory-widgets.service", record.deferred["engine"]["reason"])
+        self.assertEqual(record.disabled, set())
+        self.assertEqual(record.reenabled, set())
         self.assertEqual(self.active, {"factory-widgets.timer"})
-        self.assertEqual([e for e in self.events if e[0] in ("pause", "enable")], [
-            ("pause", "factory-widgets.timer"), ("enable", "factory-widgets.timer")])
-        pause = self.events.index(("pause", "factory-widgets.timer"))
-        install = next(i for i, e in enumerate(self.events) if e[0] == "install")
-        self.assertTrue(any(e == ("state", "factory-widgets.service") for e in self.events[pause + 1:install]))
-        self.assertIn(("processes", "scan"), self.events[pause + 1:install])
-        self.assertGreater(self.sleep.call_count, 0)
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
+        self.sleep.assert_not_called()
 
     def test_failed_verification_rolls_back_and_restores_exact_timers(self):
         for failure in ("receipt", "version"):
@@ -617,13 +598,17 @@ class OneInstallTest(unittest.TestCase):
         self.assertFalse(any(kwargs.get("cwd") == self.checkout for _, kwargs in self.calls))
         self.assertFalse(any(argv[:2] in (["git", "archive"], ["git", "rev-parse"]) for argv, _ in self.calls))
 
-    def test_idle_timeout_restores_timers_without_installing(self):
+    def test_initial_busy_timeout_defers_without_timer_changes(self):
         self.data["defaults"]["engine_idle_timeout"] = "0s"
         self.busy = 5
         record = install_state.ApplyRun("", "", OLD)
         self.assertEqual(self.reconcile(record=record), "deferred")
         self.assertEqual(self.installs(), [])
         self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(record.disabled, set())
+        self.assertEqual(record.reenabled, set())
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
 
     def test_downgrade_refusal_names_both_shas_and_override_installs(self):
         self.compare_status = "behind"
@@ -773,7 +758,7 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(self.installs(), [])
         self.assertFalse(host.load()["defaults"]["engine"]["dashboards_pending"])
 
-    def test_fleet_matching_receipt_with_broken_cli_drains_before_any_install(self):
+    def test_fleet_broken_cli_defers_while_a_service_is_busy(self):
         self.install_receipt(TARGET)
         self.busy = 1
         self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
@@ -784,15 +769,15 @@ class OneInstallTest(unittest.TestCase):
             return self.run_cmd(argv, **kwargs)
 
         context = (broken_until_reinstalled, self.backend, self.data["repo"])
+        record = install_state.ApplyRun("", "", OLD)
         self.assertEqual(apply.reconcile_fleet_engine(
-            self.data, None, {"local": context, "remote": context}), "applied")
-        first_install = next(i for i, event in enumerate(self.events) if event[0] == "install")
-        self.assertIn(("pause", "factory-widgets.timer"), self.events[:first_install])
-        self.assertIn(("processes", "scan"), self.events[:first_install])
-        self.assertEqual(self.busy, 0)
+            self.data, record, {"local": context, "remote": context}), "deferred")
+        self.assertEqual(self.installs(), [])
         self.assertEqual(self.active, {"factory-widgets.timer"})
-        self.assertEqual(host.engine(self.data, "local")["sha"], TARGET)
-        self.assertEqual(host.engine(self.data, "remote")["sha"], TARGET)
+        self.assertEqual(record.disabled, set())
+        self.assertEqual(record.reenabled, set())
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
 
     def test_unchanged_fleet_does_not_restart_dashboards_or_pause_timers(self):
         self.install_receipt(TARGET)
@@ -1866,7 +1851,6 @@ class OneInstallTest(unittest.TestCase):
         scans = [0]
         ownership = []
         dashboard_live = [dashboard_work is not None]
-        identity_probes = [0]
         original = self.run_cmd
         proc_root = self.root / "proc"
 
@@ -1903,13 +1887,12 @@ class OneInstallTest(unittest.TestCase):
             if argv[:3] == ["env", "LC_ALL=C", "ps"]:
                 argv = argv[2:]
             paused = ("pause", "factory-widgets.timer") in self.events
-            live = not paused or scans[0] < 2 or work != "managed"
+            live = (not paused if phase == "before" else paused)
             if argv[0] == "ps":
                 self.assertGreater(kwargs.get("timeout", 0), 0)
                 self.assertLessEqual(kwargs["timeout"], 5 - clock[0] + 1e-9)
                 if "lstart=" in argv[-1]:
-                    identity_probes[0] += 1
-                    changed = identity_probes[0] > 1
+                    changed = live and "args=" not in argv[-1]
                     rows = []
                     for pid, parent in (("123", "99"), ("99", "42"), ("42", "1"), ("456", "1")):
                         if changed and (identity == "missing" and pid == "123" or
@@ -1963,7 +1946,7 @@ class OneInstallTest(unittest.TestCase):
                     scans[0] += int(paused)
                     return result
                 if proc_files:
-                    if argv[0] == "systemctl":
+                    if argv[0] == "systemctl" and live:
                         stat = proc_root / "123/stat"
                         if identity == "reused":
                             stat.write_text(stat.read_text().replace("100 0\n", "101 0\n"))
@@ -2017,8 +2000,9 @@ class OneInstallTest(unittest.TestCase):
 
             runner.transport = remote_transport
         self.backend.is_active.side_effect = lambda unit, **kw: (
-            "active" if unit == "factory-widgets.service" and
-            (("pause", "factory-widgets.timer") not in self.events or scans[0] < 2)
+            "active" if unit == "factory-widgets.service" and (
+                phase == "before" and ("pause", "factory-widgets.timer") not in self.events
+                or phase == "after" and ("pause", "factory-widgets.timer") in self.events)
             else "active" if unit in self.active else "inactive")
         record = install_state.ApplyRun("", "", OLD)
         with mock.patch.object(self, "run_cmd", side_effect=commands), \
@@ -2035,59 +2019,57 @@ class OneInstallTest(unittest.TestCase):
                     self.data, record, run_cmd=context[0], backend=self.backend, host_name=name)
 
             result = reconcile()
+            self.assertEqual(result, "deferred", self.output.getvalue())
+            self.assertEqual(self.installs(), [])
             self.assertEqual(self.active, {"factory-widgets.timer", "factory-idle.timer"})
-            if identity != "same":
-                self.assertEqual(result, "deferred", self.output.getvalue())
-                self.assertEqual(self.installs(), [])
-                reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
-                self.assertIn("identity", reason)
-                self.assertEqual(record.disabled, set() if phase == "before" else
-                                 {"factory-widgets.timer", "factory-idle.timer"})
-                self.assertEqual(record.reenabled, record.disabled)
-            elif work == "managed":
-                self.assertEqual(result, "applied", self.output.getvalue())
-                self.assertEqual(len(self.installs()), 1)
-                self.assertGreaterEqual(scans[0], 2)
-                self.assertTrue(ownership)
-                self.assertEqual(record.disabled, {"factory-widgets.timer", "factory-idle.timer"})
-                self.assertEqual(record.reenabled, record.disabled)
-                self.assertEqual(record.deferred, {})
-            else:
-                self.assertEqual(result, "deferred", self.output.getvalue())
-                self.assertEqual(self.installs(), [])
-                reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
-                self.assertIn("handland-4242-merge.service" if work == "handland" else
-                              "ownership" if work.startswith("probe") else
-                              "pid 123", reason)
+            reason = record.deferred["engine" if name == "local" else "engine:remote"]["reason"]
+            self.assertIn("identity" if identity != "same" else
+                          "handland-4242-merge.service" if work == "handland" else
+                          "ownership" if work.startswith("probe") else
+                          "pid 123", reason)
+            expected_timers = ({"factory-widgets.timer", "factory-idle.timer"}
+                               if phase == "after" else set())
+            self.assertEqual(record.disabled, expected_timers)
+            self.assertEqual(record.reenabled, expected_timers)
+            if phase == "before":
+                self.backend.pause_timer.assert_not_called()
+                self.backend.resume_timer.assert_not_called()
             self.assertFalse(host.engine(self.data, name).get("paused_timers"))
 
-    def test_registered_dashboard_owner_is_exempt_regardless_factory_command(self):
+    def test_registered_dashboard_work_defers_initial_engine_swap(self):
         for platform in ("linux", "macos"):
             for remote in (False, True):
                 for fleet in (False, True):
                     for command in ("gate", "dispatch"):
-                        for phase in ("before", "after"):
-                            with self.subTest(platform=platform, remote=remote, fleet=fleet,
-                                              command=command, phase=phase):
-                                self.ownership_case(remote=remote, fleet=fleet, platform=platform,
-                                                    work="managed", dashboard_work=command, phase=phase)
+                        with self.subTest(platform=platform, remote=remote, fleet=fleet,
+                                          command=command):
+                            self.ownership_case(remote=remote, fleet=fleet, platform=platform,
+                                                work="managed", dashboard_work=command)
 
-    def test_process_identity_change_defers_managed_exemption(self):
+
+    def test_process_identity_change_after_precheck_defers_managed_work(self):
         for platform in ("linux", "macos"):
             for remote, fleet in ((False, False), (False, True), (True, False), (True, True)):
-                for identity in (("reused", "missing", "parent-reused", "parent-changed",
-                                  "anchor-reused", "anchor-missing") if platform == "macos" else ("reused", "missing")):
-                    with self.subTest(platform=platform, remote=remote, fleet=fleet, identity=identity):
-                        self.ownership_case(remote=remote, fleet=fleet, platform=platform,
-                                            work="managed", identity=identity, proc_files=platform == "linux")
+                identities = (
+                    ("reused", "missing", "parent-reused", "parent-changed",
+                     "anchor-reused", "anchor-missing")
+                    if platform == "macos" else ("reused", "missing")
+                )
+                for identity in identities:
+                    with self.subTest(
+                            platform=platform, remote=remote, fleet=fleet, identity=identity):
+                        self.ownership_case(
+                            remote=remote, fleet=fleet, platform=platform,
+                            work="managed", identity=identity,
+                            proc_files=platform == "linux", phase="after")
 
-    def test_linux_stat_identity_with_complex_comm_still_drains(self):
+    def test_linux_stat_identity_with_complex_comm_still_defers(self):
         for remote in (False, True):
             with self.subTest(remote=remote):
                 self.ownership_case(remote=remote, fleet=False, platform="linux",
                                     work="managed", proc_files=True)
 
-    def test_managed_dispatch_ownership_drains_on_owning_host(self):
+    def test_initial_managed_dispatch_defers_on_owning_host(self):
         for platform in ("linux", "macos"):
             for remote in (False, True):
                 for fleet in (False, True):

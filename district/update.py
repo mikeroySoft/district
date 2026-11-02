@@ -34,6 +34,7 @@ REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,199}")
 QUERY_TIMEOUT = 30
 PREPARE_TIMEOUT = 1200
 TRANSACTION_TIMEOUT = 2400
+DRAIN_STOP_TIMEOUT = 30
 
 
 class UpdateError(RuntimeError):
@@ -632,13 +633,26 @@ def drained_apply(entrypoint: Path) -> dict:
     env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME")}
     try:
         with drain.interrupted():
-            child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            child = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                env=env,
+            )
             try:
                 stdout, stderr = child.communicate(timeout=drain.DRAIN_MAX_TTL + 15 * 60)
-            except (SystemExit, KeyboardInterrupt, subprocess.TimeoutExpired):
+            except BaseException:
                 with contextlib.suppress(ProcessLookupError):
-                    child.send_signal(signal.SIGTERM)
-                child.communicate(timeout=30)
+                    os.killpg(child.pid, signal.SIGTERM)
+                try:
+                    child.communicate(timeout=DRAIN_STOP_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(child.pid, signal.SIGKILL)
+                    child.communicate()
                 raise
             proc = subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
     except (OSError, subprocess.TimeoutExpired) as exc:

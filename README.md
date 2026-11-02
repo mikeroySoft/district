@@ -179,9 +179,11 @@ reinstall; malformed definitions fail the repo row by plist name without replace
 Every host has exactly one Factory installation: the `factory` uv tool, with no
 version in its path. Every managed unit and launchd job uses that tool's Python,
 and District invokes its CLI to render units. A changed engine is replaced only
-after the owning host is confirmed idle. Ordinary apply does not alter Factory
-timers: active, activating, or deactivating services and observed Factory
-processes defer the engine change to another apply.
+after the owning host is confirmed idle. Ordinary apply defers active, activating,
+or deactivating services and observed Factory processes without touching timers.
+Once already idle, it retains the bounded timer-pause/recheck/restore window
+that prevents a timer from starting work during replacement. Flag-based drains
+never enter that timer window.
 
 `district apply --drain` creates
 `${XDG_STATE_HOME:-$HOME/.local/state}/district/drain` on each affected host.

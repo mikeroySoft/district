@@ -9,6 +9,7 @@ import fcntl
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -25,11 +26,18 @@ NEW = "1aeea0609216aabbccddeeff0011223344556677"
 
 MAIN = '''
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import argparse, json, sys
+import argparse, json, os, pathlib, sys
 from district import SHA, VERSION
 if sys.argv[1:] == ["--version"]:
     print(VERSION)
     raise SystemExit(0)
+if sys.argv[1:] == ["apply", "--drain"]:
+    cfg = json.loads(pathlib.Path(os.environ["UPDATE_FIXTURE"]).read_text())
+    with pathlib.Path(cfg["drain_log"]).open("a") as log:
+        log.write(json.dumps(sys.argv[1:]) + "\\n")
+    if cfg.get("drain_error"):
+        print(cfg["drain_error"], file=sys.stderr)
+    raise SystemExit(cfg.get("drain_exit", 0))
 if sys.argv[1:3] != ["dashboard", "--host"] and sys.argv[1:2] != ["dashboard"]:
     raise SystemExit(2)
 parser = argparse.ArgumentParser()
@@ -203,7 +211,8 @@ class UpdateCase(unittest.TestCase):
             "tool_dir": str(self.tools), "bin_dir": str(self.tool_bin), "target_sha": NEW,
             "target_version": "0.2.0", "ci": "success", "main_source": textwrap.dedent(MAIN),
             "uv_log": str(self.tmp / "uv.log"), "gh_log": str(self.tmp / "gh.log"),
-            "systemctl_log": str(self.tmp / "systemctl.log"), "units": units, "port": self.port,
+            "systemctl_log": str(self.tmp / "systemctl.log"),
+            "drain_log": str(self.tmp / "drain.log"), "units": units, "port": self.port,
         }
         self.config_path = self.tmp / "fixture.json"
         self.write_config()
@@ -322,6 +331,10 @@ class UpdateCase(unittest.TestCase):
         path = self.tmp / f"{name}.log"
         return path.read_text().splitlines() if path.exists() else []
 
+    def drain_calls(self) -> list[list[str]]:
+        path = self.tmp / "drain.log"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
     def test_ci_selection_fails_closed_and_accepts_only_ci_test(self) -> None:
         for status, expected in (("missing", "missing"), ("pending", "pending"), ("failed", "failed"),
                                  ("job-missing", "missing"), ("job-pending", "pending"), ("job-failed", "failed")):
@@ -336,19 +349,23 @@ class UpdateCase(unittest.TestCase):
         self.assertEqual((proc.returncode, result["status"], result["ci"]["eligible"]), (0, "plan", True))
         self.assertEqual(result["ci"]["job"], "test")
 
-    def test_dry_run_and_same_sha_create_no_update_state_or_lock(self) -> None:
+    def test_dry_run_creates_no_state_lock_or_drain_and_same_sha_drains(self) -> None:
         proc = self.run_update("--dry-run", "--json")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertFalse((self.state_home / "district" / "update").exists())
         self.assertFalse((self.cache_home / "district" / "apply.lock").exists())
         self.assertFalse(any("install" in line for line in self.log("uv")))
+        self.assertEqual(self.drain_calls(), [])
         self.config["target_sha"] = OLD
         self.config["target_version"] = "0.1.0"
         self.config["ci"] = "pending"
         self.write_config()
         proc = self.run_update("--yes", "--json")
-        self.assertEqual((proc.returncode, self.data(proc)["status"]), (0, "up-to-date"))
-        self.assertTrue(self.data(proc)["ok"])
+        result = self.data(proc)
+        self.assertEqual((proc.returncode, result["status"], result["drain_apply"]["ok"]),
+                         (0, "up-to-date", True))
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.drain_calls(), [["apply", "--drain"]])
         self.assertFalse((self.state_home / "district" / "update").exists())
 
     def test_controller_update_does_not_skip_or_contact_remote_factories(self) -> None:
@@ -441,13 +458,33 @@ class UpdateCase(unittest.TestCase):
 
     def test_successful_update_then_offline_rollback_swaps_retained_artifacts(self) -> None:
         updated = self.run_update("--yes", "--json")
-        self.assertEqual((updated.returncode, self.data(updated)["status"], self.identity()["sha"]), (0, "updated", NEW))
+        updated_result = self.data(updated)
+        self.assertEqual((updated.returncode, updated_result["status"], self.identity()["sha"]),
+                         (0, "updated", NEW))
+        self.assertTrue(updated_result["drain_apply"]["ok"])
+        drain_calls = self.drain_calls()
+        self.assertEqual(drain_calls, [["apply", "--drain"]])
         (self.bin / "gh").unlink()
         rolled = self.run_update("--rollback", "--yes", "--json")
         result = self.data(rolled)
         self.assertEqual((rolled.returncode, result["status"], self.identity()["sha"]), (0, "rolled-back", OLD))
+        self.assertEqual(self.drain_calls(), drain_calls)
         state = json.loads((self.state_home / "district" / "update" / "state.json").read_text())
         self.assertEqual((state["current"]["sha"], state["previous"]["sha"]), (OLD, NEW))
+
+    def test_drained_apply_failure_is_reported_after_successful_install(self) -> None:
+        self.config.update(drain_exit=17, drain_error="factory stayed busy")
+        self.write_config()
+
+        proc = self.run_update("--yes", "--json")
+        result = self.data(proc)
+
+        self.assertEqual((proc.returncode, result["ok"], result["status"], self.identity()["sha"]),
+                         (1, False, "updated", NEW))
+        self.assertEqual(result["drain_apply"]["returncode"], 17)
+        self.assertEqual(result["drain_apply"]["error"], "factory stayed busy")
+        self.assertEqual(result["error"], "post-update drained apply failed: factory stayed busy")
+        self.assertEqual(self.drain_calls(), [["apply", "--drain"]])
 
     def test_changed_dashboard_command_still_blocks_success(self) -> None:
         self.start_dashboard()
@@ -562,6 +599,31 @@ class UpdateCase(unittest.TestCase):
         self.assertEqual((proc.returncode, result["status"], result["rollback"]["ok"]), (0, "recovered", True))
         self.assertEqual(self.identity()["sha"], OLD)
         self.assertFalse((root / "transaction.json").exists())
+
+    def test_signal_kills_a_stubborn_drained_apply_before_propagating(self) -> None:
+        from district import update
+
+        pid_path = self.tmp / "stubborn-drain.pid"
+        entrypoint = self.tmp / "stubborn-drain"
+        entrypoint.write_text(
+            "#!/usr/bin/python3\n"
+            "import os,pathlib,signal,time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "pathlib.Path(os.environ['STUBBORN_DRAIN_PID']).write_text(str(os.getpid()))\n"
+            "os.kill(int(os.environ['STUBBORN_DRAIN_PARENT']), signal.SIGTERM)\n"
+            "time.sleep(60)\n"
+        )
+        entrypoint.chmod(0o755)
+        with mock.patch.dict(os.environ, {
+            "STUBBORN_DRAIN_PID": str(pid_path),
+            "STUBBORN_DRAIN_PARENT": str(os.getpid()),
+        }), mock.patch.object(update, "DRAIN_STOP_TIMEOUT", 0.1):
+            with self.assertRaises(SystemExit) as caught:
+                update.drained_apply(entrypoint)
+
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid_path.read_text()), 0)
 
 
 if __name__ == "__main__":

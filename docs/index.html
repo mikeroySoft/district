@@ -335,7 +335,7 @@ rocm-app   capped             <span class="att">attention</span>
           <h3>A busy factory no longer pauses the whole fleet.</h3>
           <ul>
             <li><strong>Defer before drain:</strong> ordinary <code>district apply</code> waits for another invocation while Factory work is busy. A drained engine apply uses only an expiring host flag: it never invokes <code>factory install</code>, changes the failure cap, or touches a timer; generated-unit changes wait for a later ordinary apply.</li>
-            <li><strong>Bounded maintenance:</strong> the old timer-pausing engine window has since been replaced by an expiring host flag: current drains leave every timer and running pass alone, while <code>district metrics</code> remains available during the wait.</li>
+            <li><strong>Bounded maintenance:</strong> ordinary apply retains its bounded timer-pause/recheck/restore window only after confirming idle. Explicit and threshold-triggered drains instead use an expiring host flag and leave every timer and running pass alone, while <code>district metrics</code> remains available during the wait.</li>
             <li><strong>Install state:</strong> <code>district install-state --json</code> reports install, engine, timer, hold, and last-apply state, including deferred work with its reason and since time.</li>
           </ul>
           <p class="decision"><strong>Why:</strong> one long pass in one repository was switching off every factory's timer for up to an hour, several times a day.</p>

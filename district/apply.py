@@ -742,14 +742,52 @@ def _engine_window(data: dict, name: str, runner, backend, repos: dict, record, 
         timeout = hours(host.default(data, "engine_idle_timeout"), "[defaults].engine_idle_timeout") * 3600
         deadline = time.monotonic() + timeout
     try:
-        busy = _engine_busy(runner, backend, repos, deadline=deadline)
-    except subprocess.TimeoutExpired:
-        busy = ["idle observation timed out"]
-    if busy:
-        _defer(record, target, busy)
-        yield None
-    else:
-        yield deadline
+        ready = False
+        try:
+            busy = _engine_busy(runner, backend, repos, deadline=deadline)
+            if busy:
+                _defer(record, target, busy)
+            else:
+                services, timers = _engine_units(repos, backend, timeout=remaining_timeout(deadline))
+                active = [timer for timer in timers
+                          if backend.is_active(timer, timeout=remaining_timeout(deadline)) == "active"]
+                tool, cli = host.factory_tool_paths(runner, timeout=remaining_timeout(deadline))
+                if record:
+                    record.observe(data)
+                for timer in active:
+                    remaining_timeout(deadline)
+                    paused = list((host.engine(data, name) or {}).get("paused_timers", []))
+                    _save_engine(data, name, runner, deadline=deadline,
+                                 paused_timers=paused if timer in paused else paused + [timer])
+                    remaining = remaining_timeout(deadline)
+                    if record:
+                        record.disabled.add(timer)
+                    backend.pause_timer(timer, timeout=remaining)
+                while True:
+                    hand_work = _busy_handland(backend, runner, timeout=remaining_timeout(deadline))
+                    if hand_work:
+                        _defer(record, target, hand_work)
+                        break
+                    busy = [unit for unit in services if backend.is_active(
+                        unit, timeout=remaining_timeout(deadline)) in ("active", "activating", "deactivating")]
+                    hand_work, processes = _process_work(tool, cli, runner, backend, repos, deadline=deadline)
+                    busy += processes
+                    if hand_work:
+                        _defer(record, target, hand_work)
+                        break
+                    if not busy:
+                        ready = True
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _defer(record, target, busy)
+                        break
+                    time.sleep(min(1, remaining))
+        except subprocess.TimeoutExpired:
+            _defer(record, target, ["idle wait timed out"])
+        yield deadline if ready else None
+    finally:
+        _restore_engine_timers(data, name, runner, backend, record)
 
 def _finish_dashboards(data: dict, name: str, runner, repos: dict, backend, *, deadline: float | None = None) -> None:
     if (host.engine(data, name) or {}).get("dashboards_pending"):
@@ -1012,6 +1050,9 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                     record.drain_requested or name in record.drains or _auto_drain(record, target)):
                 _start_drain(record, name, runner)
                 deadlines[name] = record.drain_deadlines[name][0]
+            elif not hand_ready(name):
+                print(f"engine fleet ({names}) held by {name} (busy): every host keeps its engine")
+                return "deferred"
         except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
             print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
             return "failed"

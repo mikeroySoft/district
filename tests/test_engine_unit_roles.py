@@ -63,15 +63,9 @@ class EngineUnitRolesTest(unittest.TestCase):
                 runner, _, _ = case.timeout_remote("none")
 
             proc_root = case.root / f"proc-{platform}-{name}"
-            post_pause_observations = [0]
             proc_reader_executions = [0]
             original = case.run_cmd
 
-            def paused() -> bool:
-                return ("pause", timer) in case.events
-
-            def process_live() -> bool:
-                return not paused() or post_pause_observations[0] == 0
 
             def write_fake_proc(live: bool) -> None:
                 for pid, parent, start in (("42", "1", "90"), ("123", "42", "100")):
@@ -119,7 +113,7 @@ class EngineUnitRolesTest(unittest.TestCase):
                 if argv[:3] == ["env", "LC_ALL=C", "ps"]:
                     argv = argv[2:]
                 if argv[0] == "ps":
-                    live = process_live()
+                    live = True
                     if "args=" in argv[-1]:
                         command = (f"{case.tool}/bin/python -m factory dispatch" if live else "")
                         if platform == "macos":
@@ -127,8 +121,6 @@ class EngineUnitRolesTest(unittest.TestCase):
                                     "42 1 Thu Nov 12 00:00:00 2026"]
                         else:
                             rows = [f"123 {command}".rstrip()] if command else []
-                        if paused():
-                            post_pause_observations[0] += 1
                         output = "\n".join(rows) + ("\n" if rows else "")
                         return subprocess.CompletedProcess(
                             raw, 0, ("900\n" if macos_observer else "") + output, "")
@@ -136,11 +128,9 @@ class EngineUnitRolesTest(unittest.TestCase):
                         raw, 0,
                         "123 42 Thu Nov 12 00:00:00 2026\n42 1 Thu Nov 12 00:00:00 2026\n", "")
                 if argv[:2] == ["python3", "-c"] and "/proc" in argv[2]:
-                    live = process_live()
+                    live = True
                     if "cmdline" in argv[2]:
                         result = execute_proc_reader(argv, kwargs, live)
-                        if paused():
-                            post_pause_observations[0] += 1
                         return result
                     if len(argv) == 3:
                         return subprocess.CompletedProcess(
@@ -173,9 +163,7 @@ class EngineUnitRolesTest(unittest.TestCase):
 
             def is_active(unit, **_):
                 case.events.append(("state", unit))
-                if unit == main:
-                    return "active" if not paused() or post_pause_observations[0] == 0 else "inactive"
-                return "active" if unit in case.active else "inactive"
+                return "active" if unit == main or unit in case.active else "inactive"
 
             case.backend.is_active.side_effect = is_active
             record = install_state.ApplyRun("", "", fixtures.OLD)
@@ -186,27 +174,23 @@ class EngineUnitRolesTest(unittest.TestCase):
                     host_name=name,
                 )
 
-            if unregistered_owner:
-                self.assertEqual(result, "deferred", case.output.getvalue())
-                self.assertEqual(case.installs(), [])
-                self.assertEqual(case.active, {timer, idle_timer})
-                reason = record.deferred["engine:remote" if remote else "engine"]["reason"]
-                self.assertIn("pid 123", reason)
-                self.assertEqual(case.backend.start.call_args_list, [])
-                return
-            self.assertEqual(result, "applied", case.output.getvalue())
-            self.assertEqual(len(case.installs()), 1)
+            self.assertEqual(result, "deferred", case.output.getvalue())
+            self.assertEqual(case.installs(), [])
             self.assertEqual(case.active, {timer, idle_timer})
-            self.assertEqual(record.disabled, {timer, idle_timer})
-            self.assertEqual(record.reenabled, record.disabled)
-            self.assertGreaterEqual(post_pause_observations[0], 1)
-            started = [call.args[0] for call in case.backend.start.call_args_list]
-            self.assertEqual(started, [dashboard])
-            self.assertNotIn(main, started)
+            reason = record.deferred["engine:remote" if remote else "engine"]["reason"]
+            self.assertIn("pid 123" if unregistered_owner else main, reason)
+            self.assertEqual(record.disabled, set())
+            self.assertEqual(record.reenabled, set())
+            case.backend.pause_timer.assert_not_called()
+            case.backend.resume_timer.assert_not_called()
+            case.backend.start.assert_not_called()
             if platform == "linux":
-                self.assertGreater(proc_reader_executions[0], 0, "Linux argv must come from the fake /proc tree")
+                self.assertGreater(
+                    proc_reader_executions[0], 0,
+                    "Linux argv must come from the fake /proc tree",
+                )
 
-    def test_ops_dashboard_main_drains_locally_and_remotely_on_linux_and_macos(self):
+    def test_active_ops_dashboard_main_defers_locally_and_remotely_on_linux_and_macos(self):
         for platform in ("linux", "macos"):
             for remote in (False, True):
                 with self.subTest(platform=platform, remote=remote):
