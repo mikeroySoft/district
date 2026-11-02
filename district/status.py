@@ -17,7 +17,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from district import doctor, health, host, metrics
+from district import doctor, health, host, metrics, streak
 from district.host import run
 
 COLUMNS = ("repo", "host", "operating", "execution", "observation", "assessment", "version", "next", "last", "pass", "esc", "gate1", "bounce", "fails", "upstream", "evidence")
@@ -603,7 +603,35 @@ def fleet(data: dict) -> dict[str, dict]:
         slugs = [slug for group in pool.map(probe_host, groups.items()) for slug in group]
         for _ in pool.map(collect, slugs):
             pass
-    return collector.fleet()
+    entries = collector.fleet()
+
+    def collect_streaks(slug: str) -> None:
+        item = entries[slug]
+        skip = {item["host"]} if item["host_state"] == "unreachable" else set()
+        alerts, gaps = streak.collect(data, slug, skip=skip, timeout=collector.timeout)
+        item.update(failure_streaks=alerts, pass_history_errors=gaps)
+        sources = [{
+            "id": f"district.pass-history/{alert['host']}", "observed_at": _utcnow(),
+            "cadence_seconds": FULL_INTERVAL, "error": None,
+            "data": {"checks": [{
+                "condition": "runtime.dispatcher_failed", "resource": f"{alert['host']}/dispatcher",
+                "status": "failed", "detail": streak.describe(alert),
+                "impact": "The factory's last recorded passes all failed.",
+                "reference": "service pass history",
+            }]},
+        } for alert in alerts]
+        if sources:
+            classified = health.classify(slug, sources, {})
+            item["findings"].extend(classified["findings"])
+            item["sources"].extend(classified["sources"])
+            item["assessment"] = "attention"
+        elif any(gap["unreachable"] for gap in gaps) and item["assessment"] != "attention":
+            item["assessment"] = "unknown"
+
+    with ThreadPoolExecutor(max_workers=collector.concurrency) as pool:
+        for _ in pool.map(collect_streaks, entries):
+            pass
+    return entries
 
 
 def row(slug: str, e: dict) -> dict:
@@ -633,7 +661,9 @@ def row(slug: str, e: dict) -> dict:
         "esc": str(sum(t.get("stage") == "escalated" for t in tickets if isinstance(t, dict))) if tickets is not None and not e["error"] else "?",
         "gate1": pct(sm.get("first_pass")), "bounce": pct(sm.get("bounce_rate")),
         "fails": str(d.get("consecutive_failures", "?")), "upstream": upstream,
-        "evidence": "; ".join(f["condition_code"] for f in e["findings"])
+        "evidence": "; ".join([*(streak.describe(alert) for alert in e.get("failure_streaks", [])),
+                               *(f["condition_code"] for f in e["findings"]),
+                               *(gap["error"] for gap in e.get("pass_history_errors", []))])
                     or e.get("host_error") or e["error"] or "-",
     }
 

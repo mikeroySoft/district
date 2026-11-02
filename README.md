@@ -67,6 +67,43 @@ failure cap. Generated-unit drift is recorded as
 `unit changes deferred during district drain (timers untouched)` for a later
 ordinary apply; an operator-stopped timer therefore remains stopped.
 
+## Repeated pass failures
+
+`district status` raises operational attention (exit 1) when a factory's last
+N recorded service passes **on the same host** all failed. The evidence column
+names the host, repo, N, first failure time in that window, and the last error
+line when available. `district doctor` reports the same streak as `FAIL`.
+Every assigned host is checked, not just a multi-host repo's triage host.
+
+Configure N in the host registry; the default is 6:
+
+```toml
+[defaults]
+failed_pass_streak = 6 # positive integer; one hour at install.every = "10min"
+```
+
+Remote `[hosts.NAME.defaults]` overrides apply to this setting too. This is a
+read-only alert, separate from `max_failed_passes` and apply's timer failure cap.
+One success among the last N passes clears the streak; fewer than N completions
+does not alert. Unreachable hosts do not produce streaks and retain unknown
+exit 2 when there is no other operational attention.
+
+Linux reads retained systemd user-journal unit completion results, including
+failures before Factory can import. macOS reads the launchd plist's stdout/stderr
+pass logs, or conventional `.factory/logs/factory-REPO.{stdout,stderr}.log` and
+`~/Library/Logs/factory-REPO.log` paths when no plist log paths are declared.
+Pass logs need `=== end rc=CODE` markers and an ISO-8601 timestamp with timezone
+on the pass's opening marker or end line. A single manager exit status is not
+treated as N passes; status polls never create pass history. Reads are bounded
+to the latest 10,000 journal records or 4 MiB per log; missing, rotated-away,
+or insufficient history cannot establish a streak.
+
+`status --json` includes a `failure_streaks` list per repo, with `host`, `repo`,
+`count`, `first_failed_at`, `last_failed_at`, and nullable `last_error`. It also
+adds the evidence to the existing operational findings. History read errors
+appear in `pass_history_errors` (host, repo, error, unreachable) and as doctor
+warnings; an observation failure is not a failed factory pass.
+
 ## Ownership
 
 | District owns (host, never committed) | Factory owns (committed to its repo) |

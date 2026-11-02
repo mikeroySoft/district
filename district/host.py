@@ -38,6 +38,7 @@ DEFAULTS = {
     "engine_idle_timeout": "30min",
     "min_package_age": "24h",
     "max_failed_passes": 10,
+    "failed_pass_streak": 6,
 }
 SSH_CONNECT_TIMEOUT = 10
 # The supervisor lives on the remote host, outside the command's process group.
