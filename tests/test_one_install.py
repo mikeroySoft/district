@@ -117,6 +117,8 @@ class OneInstallTest(unittest.TestCase):
         return name, body
 
     def run_cmd(self, argv, **kwargs):
+        if argv[:3] == ["env", "LC_ALL=C", "ps"]:
+            argv = argv[2:]
         self.calls.append((list(argv), kwargs))
         out, code = "", 0
         if argv[:4] == ["git", "remote", "get-url", "origin"]:
@@ -781,7 +783,7 @@ class OneInstallTest(unittest.TestCase):
         self.backend.pause_timer.assert_not_called()
         self.backend.resume_timer.assert_not_called()
 
-    def hand_work_fleet(self, work, *, phase, blocked="remote", fleet=True, platform="linux"):
+    def hand_work_fleet(self, work, *, phase, blocked="remote", fleet=True, platform="linux", lstart=None):
         self.install_receipt(OLD)
         self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
         self.data["defaults"]["engine_idle_timeout"] = "5s"
@@ -835,10 +837,16 @@ class OneInstallTest(unittest.TestCase):
         original_run = self.run_cmd
         scans = []
         clock = [0.0]
+        ps_probes = []
         scan_started = {}
         command = work.removeprefix("dashboard-")
 
         def commands(name, argv, **kwargs):
+            raw = list(argv)
+            if argv[:3] == ["env", "LC_ALL=C", "ps"]:
+                argv = argv[2:]
+            if argv[0] == "ps":
+                ps_probes.append(raw)
             available = phase == "before" or (phase == "after" and drained[0]) or started[0]
             if argv[:3] == ["systemctl", "--user", "show"] and work.startswith("dashboard-"):
                 return subprocess.CompletedProcess(argv, 0,
@@ -853,6 +861,10 @@ class OneInstallTest(unittest.TestCase):
             if argv[0] == "ps" and "ppid=" in argv[-1]:
                 if "lstart=" in argv[-1]:
                     output = "321 42 Mon Nov  2 00:00:00 2026"
+                    if lstart and name == blocked and available:
+                        start = ("木 11/12 00:00:00 2026" if lstart == "malformed" or
+                                 raw[:3] != ["env", "LC_ALL=C", "ps"] else "Thu Nov 12 00:00:00 2026")
+                        output = f"321 42 {start}"
                     if "args=" in argv[-1] and name == blocked and available:
                         output += f" {self.tool}/bin/python -m factory {command}"
                     return subprocess.CompletedProcess(
@@ -907,7 +919,8 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(remote_installs, [TARGET, OLD] if phase == "rollback" else [])
         target = "engine" if blocked == "local" else "engine:remote"
         reason = record.deferred[target]["reason"]
-        self.assertIn("handland-4242-merge.service" if work in ("active", "activating", "deactivating")
+        self.assertIn("invalid C-locale ps row" if lstart == "malformed" else
+                      "handland-4242-merge.service" if work in ("active", "activating", "deactivating")
                       else f"pid 321 factory {command}", reason)
         self.assertEqual(self.active, {"factory-widgets.timer"})
         self.assertEqual(remote_active, {"factory-widgets.timer"})
@@ -915,6 +928,9 @@ class OneInstallTest(unittest.TestCase):
             engine = host.engine(self.data, name)
             self.assertEqual(engine["sha"], TARGET if phase == "rollback" and name == "local" else OLD)
             self.assertFalse(engine.get("paused_timers"))
+        if lstart:
+            self.assertTrue(ps_probes)
+            self.assertTrue(all(argv[:3] == ["env", "LC_ALL=C", "ps"] for argv in ps_probes))
         return record, scans
 
     def test_fleet_hand_work_preflight_precedes_every_pause(self):
@@ -1484,7 +1500,7 @@ class OneInstallTest(unittest.TestCase):
                 parts = shlex.split(parts[-1])
             if parts[0] == "cd":
                 parts = parts[3:]
-            if parts[0] == "env":
+            if parts[0] == "env" and parts[:3] != ["env", "LC_ALL=C", "ps"]:
                 parts = parts[1:]
                 while "=" in parts[0]:
                     parts = parts[1:]
@@ -1766,6 +1782,8 @@ class OneInstallTest(unittest.TestCase):
                 (directory / "cgroup").write_text("0::/user/factory-widgets.service/child\n")
 
         def commands(argv, **kwargs):
+            if argv[:3] == ["env", "LC_ALL=C", "ps"]:
+                argv = argv[2:]
             paused = ("pause", "factory-widgets.timer") in self.events
             live = not paused or scans[0] < 2 or work != "managed"
             if argv[0] == "ps":
@@ -1981,6 +1999,8 @@ class OneInstallTest(unittest.TestCase):
                             original = self.run_cmd
 
                             def commands(argv, **kwargs):
+                                if argv[:3] == ["env", "LC_ALL=C", "ps"]:
+                                    argv = argv[2:]
                                 if block.startswith("dashboard-"):
                                     self.assertGreater(kwargs.get("timeout", 0), 0)
                                     if argv[:3] == ["systemctl", "--user", "show"]:

@@ -326,14 +326,21 @@ print(json.dumps(rows))
 
 
 def _ps_identities(output: str) -> tuple[dict, list[tuple[str, str]]]:
-    """Parse one macOS ps observation: PID, PPID, five lstart fields, argv."""
+    """Parse C-locale macOS ps rows; an unknown layout must never hide work."""
     identities, commands = {}, []
     for line in output.splitlines():
         fields = line.split(maxsplit=7)
-        if len(fields) >= 7 and fields[0].isdigit() and fields[1].isdigit():
-            identities[fields[0]] = [" ".join(fields[2:7]), fields[1]]
-            if len(fields) == 8:
-                commands.append((fields[0], fields[7]))
+        if not fields:
+            continue
+        if (len(fields) < 7 or not fields[0].isdigit() or not fields[1].isdigit()
+                or not re.fullmatch(
+                    r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) "
+                    r"(0?[1-9]|[12][0-9]|3[01]) ([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9] [0-9]{4}",
+                    " ".join(fields[2:7]))):
+            raise ValueError(f"invalid C-locale ps row for pid {fields[0]}")
+        identities[fields[0]] = [" ".join(fields[2:7]), fields[1]]
+        if len(fields) == 8:
+            commands.append((fields[0], fields[7]))
     return identities, commands
 
 
@@ -343,7 +350,10 @@ def _factory_processes(tool: Path, cli: Path, run_cmd, *, platform: str, deadlin
     launchers = {str(cli), str(real_cli), *(str(directory / "factory") for directory in tool_bins)}
     identities = _linux_identities(run_cmd, deadline=deadline) if platform == "linux" else {}
     columns = "pid=,ppid=,lstart=,args=" if platform == "macos" else "pid=,args="
-    proc = run_cmd(["ps", "-eo", columns], timeout=remaining_timeout(deadline))
+    argv = ["ps", "-eo", columns]
+    if platform == "macos":
+        argv = ["env", "LC_ALL=C", *argv]
+    proc = run_cmd(argv, timeout=remaining_timeout(deadline))
     if proc.returncode:
         raise OSError(proc.stderr.strip() or "cannot inspect Factory processes")
     if platform == "macos":
@@ -403,7 +413,7 @@ def _managed_processes(processes: list[str], identities: dict, runner, backend, 
             fields = line.split()
             if len(fields) == 3 and fields[0].isdigit() and fields[2] in labels:
                 owners[fields[0]] = labels[fields[2]]
-        current, _ = _ps_identities(probe(["ps", "-eo", "pid=,ppid=,lstart="]))
+        current, _ = _ps_identities(probe(["env", "LC_ALL=C", "ps", "-eo", "pid=,ppid=,lstart="]))
         anchors = dict(owners)
         for pid in pids:
             ancestor, seen = pid, set()
@@ -422,8 +432,12 @@ def _managed_processes(processes: list[str], identities: dict, runner, backend, 
 
 
 def _process_work(tool: Path, cli: Path, runner, backend, repos: dict, *, deadline: float) -> tuple[list[str], list[str]]:
-    processes, identities = _factory_processes(
-        tool, cli, runner, platform=backend.configuration().get("platform"), deadline=deadline)
+    try:
+        processes, identities = _factory_processes(
+            tool, cli, runner, platform=backend.configuration().get("platform"), deadline=deadline)
+    except ValueError as exc:
+        unknown = [f"Factory process observation unavailable: {exc}"]
+        return unknown, unknown
     if not processes:
         return [], []
     try:

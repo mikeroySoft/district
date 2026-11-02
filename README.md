@@ -183,7 +183,10 @@ commands are exempt: a gate/dispatch inside a dashboard cgroup or launchd job,
 including descendants, is outside work and defers replacement. Dashboard
 services remain excluded from the service wait. Managed exemptions require an
 unchanged owning-host `(PID, start time)`: Linux uses `/proc/PID/stat` field 22
-(after the final comm parenthesis), macOS uses `ps` lstart. The argv observation
+(after the final comm parenthesis), macOS uses C-locale `ps` lstart for both
+argv and identity observations. An unparseable macOS row defers with a named
+observation/ownership reason rather than dropping a potentially busy process.
+The argv observation
 is bracketed by identity checks; launchd ancestry also checks every parent and
 label anchor. A reused/disappeared PID or changed parent defers with a named
 identity reason, never a stale managed exemption. All probes share the idle
