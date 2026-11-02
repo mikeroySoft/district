@@ -247,6 +247,34 @@ class DrainTest(unittest.TestCase):
             self.assertNotIn("drain", self.record())
             self.assertFalse(case.installs())
 
+    def test_explicit_drain_skips_current_engines_on_local_and_remote_hosts(self):
+        for placement in ("local", "remote", "both"):
+            with self.subTest(placement=placement), self.case() as case:
+                case.install_receipt(fixtures.TARGET)
+                case.data["defaults"]["engine"]["sha"] = fixtures.TARGET
+                case.busy = 3
+                if placement != "local":
+                    case.data["hosts"] = {"remote": {
+                        "ssh": "unused", "platform": "macos",
+                        "engine": {"sha": fixtures.TARGET, "ref": "main"},
+                    }}
+                    if placement == "remote":
+                        case.data["repo"]["acme/widgets"]["host"] = "remote"
+                    else:
+                        case.data["repo"]["acme/remote"] = {
+                            "path": str(case.repo), "host": "remote",
+                        }
+                runner, _, _ = case.timeout_remote("none")
+                with mock.patch.object(host, "remote_runner", return_value=runner):
+                    self.assertEqual(self.run_apply(case), 0)
+                self.assertNotIn("drain", self.record())
+                self.assertNotIn("drains", self.record())
+                case.sleep.assert_not_called()
+                apply.postcheck.check.assert_not_called()
+                self.assertFalse(case.installs())
+                self.assertFalse(drain.path().exists())
+                self.assert_no_timer_changes(case)
+
     def test_postcheck_failure_does_not_mark_drain_applied(self):
         with self.case() as case:
             with mock.patch.object(apply.postcheck, "check", return_value=["factory watch --dry-run: no factory repo checkout"]):
