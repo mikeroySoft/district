@@ -312,6 +312,27 @@ class HandRunTest(unittest.TestCase):
         self.assertIn("settings.inc", result.stderr)
         self.assertFalse(self.launch_log.exists())
 
+    def test_shell_tokenization_failure_does_not_skip_live_dependency(self):
+        fragment = self.source / "settings.txt"
+        fragment.write_text("bash /tmp/external-live.sh\n")
+        fragment.chmod(0o644)
+        self.script.write_text("#!/bin/bash\nprintf '%s\\n' $'it\\'s ready'\nsource ./settings.txt\n")
+        syntax = subprocess.run(["/bin/bash", "-n", str(self.script)], text=True, capture_output=True)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+        result = self.command("launch", "532-chain", self.script)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot inspect sourced dependencies", result.stderr)
+        self.assertIn("chain.sh", result.stderr)
+        self.assertFalse(self.launch_log.exists())
+
+    def test_python_quoting_does_not_require_shell_tokenization(self):
+        helper = self.source / "helper.py"
+        helper.write_text("message = 'can\\'t tokenize this as shell'\n")
+        self.script.write_text(f'#!/bin/bash\n{sys.executable} ./helper.py\n')
+        start, _ = self.launch()
+        result = subprocess.run([str(start)], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_uncopied_engine_and_repository_paths_stay_live(self):
         engine = self.data / "engines/v1/bin"
         engine.mkdir(parents=True)
