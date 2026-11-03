@@ -94,6 +94,48 @@ class UvWrappedSchedulerTest(WrappedSchedulerChecks, DistrictCase):
 
 
 class ForeignAgentEdgeTest(DistrictCase):
+    def test_apply_follows_checkout_change_after_shell_initialization(self):
+        _, repo, old = self.foreign_launchd()
+        other = self.repo("other", toml="")
+        document = plistlib.loads(old.read_bytes())
+        document["WorkingDirectory"] = str(other)
+        document["ProgramArguments"] = [
+            "/bin/zsh", "-lc", f"source ~/.zprofile;\ncd '{repo}' && exec factory pass",
+        ]
+        old.write_bytes(plistlib.dumps(document))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertFalse(old.exists())
+        states = [json.loads(line) for line in (self.bin / "loaded.jsonl").read_text().splitlines()]
+        self.assertTrue(all(len(state) <= 1 for state in states), states)
+        self.assertEqual(states[-1], ["factory-widgets"])
+
+    def test_apply_follows_uv_directory_without_confusing_option_values(self):
+        _, repo, old = self.foreign_launchd()
+        other = self.repo("other", toml="")
+        document = plistlib.loads(old.read_bytes())
+        document["WorkingDirectory"] = str(other)
+        document["ProgramArguments"] = [
+            "uv", "run", "--frozen", f"--directory={repo}", "--with", "factory", "--", "factory", "pass",
+        ]
+        old.write_bytes(plistlib.dumps(document))
+        unrelated = old.parent / "maintenance.plist"
+        maintenance = plistlib.dumps({
+            "Label": unrelated.stem, "WorkingDirectory": str(repo),
+            "ProgramArguments": ["uv", "run", "--with", "factory", "dispatch"],
+        })
+        unrelated.write_bytes(maintenance)
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertFalse(old.exists())
+        self.assertEqual(unrelated.read_bytes(), maintenance)
+        self.assertFalse(any(call.startswith(("bootout ", "disable "))
+                             and call.endswith("/maintenance") for call in self.calls("launchctl")))
+
     def test_apply_ignores_quoted_and_echoed_factory_commands(self):
         _, repo, old = self.foreign_launchd()
         commands = [
