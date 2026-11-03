@@ -1351,8 +1351,11 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     for row in rows:
         if "deferred" not in row and row["timer"] == "inactive":
             timer = f"{host.unit_name(row['slug'])}.timer"
-            enabled = backend.status(timer).unit_file_state
-            if enabled == "enabled" or (enabled == "disabled" and timer in paused_timers):
+            timer_status = backend.status(timer)
+            enabled = timer_status.unit_file_state
+            if timer_status.loaded and (
+                enabled == "enabled" or (enabled == "disabled" and timer in paused_timers)
+            ):
                 row["timer"] = "paused"
         print(line(row, status))
     converged = [row for row in rows if "deferred" not in row]

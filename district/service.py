@@ -682,11 +682,13 @@ class LaunchdBackend(ServiceBackend):
         running = re.search(r"^\s*state\s*=\s*running\s*$", proc.stdout, re.MULTILINE) is not None
         pid_match = re.search(r"^\s*pid\s*=\s*(\d+)\s*$", proc.stdout, re.MULTILINE)
         scheduled = "StartInterval" in document
+        unit_file_state = "enabled"
         if name.endswith(".timer"):
             disabled = self._run("print-disabled", self.domain, check=False,
                                  timeout=remaining_timeout(deadline) if deadline is not None else None)
             held = re.search(r'["\']?' + re.escape(label) + r'["\']?\s*=>\s*true', disabled.stdout)
             active = "inactive" if held else "active"
+            unit_file_state = "disabled" if held else "enabled"
         elif running:
             active = "activating" if scheduled else "active"
         else:
@@ -694,7 +696,7 @@ class LaunchdBackend(ServiceBackend):
         argv = document.get("ProgramArguments")
         command = tuple(argv) if isinstance(argv, list) and all(isinstance(arg, str) for arg in argv) else None
         return ServiceStatus(
-            "loaded", active, "enabled", int(pid_match.group(1)) if pid_match else 0, command, environment,
+            "loaded", active, unit_file_state, int(pid_match.group(1)) if pid_match else 0, command, environment,
         )
 
     def scheduled_jobs(self, names: set[str], *,
