@@ -1396,6 +1396,40 @@ class ApplyTest(DistrictCase):
         self.assertEqual(self.calls("factory"), [])
         self.assertEqual(self.calls("launchctl"), [])
 
+    def test_apply_remote_dry_run_previews_current_policy(self) -> None:
+        target = "factory@ultron.example"
+        home = self.fake_ssh(target)[target]
+        config = home / ".config/factory/config.toml"
+        config.parent.mkdir(parents=True)
+        for age in (None, "48h", "0"):
+            with self.subTest(min_package_age=age):
+                registry = {"hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+                            "repo": {"acme/widgets": {"path": "/srv/widgets", "host": "ultron"}}}
+                if age is not None:
+                    registry["defaults"] = {"min_package_age": age, "install": {"env": {
+                        "NPM_CONFIG_MIN_RELEASE_AGE": "1", "UV_EXCLUDE_NEWER": "PT24H",
+                        "KEEP": "secret-retained-value",
+                    }}}
+                host.save(registry)
+                config.write_text(host.tomli_w.dumps(host.remote_config(registry, "ultron")))
+                before = {str(p): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                          for p in home.rglob("*") if p.is_file()}
+                local_before = host.path().read_bytes()
+
+                code, out = self.district("apply", "--dry-run")
+
+                self.assertEqual(code, 0, out)
+                self.assertIn(f"ultron: would replace {config}", out)
+                if age == "0":
+                    self.assertIn("would drop defaults.install.env.NPM_CONFIG_MIN_RELEASE_AGE, "
+                                  "defaults.install.env.UV_EXCLUDE_NEWER", out)
+                else:
+                    self.assertNotIn("would drop", out)
+                self.assertNotIn("secret-retained-value", out)
+                self.assertEqual(host.path().read_bytes(), local_before)
+                self.assertEqual({str(p): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                                  for p in home.rglob("*") if p.is_file()}, before)
+
     def register(self, failures: int = 0, **extra) -> Path:
         repo = self.repo(toml="")
         host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}, **extra}}})

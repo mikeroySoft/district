@@ -1527,6 +1527,8 @@ def _dry_run(args: argparse.Namespace) -> int:
     if not selected:
         print("no repositories registered (district add)")
         return 0
+    host.sync_local_claims(data)
+    policy(data)
     remote_names = []
     for slug, table in selected.items():
         host.factory_host(data, slug)
