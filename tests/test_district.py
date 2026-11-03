@@ -1268,6 +1268,198 @@ class ApplyTest(DistrictCase):
         self.assertTrue(all(len(labels) <= 1 for labels in states), states)
         self.assertEqual(states[-1], ["factory-widgets"])
 
+    def test_apply_dry_run_lists_foreign_agent_and_changes_nothing(self) -> None:
+        home, _, old = self.foreign_launchd()
+        registry = host.path().read_bytes()
+        before = {
+            path.relative_to(home): path.read_bytes()
+            for path in home.rglob("*") if path.is_file()
+        }
+
+        code, out = self.district("apply", "--dry-run")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("would", out)
+        self.assertIn("ultron", out)
+        self.assertIn(old.stem, out)
+        self.assertIn(str(old), out)
+        self.assertIn("loaded", out)
+        self.assertIn("factory-widgets", out)
+        self.assertEqual(host.path().read_bytes(), registry)
+        self.assertEqual({
+            path.relative_to(home): path.read_bytes()
+            for path in home.rglob("*") if path.is_file()
+        }, before)
+        self.assertNotIn("install", self.calls("factory"))
+        self.assertFalse(any(call.startswith(("bootout ", "bootstrap ", "kill ", "disable ", "enable "))
+                             for call in self.calls("launchctl")))
+        self.assertFalse(any(call.startswith(("disable ", "enable ", "stop ", "start ", "daemon-reload"))
+                             for call in self.calls("systemctl")))
+        self.assertFalse(install_state.state_path().exists())
+        self.assertFalse((home / ".local/state/district/retired-agents").exists())
+
+    def test_apply_restores_foreign_agent_when_install_fails(self) -> None:
+        home, _, old = self.foreign_launchd()
+        original = old.read_bytes()
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            '    sys.exit(0)\nfor pat, out, rc in',
+            '    sys.exit(1 if args == "install" else 0)\nfor pat, out, rc in',
+            1,
+        ))
+
+        code, out = self.district("apply")
+
+        expected = "factory-widgets"
+        self.assertEqual(code, 1, out)
+        for text in ("ultron", old.stem, expected, "rollback"):
+            self.assertIn(text, out.lower())
+        self.assertEqual(old.read_bytes(), original)
+        self.assertFalse((home / f"{old.stem}.unloaded").exists())
+        self.assertTrue((home / f"{expected}.unloaded").exists())
+        backups = list((home / ".local/state/district/retired-agents").glob(f"*/{old.name}"))
+        self.assertEqual([path.read_bytes() for path in backups], [original])
+        calls = self.calls("launchctl")
+        self.assertTrue(any(call.startswith("bootout ") and call.endswith(f"/{expected}")
+                            for call in calls), calls)
+        self.assertTrue(any(call.startswith("bootstrap ") and call.endswith(f"/{old.name}")
+                            for call in calls), calls)
+        states = [json.loads(line) for line in (self.bin / "loaded.jsonl").read_text().splitlines()]
+        self.assertTrue(all(len(labels) <= 1 for labels in states), states)
+        self.assertEqual(states[-1], [old.stem])
+
+    def test_apply_ignores_agents_for_other_repos(self) -> None:
+        home, repo, old = self.foreign_launchd()
+        agents = old.parent
+        other_repo = self.repo("other", toml="")
+        unrelated = {
+            "factory-other": {
+                "Label": "factory-other", "WorkingDirectory": str(other_repo),
+                "ProgramArguments": ["factory", "dispatch"], "StartInterval": 600,
+            },
+            "com.example.factory-maintenance": {
+                "Label": "com.example.factory-maintenance", "WorkingDirectory": str(repo),
+                "ProgramArguments": ["python", "maintenance.py"], "StartInterval": 600,
+            },
+        }
+        paths = {}
+        for label, document in unrelated.items():
+            paths[label] = agents / f"{label}.plist"
+            paths[label].write_bytes(plistlib.dumps(document))
+        originals = {label: path.read_bytes() for label, path in paths.items()}
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        calls = self.calls("launchctl")
+        for label, path in paths.items():
+            self.assertEqual(path.read_bytes(), originals[label])
+            self.assertFalse(any(call.startswith(("bootout ", "kill ")) and call.endswith(f"/{label}")
+                                 for call in calls), calls)
+        backups = list((home / ".local/state/district/retired-agents").glob("*/*.plist"))
+        self.assertEqual([path.name for path in backups], [old.name])
+
+    def test_apply_matches_foreign_agent_root_through_symlink(self) -> None:
+        home, repo, old = self.foreign_launchd()
+        alias = self.tmp / "widgets-link"
+        alias.symlink_to(repo, target_is_directory=True)
+        document = plistlib.loads(old.read_bytes())
+        document.pop("WorkingDirectory")
+        document["ProgramArguments"] = [
+            "/bin/sh", "-lc", f"cd {shlex.quote(str(alias))} && exec factory dispatch",
+        ]
+        old.write_bytes(plistlib.dumps(document))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertFalse(old.exists())
+        self.assertTrue(any(call.startswith("bootout ") and call.endswith(f"/{old.stem}")
+                            for call in self.calls("launchctl")))
+        backups = list((home / ".local/state/district/retired-agents").glob(f"*/{old.name}"))
+        self.assertEqual(len(backups), 1)
+
+    def test_apply_refuses_busy_foreign_agent_without_unloading_or_killing(self) -> None:
+        home, _, old = self.foreign_launchd()
+        original = old.read_bytes()
+        launchctl = self.bin / "launchctl"
+        launchctl.write_text(launchctl.read_text().replace(
+            'print("state = exited")',
+            f'print("state = running" if label == "{old.stem}" else "state = exited")',
+        ))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn(old.stem, out)
+        self.assertIn("busy", out.lower())
+        self.assertEqual(old.read_bytes(), original)
+        self.assertFalse((home / f"{old.stem}.unloaded").exists())
+        self.assertFalse((home / "Library/LaunchAgents/factory-widgets.plist").exists())
+        self.assertFalse(any(call.startswith(("bootout ", "kill "))
+                             for call in self.calls("launchctl")))
+        self.assertFalse((home / ".local/state/district/retired-agents").exists())
+        self.assertNotIn("install", self.calls("factory"))
+
+    def test_apply_retires_foreign_systemd_unit_before_install(self) -> None:
+        repo = self.register()
+        directory = host.unit_dir()
+        directory.mkdir(parents=True)
+        foreign = "factory-legacy-widgets"
+        old_files = {
+            f"{foreign}.service": (
+                f"[Service]\nWorkingDirectory={repo}\n"
+                f"ExecStart={host.factory_tool_paths()[1]} dispatch\n"
+            ),
+            f"{foreign}.timer": "[Timer]\nOnUnitActiveSec=10min\n",
+        }
+        for name, body in old_files.items():
+            (directory / name).write_text(body)
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            'args = " ".join(sys.argv[1:])\n',
+            'args = " ".join(sys.argv[1:])\n'
+            'if args == "install":\n'
+            '    units = pathlib.Path(os.environ["XDG_CONFIG_HOME"]) / "systemd/user"\n'
+            '    units.mkdir(parents=True, exist_ok=True)\n'
+            '    unit = f"factory-{pathlib.Path.cwd().name}"\n'
+            '    (units / f"{unit}.service").write_text('
+            'f"[Service]\\nWorkingDirectory={pathlib.Path.cwd()}\\n'
+            'Environment=PATH={os.environ[\'PATH\']}\\nExecStart=factory dispatch\\n")\n'
+            '    (units / f"{unit}.timer").write_text("[Timer]\\nOnUnitActiveSec=10min\\n")\n'
+            '    with (here / "order.log").open("a") as stream: stream.write("install\\n")\n',
+            1,
+        ))
+        systemctl = self.bin / "systemctl"
+        systemctl.write_text(systemctl.read_text().replace(
+            'argv = sys.argv[1:]\n',
+            'argv = sys.argv[1:]\n'
+            'if len(argv) > 2 and argv[0] == "--user" and argv[1] in ("disable", "stop"):\n'
+            '    with (here / "order.log").open("a") as stream:\n'
+            '        stream.write(" ".join(argv[1:]) + "\\n")\n',
+            1,
+        ))
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        events = (self.bin / "order.log").read_text().splitlines()
+        retirement = f"disable --now {foreign}.timer"
+        self.assertIn(retirement, events)
+        self.assertLess(events.index(retirement), events.index("install"))
+        backups = list(Path.home().glob(
+            ".local/state/district/retired-agents/*/factory-legacy-widgets.*"))
+        self.assertEqual(
+            {path.name: path.read_text() for path in backups},
+            old_files,
+        )
+        self.assertTrue(all(not (directory / name).exists() for name in old_files))
+        self.assertTrue((directory / "factory-widgets.service").exists())
+        self.assertTrue((directory / "factory-widgets.timer").exists())
+        self.assertIn("local", out)
+        self.assertIn(foreign, out)
+        self.assertIn("factory-widgets", out)
+
     def test_concurrent_apply_exits_before_running_commands(self) -> None:
         import fcntl
 
@@ -2673,6 +2865,66 @@ class DoctorTest(DistrictCase):
         )
         self.stub("loginctl", ("show-user * -p Linger --value", linger))
         self.stub("ss", ("-ltnp sport = :*", ss))
+
+    def systemd_scheduler(self, label: str, root: Path) -> None:
+        directory = host.unit_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{label}.service").write_text(
+            f"[Service]\nWorkingDirectory={root}\nExecStart=factory dispatch\n")
+        (directory / f"{label}.timer").write_text("[Timer]\nOnUnitActiveSec=10min\n")
+
+    def loaded_scheduler_tools(self) -> None:
+        self.doctor_tools()
+        self.stub(
+            "systemctl",
+            ("is-system-running", "running\n"),
+            ("show *.service --property=LoadState --value --no-pager", "loaded\n"),
+            ("show *.timer --property=LoadState --value --no-pager", "loaded\n"),
+            ("show *.service --property=ActiveState --value --no-pager", "inactive\n"),
+            ("show *.timer --property=ActiveState --value --no-pager", "active\n"),
+            ("show * --property=UnitFileState --value --no-pager", "enabled\n"),
+            ("show * --property=MainPID --value --no-pager", "0\n"),
+            ("show -p LoadState --value *", "not-found\n"),
+            ("show -p MainPID --value *", "0\n"),
+            ("is-active *", "inactive\n", 3),
+        )
+
+    def test_doctor_fails_when_two_agents_serve_one_repo(self) -> None:
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        self.systemd_scheduler("factory-widgets", repo)
+        self.systemd_scheduler("factory-old-widgets", repo)
+        self.loaded_scheduler_tools()
+
+        with mock.patch("district.doctor.shutil.which",
+                        side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
+            code, out = self.district("doctor", "--json")
+
+        rows = json.loads(out)["rows"]
+        conflict = next(row for row in rows
+                        if row["label"] == "host local repo acme/widgets scheduler conflict")
+        self.assertEqual(code, 1, rows)
+        self.assertEqual(conflict["status"], "FAIL")
+        self.assertIn(str(repo.resolve()), conflict["detail"])
+        self.assertIn("factory-widgets", conflict["detail"])
+        self.assertIn("factory-old-widgets", conflict["detail"])
+
+    def test_doctor_warns_about_unmanaged_foreign_agent(self) -> None:
+        orphan = self.repo("orphan", toml="")
+        host.save({})
+        self.systemd_scheduler("factory-orphan", orphan)
+        self.loaded_scheduler_tools()
+
+        with mock.patch("district.doctor.shutil.which",
+                        side_effect=lambda name: f"/bin/{name}" if name == "factory" else None):
+            code, out = self.district("doctor", "--json")
+
+        rows = json.loads(out)["rows"]
+        warning = next(row for row in rows
+                       if row["label"] == f"host local root {orphan.resolve()} foreign scheduler")
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(warning["status"], "WARN")
+        self.assertIn("factory-orphan", warning["detail"])
 
     def macos_tools(self) -> None:
         self.stub("xcodebuild", ("-version", "Xcode 27.1\nBuild version 18B77\n"))

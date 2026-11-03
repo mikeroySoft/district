@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from district import drain as drain_flag
-from district import host, install_state, postcheck, preflight, systemd
+from district import host, install_state, postcheck, preflight, retired_agents, systemd
 from district.engine_cleanup import cleanup
 from district.host import DistrictError, run
 from district.service import remaining_timeout
@@ -1200,6 +1200,15 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     run_cmd, backend = context or _host_context(data, host_name)
     install_env = preflight.install_environment(run_cmd)
     previous = installed_engine_commit(data, host_name)
+    try:
+        agents = retired_agents.scan(backend, run_cmd)
+        adoptions = {
+            slug: retired_agents.foreign(
+                agents, retired_agents.canonical_root(table["path"], run_cmd), host.unit_name(slug))
+            for slug, table in targets.items()
+        }
+    except (OSError, ValueError) as exc:
+        raise DistrictError(f"host {host_name}: cannot inspect scheduler agents: {exc}") from exc
 
     rows = []
     completed = {}
@@ -1237,6 +1246,14 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     rendered = {}
     changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env, errors=render_errors,
                          rendered=rendered, include_disabled=bool(args.reset))
+    for slug, agents in adoptions.items():
+        if agents and (not targets[slug].get("disabled_at") or args.reset):
+            changes[slug] = True
+            if any(agent["busy"] for agent in agents):
+                labels = ", ".join(agent["label"] for agent in agents)
+                render_errors.setdefault(slug, []).append(
+                    f"host {host_name}: {labels} -> {host.unit_name(slug)}: busy: pass in flight; "
+                    "refusing to kill it; retry when idle")
     for slug, table in targets.items():
         if (engine_result == "failed" or slug in render_errors or host_name in record.drains
                 or (table.get("disabled_at") and not args.reset)):
@@ -1249,7 +1266,8 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                 render_errors.setdefault(slug, []).append(f"{item['label']}: {item['detail']}")
             elif item["status"] == "WARN":
                 print(f"WARN {item['label']}: {item['detail']}")
-        if args.reset and slug not in render_errors and not reset(slug, table, data, record, backend=backend):
+        if (args.reset and not adoptions[slug] and slug not in render_errors
+                and not reset(slug, table, data, record, backend=backend)):
             code = 1
     _, factory_cli = host.factory_tool_paths(run_cmd)
     for slug, table in targets.items():
@@ -1261,7 +1279,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd,
                             draining=host_name in record.drains)
             row["fail"].extend(render_errors[slug])
-        elif table.get("disabled_at"):
+        elif table.get("disabled_at") and not (args.reset and adoptions[slug]):
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd,
                             draining=host_name in record.drains)
         elif host_name in record.drains:
@@ -1295,24 +1313,34 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                     record.defer(slug, reason)
                     rows.append(deferred_row(slug, table, reason, backend))
                     continue
-                try:
-                    proc = run_cmd(
-                        [str(factory_cli), "install"],
-                        cwd=Path(table["path"]),
-                        timeout=DRAIN_TIMEOUT if active_timers else None,
-                        **({"env": install_env} if install_env is not None else {}),
-                    )
-                except subprocess.TimeoutExpired:
-                    install_error = f"install: timed out after {DRAIN_TIMEOUT}s"
-                else:
-                    if proc.returncode:
-                        tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
-                        install_error = f"install: {tail[0]}"
+                with retired_agents.takeover(adoptions[slug], backend, run_cmd,
+                                             host.unit_name(slug), host_name):
+                    if args.reset and adoptions[slug]:
+                        if not reset(slug, table, data, record, backend=backend):
+                            raise OSError("reset pass failed")
+                    try:
+                        proc = run_cmd(
+                            [str(factory_cli), "install"],
+                            cwd=Path(table["path"]),
+                            timeout=DRAIN_TIMEOUT if active_timers else None,
+                            **({"env": install_env} if install_env is not None else {}),
+                        )
+                    except subprocess.TimeoutExpired:
+                        install_error = f"install: timed out after {DRAIN_TIMEOUT}s"
+                    else:
+                        if proc.returncode:
+                            tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:] or ["?"]
+                            install_error = f"install: {tail[0]}"
+                    if install_error and adoptions[slug]:
+                        raise OSError(install_error)
+            except OSError as exc:
+                install_error = str(exc)
             finally:
-                restore(active_timers, all_repos, record, backend=backend)
-                if timer_state == "inactive" and backend.is_active(timer) == "active":
-                    backend.stop(timer, timeout=DRAIN_TIMEOUT)
-                    record.stopped.add(timer)
+                if not (install_error and adoptions[slug]):
+                    restore(active_timers, all_repos, record, backend=backend)
+                    if timer_state == "inactive" and backend.is_active(timer) == "active":
+                        backend.stop(timer, timeout=DRAIN_TIMEOUT)
+                        record.stopped.add(timer)
             row = repo_pass(slug, table, data, record, backend=backend, run_cmd=run_cmd)
             if install_error:
                 row["fail"].insert(0, install_error)
@@ -1517,6 +1545,40 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         return code
 
 
+def _dry_run(args: argparse.Namespace) -> int:
+    data = host.load()
+    host.hosts(data)
+    groups = {}
+    for slug, table in host.select(data, args.reset or args.slug).items():
+        for name in host.repo_hosts(table, slug):
+            groups.setdefault(name, {})[slug] = table
+    code = 0
+    for name, targets in groups.items():
+        try:
+            runner, backend = _host_context(data, name, sync=False)
+            agents = retired_agents.scan(backend, runner)
+            for slug, table in targets.items():
+                expected = host.unit_name(slug)
+                root = retired_agents.canonical_root(table["path"], runner)
+                for agent in retired_agents.foreign(agents, root, expected):
+                    state = "loaded" if agent["loaded"] else "not loaded"
+                    print(f"host {name}: foreign agent {agent['label']} ({state}): "
+                          f"{', '.join(agent['files'])}")
+                    if not table.get("disabled_at") or args.reset:
+                        action = ("refuse while pass in flight" if agent["busy"] else
+                                  "back up to ~/.local/state/district/retired-agents/<UTC>/, "
+                                  "unload/disable, remove originals")
+                        print(f"host {name}: would {action} before installing {expected}")
+                if table.get("disabled_at") and not args.reset:
+                    print(f"host {name}: {slug} stays disabled; no agents changed")
+                else:
+                    print(f"host {name}: would reconcile/install {expected}")
+        except (OSError, ValueError, host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
+            print(f"host {name}: scheduler plan failed: {exc}")
+            code = 1
+    return code
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district apply", description=__doc__.split("\n", 1)[0])
     parser.add_argument("slug", nargs="?", help="one repo (owner/name or basename); default all")
@@ -1525,6 +1587,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--allow-downgrade", action="store_true",
                         help="allow a target that is an ancestor of the installed engine")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
+    parser.add_argument("--dry-run", action="store_true", help="list scheduler adoption without changing host state")
     parser.add_argument("--drain", action="store_true", help="request Factory skip new timer passes, then wait for idle")
     parser.add_argument("--drain-timeout", default="6h", metavar="DURATION",
                         help="maximum drain wait (default 6h, maximum 465min)")
@@ -1532,6 +1595,8 @@ def main(argv: list[str]) -> int:
     args.drain_timeout = hours(args.drain_timeout, "--drain-timeout") * 3600
     if args.drain_timeout > drain_flag.DRAIN_MAX_TTL - 900:
         parser.error("--drain-timeout must be at most 465min (8h flag cap minus 15min install margin)")
+    if args.dry_run:
+        return _dry_run(args)
     record = install_state.ApplyRun.start()
     code = 1
     try:

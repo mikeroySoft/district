@@ -201,6 +201,12 @@ checks are FAIL; version-probe failures are WARN.
 `~/Library/LaunchAgents/<label>.plist` for macOS. Launchd jobs add
 `/opt/homebrew/bin` to the service PATH and write stdout/stderr under the
 factory's `.factory/logs/` directory. `local` is reserved for this machine.
+
+Before installing a scheduler, `district apply --dry-run` lists foreign Factory
+dispatch/pass jobs for the same checkout without changing them. A real apply
+refuses to retire a busy job, saves its files and loaded/enabled state in a
+timestamped backup, and retires it before installing the District-named job. If
+installation fails, District rolls the retired jobs back from that backup.
 District-rendered systemd executable/argument, working-directory and environment
 values preserve spaces, quotes and backslashes; literal `%` and ExecStart `$`
 are escaped rather than expanded by the manager. Factory render validation and
