@@ -11,7 +11,7 @@ from pathlib import Path
 from xml.parsers.expat import ExpatError
 
 from district import host, systemd
-from district.service import LaunchdBackend, _definition_bytes
+from district.service import LaunchdBackend, SystemdUserBackend, _definition_bytes
 
 
 def canonical_root(path: str, run_cmd) -> str:
@@ -135,7 +135,12 @@ def _definitions(backend, run_cmd):
                 yield {"label": doc.get("Label", name[:-6]), "root": root,
                        "files": [str(backend.agent_dir / name)], "timer": None}
         return
-    directory = backend.unit_dir
+    if isinstance(backend, SystemdUserBackend):
+        directory = backend.unit_dir
+    else:
+        # Older backend adapters expose status/operations but not a directory attribute.
+        directory = (run_cmd.path(Path(run_cmd.facts()["config_home"]) / "systemd/user")
+                     if isinstance(run_cmd, host.RemoteRunner) else host.unit_dir())
     bodies = _definition_bytes(directory, "*.service")
     bodies.update(_definition_bytes(directory, "*.timer"))
     schedulers = {}
