@@ -494,6 +494,22 @@ class HostTest(DistrictCase):
         })
         self.assertEqual(host.remote_config(data, "benito"), {"defaults": defaults})
 
+    def test_sync_remote_config_backs_up_config_without_factory_source(self) -> None:
+        home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        config = home / ".config/factory/config.toml"
+        config.parent.mkdir(parents=True)
+        original = b'# hand config\r\n[repo."acme/hand"]\r\npath = "/srv/hand"\r\n'
+        config.write_bytes(original)
+        data = {"hosts": {"ultron": {"ssh": "factory@ultron.example"}},
+                "defaults": {"triage": {"model": "managed"}}}
+
+        host.sync_remote_config(data, "ultron", host.remote_runner("ultron", data["hosts"]["ultron"]))
+
+        backups = list(config.parent.glob("config.toml.*.bak"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+        self.assertEqual(config.read_bytes(), host.tomli_w.dumps(host.remote_config(data, "ultron")).encode())
+
 
     def test_multi_host_repo_requires_one_listed_triage_host(self) -> None:
         ultron = {"ssh": "factory@ultron.example", "platform": "macos"}
