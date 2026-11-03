@@ -24,6 +24,8 @@ from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
+
 from district import drain as drain_flag
 from district import host, install_state, postcheck, preflight, systemd
 from district.engine_cleanup import cleanup
@@ -262,19 +264,20 @@ def _verify_engine(sha: str | None, tool: Path, cli: Path, run_cmd, *,
     if not _tool_cli(tool, cli, run_cmd, timeout=remaining_timeout(deadline)):
         raise OSError(f"{cli} does not resolve into {tool}")
     distribution_version = _engine_version(tool, run_cmd, timeout=remaining_timeout(deadline))
-    if expected_version and distribution_version != expected_version:
-        raise OSError(f"Factory distribution version {distribution_version} != {expected_version}")
-    expected_version = distribution_version
-    proc = run_cmd([str(cli), "--version"], timeout=remaining_timeout(deadline))
-    if proc.returncode:
-        raise OSError(f"{cli} --version exited {proc.returncode}")
-    version = re.fullmatch(
-        r"(?:factory\s+)?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?: \([0-9a-f]+\))?\n?",
-        proc.stdout)
-    if (proc.stderr.strip() or version is None or "dirty" in proc.stdout.lower()
-            or version[1] != expected_version):
-        raise OSError(f"{cli} --version expected {expected_version or 'a clean version'}; "
-                      f"got {proc.stdout.strip()!r} {proc.stderr.strip()!r}")
+    try:
+        expected = Version(distribution_version)
+        if expected_version and expected != Version(expected_version):
+            raise OSError(f"Factory distribution version {distribution_version} != {expected_version}")
+        proc = run_cmd([str(cli), "--version"], timeout=remaining_timeout(deadline))
+        if proc.returncode:
+            raise OSError(f"{cli} --version exited {proc.returncode}")
+        version = re.fullmatch(r"(?:factory\s+)?(\S+)(?: \([0-9a-f]+\))?\n?", proc.stdout)
+        if (proc.stderr.strip() or version is None or "dirty" in proc.stdout.lower()
+                or Version(version[1]) != expected):
+            raise OSError(f"{cli} --version expected {distribution_version}; "
+                          f"got {proc.stdout.strip()!r} {proc.stderr.strip()!r}")
+    except InvalidVersion as exc:
+        raise OSError(f"{cli}: invalid Factory version: {exc}") from exc
 
 
 def _engine_current(sha: str, tool: Path, cli: Path, runner, *, ref: str = "") -> bool:
@@ -1186,7 +1189,7 @@ def smoke(slugs, backend=None, *, run_cmd=None) -> tuple[int, list[str]]:
 
 
 def _write_paused_units(slug: str, output: str, backend, runner) -> None:
-    """Install printed systemd definitions without enable/start or Factory's one-shot launch."""
+    """Install and enable printed systemd definitions without starting any unit."""
     config = backend.configuration()
     directory = Path(config["unit_dir"])
     unit = host.unit_name(slug)
@@ -1208,6 +1211,10 @@ def _write_paused_units(slug: str, output: str, backend, runner) -> None:
         _progress(f"wrote {path} (timers paused)")
     runner([config.get("executable", "systemctl"), "--user", "daemon-reload"],
            check=True, timeout=SMOKE_TIMEOUT)
+    for filename, body in wanted.items():
+        if re.search(r"(?m)^\[Install\]\s*$", body):
+            backend.enable(filename, now=False, timeout=SMOKE_TIMEOUT)
+            _progress(f"enabled {filename} without starting it (timers paused)")
 
 
 def _host_context(data: dict, host_name: str, *, sync: bool = True):

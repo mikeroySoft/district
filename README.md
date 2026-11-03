@@ -279,14 +279,17 @@ configurable; expiry aborts replacement and proceeds directly to timer restorati
 
 While those timers are paused, District never stops, kills, or starts a service.
 Linux unit reconciliation uses `factory install --print`; District writes the
-rendered definitions and runs `daemon-reload` without launching services.
+rendered definitions, runs `daemon-reload`, and enables units with an `[Install]`
+section without `--now`. New timers are enabled for future scheduling but remain
+inactive; only timers recorded as active are restarted.
 Launchd drift is deferred rather than bootstrapping jobs during the pause.
 Applies with no engine replacement keep their existing install and failure-cap
 behavior.
 
 After installation, District verifies the resolved SHA in the uv receipt and
 matches clean `factory --version` output against the installed distribution's
-metadata (and the requested version for release tags). Verification also checks
+metadata (and the requested version for release tags), using PEP 440 normalization
+(for example, `v0.5.1-rc.1` matches `0.5.1rc1`). Verification also checks
 that the CLI resolves into the canonical tool. A failure reinstalls and verifies the
 previous engine revision. Success, failure, rollback, timeout, SIGTERM, and SIGINT
 all restore exactly the timers recorded as active; timers initially inactive are
