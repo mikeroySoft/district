@@ -39,7 +39,7 @@ only once.
 | Command | What one invocation does |
 |---|---|
 | `district add <path\|url>` | Onboard a repo, or adopt one that already has `.factory.toml`. `--dry-run` prints the proposal (slug, clone path, fork parent, port, gate checks); `--host NAME`, `--check NAME=CMD`, `--exclusive a,b`, `--no-edit`. |
-| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: the host's one Factory uv tool, units, labels, `factory doctor`, failure cap, package-age policy, and safe legacy-engine cleanup. Remote commands and config writes use bounded BatchMode SSH. A busy host normally defers a changed engine without touching timers or running passes. `--drain` asks compatible timer-started passes not to begin, waits up to `--drain-timeout` (default 6h) for active non-dashboard Factory services, then installs and post-checks only the CI-green engine path; generated-unit drift and failure-cap actions are deferred so no Factory timer is touched. `--upgrade [REF]` requests an explicit target; `--allow-downgrade` permits an ancestor. `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
+| `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: the host's one Factory uv tool, units, labels, `factory doctor`, failure cap, package-age policy, and safe legacy-engine cleanup. Remote commands and config writes use bounded BatchMode SSH. Every engine replacement pauses only the Factory timers that were active, waits up to `--drain-timeout` (default 90min) for existing services to finish, installs and verifies the target, rolls back on failure, and restores the exact prior timer state on every exit. It never stops, kills, or starts a service while timers are paused. `--drain` remains accepted but is not required for this safe protocol. `--upgrade [REF]` requests an explicit target; `--allow-downgrade` permits an ancestor. `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district drain --clear [--host NAME]` | Remove a local or remote host's drain flag while holding the operation lock. Use this for explicit operator recovery; expired flags already stop blocking Factory. |
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations table across local and remote hosts. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. An unreachable host keeps its factories visible as unreachable with the last successful observation time and produces unknown exit 2, not fleet failure exit 1. Exit 1 remains operational attention or a failed controller `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row); exit 0 means every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
@@ -54,18 +54,18 @@ only once.
 Before stating an install version or timer state, run `district install-state --json`
 and quote its `observed_at`. Every `district apply`, successful or failed, atomically
 rewrites `${XDG_STATE_HOME:-~/.local/state}/district/install-state.json`.
-Outside an engine drain, text warnings identify timers changed by ordinary unit
-reconciliation or a successful `--reset`; unrelated timer activations are excluded.
-`last_apply.stopped` lists corrective stops when an ordinary `factory install`
-starts an operator-stopped timer.
+Outside an engine-replacement window, text warnings identify timers changed by
+ordinary unit reconciliation or a successful `--reset`; unrelated timer
+activations are excluded. `last_apply.stopped` lists corrective stops when an
+ordinary `factory install` starts an operator-stopped timer.
 
-Outside an engine drain, repo unit reconciliation preserves an existing timer's
-pre-install active/inactive state: active timers are restored and inactive timers
-are stopped again without disabling them if `factory install` starts them. During
-an engine drain District never calls `factory install` and never applies the
-failure cap. Generated-unit drift is recorded as
-`unit changes deferred during district drain (timers untouched)` for a later
-ordinary apply; an operator-stopped timer therefore remains stopped.
+Ordinary non-engine reconciliation preserves an existing timer's pre-install
+active/inactive state: active timers are restored and inactive timers are stopped
+again without disabling them if `factory install` starts them. During engine
+replacement, District renders with `factory install --print` and writes/reloads
+Linux units without launching services. Launchd definition drift is deferred:
+bootstrapping changed jobs would launch work. Failure caps retain their ordinary
+non-engine behavior outside that paused window.
 
 An inactive but enabled factory timer is reported as `timer paused` and does not
 by itself fail apply, including `--upgrade REF --allow-downgrade`. Timers recorded
@@ -174,11 +174,12 @@ without values; `add --dry-run --host NAME` and `apply --dry-run` preview the
 projected config (including adopted settings and apply's current package-age
 policy) without writing.
 
-Before `district add` finishes onboarding or `district apply` installs scheduler
-jobs or resets a capped factory, District renders `factory install --print` on
-the owning host. No-op and draining applies do not rerun tool probes. It takes
-PATH from the rendered systemd service or launchd plist, and HOME from that
-environment (or the owning user's home when omitted). Resolution runs under
+Before `district add` finishes onboarding or an ordinary `district apply` installs
+scheduler jobs or resets a capped factory, District renders
+`factory install --print` on the owning host. Engine replacement uses the same
+print-only rendering while timers are paused. No-op applies do not rerun tool
+probes. Rendering takes PATH from the systemd service or launchd plist, and HOME
+from that environment (or the owning user's home when omitted). Resolution runs
 `env -i` with only those PATH/HOME values; remote checks use `RemoteRunner`, not
 the controller's shell environment. Remote `add --host` preflights registration;
 `district apply <slug>` installs its jobs.
@@ -238,8 +239,8 @@ Set optional `factory_ref` under `[defaults]` to reconcile Factory automatically
 `factory_repo` defaults to `https://github.com/mikeroySoft/factory`; no checkout
 is required. The chosen SHA (`target`), `target_ref`, and `resolved_at` are
 recorded beside the installed `sha` in `[defaults.engine]` locally.
-A resolved target alone does not establish installed identity; a deferred first
-upgrade reports missing installed SHA/ref as `unknown`.
+A resolved target alone does not establish installed identity; before the first
+successful upgrade, a missing installed SHA/ref is reported as `unknown`.
 `latest-odd` selects the highest odd-patch semver tag, including prereleases;
 a tag or branch such as `"v0.4.7"` or `"main"` selects that remote ref. A
 selected tag commit must itself be green. For a branch, District walks up to 50
@@ -253,8 +254,6 @@ host without retrying setup or installing; other selected hosts continue.
 Only confirmed absence permits creating a remote config without a backup.
 Any other config-read error fails the named host/path before a write; successfully
 read malformed or legacy TOML is backed up byte-for-byte before projection.
-Nonzero dashboard restarts also fail the engine step without aborting repository
-checks; the pending restart remains saved for the next apply.
 
 Every apply checks that the CLI exists, resolves into the canonical tool, and
 has a valid uv receipt before rendering, even without `factory_ref`. Missing
@@ -268,88 +267,38 @@ reinstall; malformed definitions fail the repo row by plist name without replace
 
 Every host has exactly one Factory installation: the `factory` uv tool, with no
 version in its path. Every managed unit and launchd job uses that tool's Python,
-and District invokes its CLI to render units. A changed engine is replaced only
-after the owning host is confirmed idle. Ordinary apply defers active, activating,
-or deactivating non-dashboard Factory services without touching timers.
-Once already idle, it retains the bounded timer-pause/recheck/restore window
-that prevents a timer from starting work during replacement. Flag-based drains
-never enter that timer window.
+and District invokes its CLI to render units.
 
-`district apply --drain` creates
-`${XDG_STATE_HOME:-$HOME/.local/state}/district/drain` only on hosts with pending
-engine work. Healthy, already-current hosts do not request a flag, wait for idle,
-or run drained post-apply checks; they continue ordinary unit reconciliation.
-The UTF-8 JSON flag is written atomically and carries schema version 1,
-requester, reason, PID, creation time, and expiry. Compatible timer-started
-Factory passes see the flag and skip before starting work. Already-running passes
-are never stopped, killed, disabled, masked, or delayed. District waits for active
-non-dashboard Factory services to finish, re-checks idle before replacement,
-installs, migrates, cleans up, and runs post-apply checks. The default wait is 6 hours;
-`--drain-timeout` accepts at most `465min` (7h45m), reserving 15 minutes for installation.
-While that flag exists, District does not call `factory install` and does not
-apply the failure cap, because Factory exposes no install-without-start option.
-Generated-unit drift is reported as
-`unit changes deferred during district drain (timers untouched)` and converges
-on a later ordinary apply. Repository probes may still run, but cannot change
-timer state; an operator-stopped timer stays stopped.
-The flag expires after the selected timeout plus 15 minutes, with an absolute
-8-hour TTL cap, and cleanup removes it on success, rollback, failure, timeout,
-SIGTERM, or SIGINT. `district drain --clear` removes the local flag;
-`--host NAME` clears one registered remote host. `district doctor` warns about
-active, expired, stale, malformed, future-mtime, or unreadable flags.
+Every engine replacement, whether selected by `factory_ref`, `--upgrade`, or the
+accepted explicit `--drain` form, follows the same bounded protocol. District
+records the initial timer state, stops only Factory timers that were active, and
+waits up to `--drain-timeout` (default 90 minutes) for existing Factory services
+to finish. It logs progress while waiting. The deadline is
+configurable; expiry aborts replacement and proceeds directly to timer restoration.
+`--drain` is no longer required to make an engine replacement safe.
 
-Drain admission requires Factory's companion
-[`drain-check` support (factory#563)](https://github.com/mikeroySoft/factory/issues/563)
-and updated pass units. Check `factory drain-check --help`, then roll out the
-rendered `ExecCondition=` (or launchd script gate) through an ordinary apply
-before relying on drains. Older pass units ignore the flag; District still
-checks running work and times out rather than swapping a busy engine.
+While those timers are paused, District never stops, kills, or starts a service.
+Linux unit reconciliation uses `factory install --print`; District writes the
+rendered definitions and runs `daemon-reload` without launching services.
+Launchd drift is deferred rather than bootstrapping jobs during the pause.
+Applies with no engine replacement keep their existing install and failure-cap
+behavior.
 
-Before clearing a successful drain, District probes Factory help, version,
-tool-Python import and receipt, verifies the target revision or a descendant,
-checks registered dashboards for HTTP 200, and restarts the installed District
-dashboard before checking HTTP 200. It also validates the previous engine in
-temporary `UV_TOOL_DIR`/`UV_TOOL_BIN_DIR` directories without touching the live
-install. `factory watch --dry-run` runs from a registered repository checkout,
-never the invoking directory; no available checkout is an explicit check failure.
-
-The hourly apply automatically drains an engine change after 3 prior
-deferrals or once the original deferral is more than 24 hours old. Earlier
-attempts remain plain deferrals. A successful `district update` invokes
-`district apply --drain` only after the self-update transaction releases its lock;
-an already-current District still drains a pending engine update. Dry runs,
-failed updates, and offline rollback do not drain. The apply operation lock
-permits only one drain, while metrics uses its independent lock and remains
-available during a long wait. Install-state schema 3 records local `last_apply.drain`
-and per-host `last_apply.drains`: `requested_at`, `idle_at`, `applied_at`,
-`cleared_at`, `waited_s`, and legacy folder counts before/after cleanup.
-
-Engine busy checks use the owning host's service manager, not process cwd or argv.
-On Linux, active, activating, or deactivating `factory-*.service` units block an
-engine change, including discovered auxiliary and unregistered workers. On macOS,
-the service backend checks the corresponding Factory launchd jobs.
-Registered main units take precedence over dashboard-looking names.
-Registered long-running dashboard services do not block: apply restarts loaded
-dashboards after the verified engine swap. Non-Factory services and processes,
-including sshd and `handland-*`, never count as Factory work. A hand-run command
-outside a Factory service is not tracked by this check.
-
-The same service-state guard covers ordinary upgrades, drains, fleet preflight,
-per-host replacement, and rollback. Fleet preflight covers every changed host
-before any install, and every host is re-checked before replacement.
-New active Factory services or an expired deadline prevent replacement.
-Every service probe uses the remaining shared idle budget, so multiple slow
-unit queries cannot each consume a fresh timeout.
-
-An authorized replacement persists `engine.install_pending` (target, previous
-revision when known, and ref) before invoking uv. A failed install or
-verification reinstalls and verifies the previous revision only after the same
-idle guards pass. Saved install and pending dashboard intents are recovered
-before resolving a fresh target. Only a verified install or rollback clears
-the marker; a blocked rollback retains it for the next apply. Only loaded,
-registered dashboards restart after a verified change. Roles come from the
-registry, not a `-dashboard` suffix, and if both installs fail affected repos
-fail without trying another `factory` on `PATH`.
+After installation, District verifies the resolved SHA in the uv receipt and
+matches clean `factory --version` output against the installed distribution's
+metadata (and the requested version for release tags). Verification also checks
+that the CLI resolves into the canonical tool. A failure reinstalls and verifies the
+previous engine revision. Success, failure, rollback, timeout, SIGTERM, and SIGINT
+all restore exactly the timers recorded as active; timers initially inactive are
+left inactive. It logs progress throughout.
+Progress is printed and sent to syslog with a `district-apply:` prefix, so CLI
+and scheduled upgrades are journaled. `install-state` also records drain timestamps
+and the exit status. Follow with `journalctl --user --grep='district-apply:'`.
+Timeout reports blocking units and available ticket numbers/stages; unavailable
+ticket observations are explicitly `unknown`. Rollback exits nonzero and prints
+`rolled back`. Restoration logs every restarted timer's `ActiveState`.
+`--drain` additionally retains the existing extended postchecks (Factory help,
+isolated import, dashboards, watch dry-run, and a temporary previous-engine probe).
 
 `district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
 when no ref is supplied. It resolves only against the remote repository, never a
@@ -423,8 +372,8 @@ run no multi-host repo never contacts the fleet hosts.
 All factories on one host use that host's single uv tool and target revision;
 per-factory engine pins are unsupported. A multi-host apply requires every
 participating host to resolve the same newest-green target before any install,
-confirms every changed host idle (using host drain flags when requested), and
-rolls moved hosts back if one fails.
+runs the bounded pause-and-drain protocol on every changed host, and rolls moved
+hosts back if one fails.
 `district doctor` and `district status` compare hosts'
 installed engine, `omp` and `droid` versions, and configured worker and review
 models, with one `WARN` row per difference and one `PASS` row when they match.
