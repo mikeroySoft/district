@@ -136,28 +136,29 @@ class DrainFlagTest(unittest.TestCase):
 
     def test_remote_request_and_clear_resolve_remote_xdg_state_and_use_bounded_ssh(self) -> None:
         calls = []
+        remote_state = self.tmp / "remote-state"
+        remote_env = {**os.environ, "XDG_STATE_HOME": str(remote_state)}
 
         def transport(argv, **kwargs):
             calls.append((argv, kwargs))
-            command = argv[-1]
-            output = "/remote/xdg-state/district/drain\n" if "XDG_STATE_HOME" in command else ""
-            return subprocess.CompletedProcess(argv, 0, output, "")
+            return subprocess.run(
+                ["sh", "-c", argv[-1]], capture_output=True, text=True,
+                env=remote_env, input=kwargs.get("input"), timeout=kwargs.get("timeout"),
+                check=False,
+            )
 
         runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
         value = drain.request(runner, timeout=60)
+        target = remote_state / "district/drain"
+        self.assertEqual(json.loads(target.read_text()), value)
+
         drain.clear(runner)
 
-        self.assertEqual(str(drain.path(runner)), "/remote/xdg-state/district/drain")
-        write = next((argv, kw) for argv, kw in calls if kw.get("input"))
-        self.assertEqual(json.loads(write[1]["input"]), value)
-        self.assertIn("os.replace", write[0][-1])
-        unlink = next((argv, kw) for argv, kw in calls if "unlink" in argv[-1])
-        self.assertIsNotNone(unlink[1].get("timeout"))
+        self.assertFalse(target.exists())
         self.assertTrue(all(argv[0:5] == ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"]
                             and argv[5:8] == ["factory@ultron.example", "--", argv[-1]]
                             for argv, _ in calls))
-        self.assertTrue(all(kwargs.get("timeout") is not None for argv, kwargs in calls
-                            if "XDG_STATE_HOME" in argv[-1] or kwargs.get("input")))
+        self.assertTrue(all(kwargs.get("timeout") is not None for _, kwargs in calls))
 
 
 class DrainSignalTest(unittest.TestCase):

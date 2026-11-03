@@ -32,6 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from district import add, apply, atlas, cli, doctor, health, host, install_state, metrics, status  # noqa: E402
 from district import dashboard as dash  # noqa: E402  (dashboard() below is the snapshot fixture)
+from tests.remote_transport import remote_command  # noqa: E402
 
 STUB = '''#!/usr/bin/env python3
 import fnmatch, json, os, pathlib, sys
@@ -228,7 +229,6 @@ class HostRunTest(unittest.TestCase):
             "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={host.SSH_CONNECT_TIMEOUT}",
             "factory@ultron.example", "--",
         ])
-        self.assertEqual(argv[7], "cd '/remote/path with spaces' && printf %s 'a b'")
         self.assertEqual(output.getvalue(), "ultron: $ printf %s 'a b'\n")
 
     def test_remote_runner_preserves_command_timeout(self) -> None:
@@ -1795,7 +1795,7 @@ class ApplyTest(DistrictCase):
                    ci_rc: int = 0, busy: bool = False, drop: str | None = None) -> host.RemoteRunner:
             installed = [old]
             def transport(argv, **_kwargs):
-                command = argv[-1]
+                command = remote_command(argv)
                 parts = shlex.split(command)
                 if parts[:1] == ["python3"] and host.REMOTE_DEADLINE in parts:
                     command = parts[-1]

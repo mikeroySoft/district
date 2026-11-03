@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from district import apply, host, install_state, service
+from tests.remote_transport import remote_command
 
 OLD = "b" * 40
 TARGET = "a" * 40
@@ -954,7 +955,7 @@ class OneInstallTest(unittest.TestCase):
                         f'[tool]\nrequirements = [{{name="factory", rev="{sha}"}}]\n')
 
                 def transport(argv, **kwargs):
-                    parts = shlex.split(argv[-1])
+                    parts = shlex.split(remote_command(argv))
                     command_cwd = None
                     if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                         parts = shlex.split(parts[-1])
@@ -1283,7 +1284,7 @@ class OneInstallTest(unittest.TestCase):
             self.assertIsNotNone(timeout, argv)
             self.assertGreater(timeout, 0)
             deadlines.append(timeout)
-            parts = shlex.split(argv[-1])
+            parts = shlex.split(remote_command(argv))
             if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                 parts = shlex.split(parts[-1])
             if parts[0] == "fake-resume":
@@ -1414,7 +1415,7 @@ class OneInstallTest(unittest.TestCase):
         receipts = []
 
         def transport(argv, **kwargs):
-            parts = shlex.split(argv[-1])
+            parts = shlex.split(remote_command(argv))
             command_cwd = None
             if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                 parts = shlex.split(parts[-1])
@@ -1583,7 +1584,7 @@ class OneInstallTest(unittest.TestCase):
             transport = runner.transport
 
             def remote_transport(argv, **kwargs):
-                parts = shlex.split(argv[-1])
+                parts = shlex.split(remote_command(argv))
                 if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
                     parts = shlex.split(parts[-1])
                 if parts[0] == "launchctl":
