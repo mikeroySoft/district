@@ -1347,10 +1347,19 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     if current_engine and not args.upgrade and "factory_ref" not in data.get("defaults", {}):
         installed = installed_engine_commit(data, host_name)
         print(f"engine {installed[:7] if installed else 'unknown'} ({current_engine.get('ref', 'unknown')})")
+    paused_timers = (current_engine or {}).get("paused_timers", [])
     for row in rows:
+        if "deferred" not in row and row["timer"] == "inactive":
+            timer = f"{host.unit_name(row['slug'])}.timer"
+            timer_status = backend.status(timer)
+            enabled = timer_status.unit_file_state
+            if timer_status.loaded and (
+                enabled == "enabled" or (enabled == "disabled" and timer in paused_timers)
+            ):
+                row["timer"] = "paused"
         print(line(row, status))
     converged = [row for row in rows if "deferred" not in row]
-    if any(row["fail"] or row["disabled"] or row["timer"] != "active" for row in converged):
+    if any(row["fail"] or row["disabled"] or row["timer"] not in ("active", "paused") for row in converged):
         code = 1
     smoke_result = smoke(completed, backend, run_cmd=run_cmd)
     if smoke_result[1]:

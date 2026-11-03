@@ -67,6 +67,13 @@ failure cap. Generated-unit drift is recorded as
 `unit changes deferred during district drain (timers untouched)` for a later
 ordinary apply; an operator-stopped timer therefore remains stopped.
 
+An inactive but enabled factory timer is reported as `timer paused` and does not
+by itself fail apply, including `--upgrade REF --allow-downgrade`. Timers recorded
+in the owning engine's `paused_timers` are also treated as paused while inactive,
+even when District temporarily disabled them. Missing or failed timers and
+unrecorded disabled timers still fail convergence, as do failed repo checks and
+registry `disabled_at` holds. Deferred rows keep their existing handling.
+
 ## Repeated pass failures
 
 `district status` raises operational attention (exit 1) when a factory's last
