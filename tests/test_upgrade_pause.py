@@ -315,6 +315,80 @@ class UpgradePauseTest(unittest.TestCase):
                 self.assertEqual(case.active, {self.timer})
                 self.assertEqual(case.installs(), [])
 
+    def test_prerelease_upgrade_is_verified_and_stays_current(self):
+        for tag, normalized in (("v0.5.1-rc.1", "0.5.1rc1"),
+                                ("v0.5.1-dev.2", "0.5.1.dev2")):
+            with self.subTest(tag=tag), self.case() as case:
+                def runner(argv, **kwargs):
+                    if argv[:2] == ["git", "ls-remote"]:
+                        case.calls.append((list(argv), kwargs))
+                        return subprocess.CompletedProcess(
+                            argv, 0, f"{fixtures.TARGET}\trefs/tags/{tag}\n", "")
+                    result = case.run_cmd(argv, **kwargs)
+                    if argv[:3] == ["uv", "tool", "install"]:
+                        metadata, = case.tool.glob("lib/python*/site-packages/factory-*.dist-info/METADATA")
+                        metadata.write_text(f"Metadata-Version: 2.4\nName: factory\nVersion: {normalized}\n")
+                    if argv == [str(case.cli), "--version"] and case.installs():
+                        return subprocess.CompletedProcess(argv, 0, f"factory {normalized}\n", "")
+                    return result
+
+                with mock.patch.object(apply, "run", side_effect=runner):
+                    code, _ = self.run_apply(case, upgrade=tag)
+                    self.assertEqual(code, 0, case.output.getvalue())
+                    self.assertTrue(apply._engine_current(
+                        fixtures.TARGET, case.tool, case.cli, runner, ref=tag))
+                    code, _ = self.run_apply(case, upgrade=tag)
+
+                self.assertEqual(code, 0, case.output.getvalue())
+                self.assertEqual(len(case.installs()), 1, case.output.getvalue())
+                self.assertEqual(case.lifecycle, [("pause", self.timer), ("resume", self.timer)])
+                self.assertEqual(host.engine(host.load(), "local")["sha"], fixtures.TARGET)
+
+    def test_paused_render_enables_installable_units_without_activating_them(self):
+        with self.case(changed=True) as case:
+            case.data["repo"]["acme/other"] = {"path": str(case.other_repo)}
+            dormant = "factory-widgets-triage-probe.timer"
+            case.backend.factory_units.return_value = {self.worker, self.timer, dormant}
+            enabled = set()
+            enable_paused = []
+
+            def runner(argv, **kwargs):
+                if argv[:3] == ["fake-systemctl", "--user", "enable"]:
+                    case.calls.append((list(argv), kwargs))
+                    self.assertNotIn("--now", argv)
+                    enable_paused.append(self.timer not in case.active)
+                    enabled.add(argv[-1])
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv == ["fake-systemctl", "--user", "daemon-reload"]:
+                    case.calls.append((list(argv), kwargs))
+                    return subprocess.CompletedProcess(argv, 0, "", "")
+                result = case.run_cmd(argv, **kwargs)
+                if argv == [str(case.cli), "install", "--print"]:
+                    unit = "factory-other" if kwargs.get("cwd") == case.other_repo else "factory-widgets"
+                    for suffix in (".timer", "-eval.timer", "-triage-probe.timer", "-dashboard.service"):
+                        kind = case.rendered(kwargs.get("cwd"))[1] if suffix.endswith(".service") else (
+                            "[Timer]\nOnUnitActiveSec=10min")
+                        result.stdout += f"\n# {unit}{suffix}\n{kind}\n[Install]\nWantedBy=default.target\n"
+                return result
+
+            enabling = service.SystemdUserBackend(
+                runner, executable="fake-systemctl", unit_dir=host.unit_dir())
+            case.backend.enable.side_effect = enabling.enable
+            with mock.patch.object(apply, "run", side_effect=runner):
+                code, _ = self.run_apply(case)
+
+            self.assertEqual(code, 0, case.output.getvalue())
+            self.assertEqual(enabled, {
+                f"factory-{slug}{suffix}" for slug in ("widgets", "other")
+                for suffix in (".timer", "-eval.timer", "-triage-probe.timer", "-dashboard.service")
+            })
+            self.assertTrue(all(enable_paused), "unit enablement escaped the paused window")
+            self.assertEqual(case.active, {self.timer})
+            self.assertEqual(case.lifecycle, [("pause", self.timer), ("resume", self.timer)])
+            case.backend.start.assert_not_called()
+            case.backend.stop.assert_not_called()
+            self.assertFalse(any("--now" in argv or "kill" in argv for argv, _ in case.calls))
+
     def test_commit_target_version_must_match_distribution_metadata(self):
         with self.case() as case:
             def runner(argv, **kwargs):
