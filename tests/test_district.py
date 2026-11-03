@@ -788,6 +788,9 @@ class AddTest(DistrictCase):
         }}})
         transport, remote_home, commands = self.fake_remote_transport()
         runner = host.RemoteRunner("ultron", target, transport=transport)
+        registry_before = host.path().read_bytes()
+        remote_before = {str(p.relative_to(remote_home)): p.read_bytes()
+                         for p in remote_home.rglob("*") if p.is_file()}
 
         with mock.patch.object(host, "remote_runner", return_value=runner):
             code, out = self.district(
@@ -803,6 +806,60 @@ class AddTest(DistrictCase):
         self.assertFalse((remote_home / "factories").exists())
         self.assertFalse((remote_home / ".config").exists())
         self.assertFalse(any(command.startswith("gh repo clone ") for command in commands))
+        self.assertEqual(host.path().read_bytes(), registry_before)
+        self.assertEqual({str(p.relative_to(remote_home)): p.read_bytes()
+                          for p in remote_home.rglob("*") if p.is_file()}, remote_before)
+        self.assertFalse((Path(os.environ["HOME"]) / "dev").exists())
+
+    def test_add_remote_url_uses_remote_clone_parent_and_detects_fork(self) -> None:
+        target = "factory@ultron.example"
+        transport, remote_home, commands = self.fake_remote_transport()
+        # Retain the cloning stub while making fork detection return a parent.
+        cases = self.bin / "gh.json"
+        cases.write_text(json.dumps([["repo view *", json.dumps({
+            "isFork": True, "parent": {"nameWithOwner": "upstream/widgets"},
+        }), 0]]))
+        runner = host.RemoteRunner("ultron", target, transport=transport)
+        for index, (root, clone_dir, parent) in enumerate((
+            ("~/factories", "~/ignored", "factories"),
+            (None, "~/clones", "clones"),
+            (None, "relative/clones", "relative/clones"),
+        )):
+            with self.subTest(root=root, clone_dir=clone_dir):
+                table = {"ssh": target, "platform": "macos"}
+                if root is not None:
+                    table["root"] = root
+                host.save({"hosts": {"ultron": table}, "defaults": {"clone_dir": clone_dir}})
+                slug = f"acme/widgets{index}"
+                url = f"https://github.com/{slug}.git"
+                destination = f"/Users/mike/{parent}/widgets{index}"
+                with mock.patch.object(host, "remote_runner", return_value=runner):
+                    code, out = self.district("add", url, "--host", "ultron", "--no-edit")
+                self.assertEqual(code, 0, out)
+                self.assertIn(f"gh repo clone {url} {destination}", commands)
+                self.assertEqual(host.load()["repo"][slug]["path"], destination)
+                checkout = remote_home / parent / f"widgets{index}"
+                config = tomllib.loads((checkout / ".factory.toml").read_text())
+                self.assertEqual(config["repo"]["upstream"], "upstream")
+                self.assertEqual(config["gate"]["check"][0]["run"], ["pytest"])
+                upstream = subprocess.run(
+                    ["git", "-C", str(checkout), "remote", "get-url", "upstream"],
+                    check=True, capture_output=True, text=True,
+                )
+                self.assertEqual(upstream.stdout.strip(), "https://github.com/upstream/widgets.git")
+                self.assertFalse((Path(os.environ["HOME"]) / parent).exists())
+        self.assertNotIn("install", self.calls("factory"))
+
+    def test_add_remote_missing_checkout_names_host_and_path(self) -> None:
+        target = "factory@ultron.example"
+        host.save({"hosts": {"ultron": {"ssh": target, "platform": "macos"}}})
+        remote_home = self.fake_ssh(target)[target]
+        missing = remote_home / "missing"
+        code, out = self.district("add", str(missing), "--host", "ultron", "--no-edit")
+        self.assertEqual(code, 1)
+        self.assertIn("host ultron", out)
+        self.assertIn(str(missing), out)
+        self.assertNotIn("repo", host.load())
 
     def test_add_remote_unreachable_host_registers_nothing(self) -> None:
         target = "factory@ultron.example"
