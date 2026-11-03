@@ -170,8 +170,8 @@ signing on one host. Neither setting changes the controller's local config.
 
 Remote config replacements are atomic, preserve changed existing bytes in a
 timestamped `config.toml.<UTC>.bak` sibling, and report dropped table/key names
-without values; `add --dry-run --host NAME` and `apply --dry-run` preview without
-writing.
+without values; `add --dry-run --host NAME` and `apply --dry-run` preview the
+projected config (including adopted settings) without writing.
 
 Before `district add` finishes onboarding or `district apply` installs scheduler
 jobs or resets a capped factory, District renders `factory install --print` on

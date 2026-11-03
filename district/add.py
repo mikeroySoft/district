@@ -462,6 +462,7 @@ def onboard(root: Path | host.RemotePath, repo_file: Path | host.RemotePath,
 
 def preview_remote_registration(
     data: dict, slug: str, root: Path | host.RemotePath, port: int, requested: str | None,
+    *, lifted: dict | None = None,
 ) -> None:
     """Preview the remote config produced by the normal in-memory registration."""
     if requested in (None, "local"):
@@ -491,6 +492,11 @@ def preview_remote_registration(
     elif "hosts" not in table:
         table["host"] = requested
     table.setdefault("dashboard", {})["port"] = port
+    if lifted is not None:
+        for name, value in lifted.items():
+            if name != "dashboard":  # port already decided above
+                table[name] = value
+        host.dedupe(prospective)
     runner = host.remote_runner(requested, prospective["hosts"][requested])
     host.sync_remote_config(prospective, requested, runner, dry_run=True)
 
@@ -539,6 +545,7 @@ def dry_run(target: str, args: argparse.Namespace, data: dict,
     print(f"repo: {slug} ({'adopt' if adopt else 'onboard'})\npath: {root}\ndashboard port: {port}")
     parent = fork_parent(slug, run_cmd)
     print(f"fork of: {parent}" if parent else "not a fork")
+    lifted = None
     if adopt:
         try:
             _, lifted = lift(repo_file.read_text())
@@ -554,7 +561,7 @@ def dry_run(target: str, args: argparse.Namespace, data: dict,
         print("checks (proposed):" if checks else "checks: none detected; pass --check name=cmd")
         for c in checks:
             print(f"  {c['name']}: {' '.join(c['run'])}   # from {c['source']}")
-    preview_remote_registration(data, slug, root, port, args.host)
+    preview_remote_registration(data, slug, root, port, args.host, lifted=lifted)
     return 0
 
 

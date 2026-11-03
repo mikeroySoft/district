@@ -850,6 +850,28 @@ class AddTest(DistrictCase):
         self.assertEqual({str(p.relative_to(home)): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
                           for p in home.rglob("*") if p.is_file()}, before)
 
+    def test_add_remote_adopt_dry_run_projects_lifted_settings(self) -> None:
+        home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        config = home / ".config/factory/config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_text('[defaults.triage]\nmodel = "old-model"\n')
+        repo = self.repo(toml='[triage]\nmodel = "new-model"\n')
+        registry = {"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}}}
+        host.save(registry)
+        config_before = config.read_bytes()
+        repo_before = (repo / ".factory.toml").read_bytes()
+
+        code, out = self.district("add", str(repo), "--dry-run", "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"ultron: would replace {config}", out)
+        self.assertNotIn("would drop", out)
+        self.assertNotIn("old-model", out)
+        self.assertNotIn("new-model", out)
+        self.assertEqual(config.read_bytes(), config_before)
+        self.assertEqual((repo / ".factory.toml").read_bytes(), repo_before)
+        self.assertEqual(host.load(), registry)
+
     def test_add_records_existing_host(self) -> None:
         host.save({"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}}})
         self.fake_ssh("factory@ultron.example")
