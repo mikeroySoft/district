@@ -202,7 +202,7 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     if "t.write_text" in remote_command(argv):
                         backups = list(config.parent.glob("config.toml.*.bak"))
                         self.assertEqual([p.read_bytes() for p in backups],
-                                         [original] if label == "invalid" else [])
+                                         [original] if original is not None else [])
                         replacements.append(str(config))
                     return subprocess.run(
                         ["sh", "-c", argv[-1]], capture_output=True, text=True,
@@ -217,7 +217,7 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 self.assertEqual(replacements, [str(config)])
                 backups = list(config.parent.glob("config.toml.*.bak"))
                 self.assertEqual([p.read_bytes() for p in backups],
-                                 [original] if label == "invalid" else [])
+                                 [original] if original is not None else [])
 
     def test_remote_sync_read_failures_preserve_config_without_writes(self) -> None:
         for returncode, detail in ((13, "Permission denied"), (5, "Input/output error")):

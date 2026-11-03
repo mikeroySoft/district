@@ -1,4 +1,4 @@
-"""`district apply [slug] [--upgrade [REF]] [--reset slug]`: reconcile the host to the registry.
+"""`district apply [slug] [--upgrade [REF]] [--reset slug] [--dry-run]`: reconcile the host to the registry.
 
 Idempotent. Rewrites host-side artifacts (units, policy env) without asking;
 never modifies a committed file. Exit nonzero when any repo is not converged.
@@ -1517,6 +1517,33 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         return code
 
 
+def _dry_run(args: argparse.Namespace) -> int:
+    """Preview only the remote config replacements selected by this apply."""
+    os.environ["PATH"] = host.service_path()
+    data = host.load()
+    host.hosts(data)
+    selected = host.select(data, args.reset or args.slug)
+    print("dry run: nothing written")
+    if not selected:
+        print("no repositories registered (district add)")
+        return 0
+    host.sync_local_claims(data)
+    policy(data)
+    remote_names = []
+    for slug, table in selected.items():
+        host.factory_host(data, slug)
+        remote_names.extend(name for name in host.repo_hosts(table, slug) if name != "local")
+    code = 0
+    for name in dict.fromkeys(remote_names):
+        runner = host.remote_runner(name, data["hosts"][name])
+        try:
+            host.sync_remote_config(data, name, runner, dry_run=True)
+        except (host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
+            print(f"host {name} preview failed: {exc}")
+            code = 1
+    return code
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district apply", description=__doc__.split("\n", 1)[0])
     parser.add_argument("slug", nargs="?", help="one repo (owner/name or basename); default all")
@@ -1528,7 +1555,11 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--drain", action="store_true", help="request Factory skip new timer passes, then wait for idle")
     parser.add_argument("--drain-timeout", default="6h", metavar="DURATION",
                         help="maximum drain wait (default 6h, maximum 465min)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="preview selected remote config replacements and write nothing")
     args = parser.parse_args(argv)
+    if args.dry_run:
+        return _dry_run(args)
     args.drain_timeout = hours(args.drain_timeout, "--drain-timeout") * 3600
     if args.drain_timeout > drain_flag.DRAIN_MAX_TTL - 900:
         parser.error("--drain-timeout must be at most 465min (8h flag cap minus 15min install margin)")
