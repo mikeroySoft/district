@@ -31,7 +31,10 @@ def _dispatch_root(argv: list[str], working: str) -> str | None:
     if Path(argv[0]).name in ("sh", "bash", "zsh") and len(argv) >= 3 and "c" in argv[1]:
         lexer = shlex.shlex(argv[2], posix=True, punctuation_chars=";&|")
         lexer.whitespace_split = True
-        tokens = list(lexer)
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            return None
         if tokens[:1] == ["cd"] and len(tokens) >= 4 and tokens[2] == "&&":
             directory = tokens[1]
             working = (str(Path(working) / directory) if working and not directory.startswith(("~", "$"))
@@ -83,8 +86,8 @@ def _definitions(backend, run_cmd):
                 yield {"label": doc.get("Label", name[:-6]), "root": root,
                        "files": [str(backend.agent_dir / name)], "timer": None}
         return
-    configured = backend.configuration()["unit_dir"]
-    directory = run_cmd.path(configured) if isinstance(run_cmd, host.RemoteRunner) else Path(configured)
+    directory = (run_cmd.path(Path(run_cmd.facts()["config_home"]) / "systemd/user")
+                 if isinstance(run_cmd, host.RemoteRunner) else host.unit_dir())
     bodies = _definition_bytes(directory, "*.service")
     bodies.update(_definition_bytes(directory, "*.timer"))
     timers = {}
@@ -100,8 +103,15 @@ def _definitions(backend, run_cmd):
         settings = _settings(body)
         working = settings.get("WorkingDirectory", "")
         words = systemd.words(working) if working else []
-        argv = systemd.words(settings.get("ExecStart", "").lstrip("-+!:@"))
-        root = _dispatch_root(argv, words[0] if words else "")
+        root = None
+        for line in body.decode().replace("\\\n", "").splitlines():
+            key, separator, value = line.strip().partition("=")
+            if separator and key == "ExecStart":
+                if not value:
+                    root = None  # An empty assignment resets earlier commands.
+                else:
+                    argv = systemd.words(value.lstrip("-+!:@"))
+                    root = _dispatch_root(argv, words[0] if words else "") or root
         if root:
             related = timers.get(name, [])
             yield {"label": name[:-8], "root": root,
@@ -201,6 +211,18 @@ def _resume(backend, agent: dict) -> None:
                 _command(backend, "start", name)
 
 
+def _discard_replacement(backend, expected: str) -> None:
+    """Remove a partial install, without treating absent units as teardown failures."""
+    loaded = backend.status(f"{expected}.service", timeout=10).loaded
+    timers = [] if isinstance(backend, LaunchdBackend) else [
+        timer for timer in [f"{expected}.timer"] if backend.status(timer, timeout=10).loaded]
+    replacement = {"label": expected, "loaded": loaded, "timers": timers}
+    _pause(backend, replacement)
+    if loaded:
+        _unload(backend, replacement, wait=True)
+    backend.remove(expected)
+
+
 @contextmanager
 def takeover(agents: list[dict], backend, run_cmd, expected: str, host_name: str):
     """Retire before the caller installs; on any failure restore the old scheduler."""
@@ -239,16 +261,15 @@ def takeover(agents: list[dict], backend, run_cmd, expected: str, host_name: str
         print(f"{prefix}: adoption failed: {exc}; rollback: restoring retired agents")
         try:
             if installing:
-                # A failed installer can already have bootstrapped the replacement.
-                replacement = {"label": expected, "loaded": True,
-                               "timers": [f"{expected}.timer"]}
-                _pause(backend, replacement)
-                _unload(backend, replacement, wait=True)
+                _discard_replacement(backend, expected)
             for path, backup in backups:
                 _copy(run_cmd, backup, path)
             for agent in paused:
                 _resume(backend, agent)
                 print(f"{prefix}: restored {agent['label']} from {directory}")
+            if installing and isinstance(backend, LaunchdBackend):
+                # Restore the old scheduler before cleanup that only affects future retries.
+                _command(backend, "enable", f"{backend.domain}/{expected}")
         except (Exception, SystemExit) as rollback:
             raise OSError(f"{prefix}: install/retirement failed ({exc}); rollback failed ({rollback}); backups: {directory}") from exc
         raise OSError(f"{prefix}: install/retirement failed ({exc}); old agent restored") from exc

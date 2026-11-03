@@ -1200,15 +1200,6 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     run_cmd, backend = context or _host_context(data, host_name)
     install_env = preflight.install_environment(run_cmd)
     previous = installed_engine_commit(data, host_name)
-    try:
-        agents = retired_agents.scan(backend, run_cmd)
-        adoptions = {
-            slug: retired_agents.foreign(
-                agents, retired_agents.canonical_root(table["path"], run_cmd), host.unit_name(slug))
-            for slug, table in targets.items()
-        }
-    except (OSError, ValueError) as exc:
-        raise DistrictError(f"host {host_name}: cannot inspect scheduler agents: {exc}") from exc
 
     rows = []
     completed = {}
@@ -1226,6 +1217,17 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     )
     if engine_result == "failed":
         code = 1
+    adoptions = {slug: [] for slug in targets}
+    scan_error = None
+    try:
+        agents = retired_agents.scan(backend, run_cmd)
+        adoptions = {
+            slug: retired_agents.foreign(
+                agents, retired_agents.canonical_root(table["path"], run_cmd), host.unit_name(slug))
+            for slug, table in targets.items()
+        }
+    except (OSError, ValueError) as exc:
+        scan_error = f"host {host_name}: cannot inspect scheduler agents: {exc}"
     tool, cli = host.factory_tool_paths(run_cmd)
     try:
         usable = _tool_cli(tool, cli, run_cmd) and _receipt_sha(tool, run_cmd) is not None
@@ -1246,6 +1248,9 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     rendered = {}
     changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env, errors=render_errors,
                          rendered=rendered, include_disabled=bool(args.reset))
+    if scan_error:
+        for slug in targets:
+            render_errors.setdefault(slug, []).append(scan_error)
     for slug, agents in adoptions.items():
         if agents and (not targets[slug].get("disabled_at") or args.reset):
             changes[slug] = True
@@ -1315,9 +1320,6 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                     continue
                 with retired_agents.takeover(adoptions[slug], backend, run_cmd,
                                              host.unit_name(slug), host_name):
-                    if args.reset and adoptions[slug]:
-                        if not reset(slug, table, data, record, backend=backend):
-                            raise OSError("reset pass failed")
                     try:
                         proc = run_cmd(
                             [str(factory_cli), "install"],
@@ -1333,6 +1335,9 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                             install_error = f"install: {tail[0]}"
                     if install_error and adoptions[slug]:
                         raise OSError(install_error)
+                    if args.reset and adoptions[slug]:
+                        if not reset(slug, table, data, record, backend=backend):
+                            raise OSError("reset pass failed")
             except OSError as exc:
                 install_error = str(exc)
             finally:

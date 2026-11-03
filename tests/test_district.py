@@ -2926,6 +2926,48 @@ class DoctorTest(DistrictCase):
         self.assertEqual(warning["status"], "WARN")
         self.assertIn("factory-orphan", warning["detail"])
 
+    def test_doctor_reports_remote_macos_conflict_and_unmanaged_agent(self) -> None:
+        target = "factory@ultron.example"
+        repo = self.repo(toml="")
+        orphan = self.repo("orphan", toml="")
+        host.save({
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron"}},
+        })
+        self.doctor_tools()
+        home = self.fake_ssh(target)[target]
+        agents = home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        for label, root in (
+            ("factory-widgets", repo),
+            ("com.example.factory-widgets", repo),
+            ("com.example.factory-orphan", orphan),
+        ):
+            (agents / f"{label}.plist").write_bytes(plistlib.dumps({
+                "Label": label,
+                "WorkingDirectory": str(root),
+                "ProgramArguments": ["factory", "dispatch"],
+                "StartInterval": 600,
+            }))
+
+        with mock.patch(
+            "district.doctor.shutil.which",
+            side_effect=lambda name: f"/bin/{name}" if name == "factory" else None,
+        ):
+            code, out = self.district("doctor", "--json")
+
+        rows = json.loads(out)["rows"]
+        conflict = next(row for row in rows
+                        if row["label"] == "host ultron repo acme/widgets scheduler conflict")
+        warning = next(row for row in rows
+                       if row["label"] == f"host ultron root {orphan.resolve()} foreign scheduler")
+        self.assertEqual(code, 1, rows)
+        self.assertEqual(conflict["status"], "FAIL")
+        self.assertIn("factory-widgets", conflict["detail"])
+        self.assertIn("com.example.factory-widgets", conflict["detail"])
+        self.assertEqual(warning["status"], "WARN")
+        self.assertIn("com.example.factory-orphan", warning["detail"])
+
     def macos_tools(self) -> None:
         self.stub("xcodebuild", ("-version", "Xcode 27.1\nBuild version 18B77\n"))
         self.stub("brew", ("--prefix --installed xcodegen", "/opt/homebrew/opt/xcodegen\n"))
