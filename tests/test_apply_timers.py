@@ -100,10 +100,11 @@ class ApplyTimerTest(unittest.TestCase):
 
     def test_apply_launchd_hold_requires_recorded_engine_pause(self):
         cases = [
-            (True, False, False, 1, "inactive", "disabled"),
-            (True, True, False, 0, "paused", "disabled"),
-            (False, False, False, 0, "active", "enabled"),
-            (True, True, True, 1, "inactive", "not-found"),
+            (True, False, None, 1, "inactive", "disabled"),
+            (True, True, None, 0, "paused", "disabled"),
+            (False, False, None, 0, "active", "enabled"),
+            (True, True, "definition", 1, "inactive", "not-found"),
+            (True, True, "job", 1, "inactive", "disabled"),
         ]
         for held, recorded, missing, expected_code, expected_timer, expected_enabled in cases:
             with self.subTest(held=held, recorded=recorded, missing=missing), self.case() as case:
@@ -118,7 +119,7 @@ class ApplyTimerTest(unittest.TestCase):
                         argv, 0, f'gui/501 {{\n "factory-widgets" => {str(held).lower()}\n}}\n', "")
 
                 backend = service.LaunchdBackend(launchctl, home=case.root / "home", uid=501)
-                if not missing:
+                if missing != "definition":
                     case.render_plist = True
                     name, body = case.rendered()
                     backend.agent_dir.mkdir(parents=True)
