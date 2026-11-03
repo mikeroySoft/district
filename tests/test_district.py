@@ -420,6 +420,42 @@ class DistrictCase(unittest.TestCase):
         (host.unit_dir() / f"{unit}-dashboard.service").write_text(f"[Service]\n{environment}ExecStart=x dashboard --host {host_} --port 1 --no-open\n")
 
 
+    def foreign_launchd(self) -> tuple[Path, Path, Path]:
+        target = "factory@ultron.example"
+        home = self.fake_ssh(target)[target]
+        repo = self.repo(toml="")
+        host.save({
+            "hosts": {"ultron": {"ssh": target, "platform": "macos"}},
+            "repo": {"acme/widgets": {"path": str(repo), "host": "ultron",
+                                     "dashboard": {"port": 8765}}},
+        })
+        old = home / "Library/LaunchAgents/com.example.factory-widgets.plist"
+        old.parent.mkdir(parents=True)
+        old.write_bytes(plistlib.dumps({
+            "Label": old.stem, "WorkingDirectory": str(repo),
+            "ProgramArguments": ["factory", "dispatch"], "StartInterval": 600,
+        }))
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            '            (agents / f"{label}.plist").write_bytes(plistlib.dumps(doc))',
+            '            (agents / f"{label}.plist").write_bytes(plistlib.dumps(doc))\n'
+            '            import subprocess\n'
+            '            subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", '
+            'str(agents / f"{label}.plist")], check=True)',
+        ))
+        launchctl = self.bin / "launchctl"
+        launchctl.write_text(launchctl.read_text().rsplit("raise SystemExit(0)", 1)[0] +
+            'if args[:1] in (["bootout"], ["bootstrap"]):\n'
+            '    import json, plistlib\n'
+            '    agents = pathlib.Path.home() / "Library/LaunchAgents"\n'
+            '    loaded = [p.stem for p in agents.glob("*.plist")\n'
+            '              if plistlib.loads(p.read_bytes()).get("StartInterval")\n'
+            '              and not (pathlib.Path.home() / f"{p.stem}.unloaded").exists()]\n'
+            '    with (here / "loaded.jsonl").open("a") as stream:\n'
+            '        stream.write(json.dumps(loaded) + "\\n")\n'
+            'raise SystemExit(0)\n')
+        return home, repo, old
+
 class HostTest(DistrictCase):
     def test_round_trip_regex_strings(self) -> None:
         pattern = r'internal|\.corp|say "hi"|c:\path'
@@ -1212,6 +1248,26 @@ class ApplyTest(DistrictCase):
         host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}, **extra}}})
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard(failures))))
         return repo
+
+    def test_apply_retires_foreign_launchd_agent_before_install(self) -> None:
+        home, _, old = self.foreign_launchd()
+        original = old.read_bytes()
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        calls = self.calls("launchctl")
+        bootout = f"bootout gui/{os.getuid()}/{old.stem}"
+        bootstrap = f"bootstrap gui/{os.getuid()} {old.parent / 'factory-widgets.plist'}"
+        self.assertIn(bootout, calls)
+        self.assertLess(calls.index(bootout), calls.index(bootstrap))
+        backups = list((home / ".local/state/district/retired-agents").glob(f"*/{old.name}"))
+        self.assertEqual([p.read_bytes() for p in backups], [original])
+        self.assertFalse(old.exists())
+        states = [json.loads(line) for line in (self.bin / "loaded.jsonl").read_text().splitlines()]
+        self.assertTrue(all(len(labels) <= 1 for labels in states), states)
+        self.assertEqual(states[-1], ["factory-widgets"])
+
     def test_concurrent_apply_exits_before_running_commands(self) -> None:
         import fcntl
 
