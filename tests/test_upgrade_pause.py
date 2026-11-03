@@ -315,6 +315,21 @@ class UpgradePauseTest(unittest.TestCase):
                 self.assertEqual(case.active, {self.timer})
                 self.assertEqual(case.installs(), [])
 
+    def test_commit_target_version_must_match_distribution_metadata(self):
+        with self.case() as case:
+            def runner(argv, **kwargs):
+                if argv == [str(case.cli), "--version"] and len(case.installs()) == 1:
+                    return subprocess.CompletedProcess(argv, 0, "0.4.6\n", "")
+                return case.run_cmd(argv, **kwargs)
+
+            with mock.patch.object(apply, "run", side_effect=runner):
+                code, _ = self.run_apply(case)
+            self.assertEqual(code, 1, case.output.getvalue())
+            self.assertEqual(len(case.installs()), 2)
+            self.assertEqual(host.engine(host.load(), "local")["sha"], fixtures.OLD)
+            self.assertEqual(case.active, {self.timer})
+            self.assertIn("rolled back", case.output.getvalue())
+
 
 
 if __name__ == "__main__":

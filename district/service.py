@@ -287,6 +287,16 @@ class SystemdUserBackend(ServiceBackend):
         units.update(line.split()[0] for line in proc.stdout.splitlines() if line.split())
         return {name for name in units if name.endswith((".service", ".timer"))}
 
+    def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired([self.executable, "stop", name], timeout)
+        return self.stop(name, timeout=timeout)
+
+    def resume_timer(self, name: str, *, timeout: float = 10) -> subprocess.CompletedProcess:
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired([self.executable, "start", name], timeout)
+        return self.start(name, check=False, timeout=timeout)
+
 
     def _run(self, *args: str, check: bool = True,
              timeout: float | None = None) -> subprocess.CompletedProcess:

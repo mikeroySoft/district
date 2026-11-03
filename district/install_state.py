@@ -319,11 +319,11 @@ class ApplyRun:
     stopped: set[str] = field(default_factory=set)
     deferred: dict[str, dict[str, str]] = field(default_factory=dict)
     drains: dict[str, dict] = field(default_factory=dict)
-    engine_deferrals: dict[str, int] = field(default_factory=dict)
     drain_timeout: float | None = None
     drain_requested: bool = False
     drain_stack: ExitStack | None = None
     drain_deadlines: dict[str, tuple[float, float]] = field(default_factory=dict)
+    completion_failed: bool = False
 
     @classmethod
     def start(cls) -> "ApplyRun":
@@ -336,10 +336,7 @@ class ApplyRun:
             if isinstance(item, dict)
             and all(isinstance(item.get(key), str) for key in ("target", "reason", "since"))
         }
-        counts = previous_apply.get("engine_deferrals", {})
-        counts = {key: value for key, value in counts.items()
-                  if isinstance(key, str) and type(value) is int and value >= 0} if isinstance(counts, dict) else {}
-        return cls(stamp(now()), config_sha(), _engine_sha(data), deferred=deferred, engine_deferrals=counts)
+        return cls(stamp(now()), config_sha(), _engine_sha(data), deferred=deferred)
 
     def observe(self, data: dict) -> None:
         if not self.observed:
@@ -349,12 +346,9 @@ class ApplyRun:
     def defer(self, target: str, reason: str) -> None:
         since = self.deferred.get(target, {}).get("since", stamp(now()))
         self.deferred[target] = {"target": target, "reason": reason, "since": since}
-        if target == "engine" or target.startswith("engine:"):
-            self.engine_deferrals[target] = self.engine_deferrals.get(target, 0) + 1
 
     def clear_deferred(self, target: str) -> None:
         self.deferred.pop(target, None)
-        self.engine_deferrals.pop(target, None)
 
 
     def finish(self, exit_status: int) -> None:
@@ -388,8 +382,6 @@ class ApplyRun:
             last_apply["drains"] = self.drains
             if "local" in self.drains:
                 last_apply["drain"] = self.drains["local"]
-        if self.engine_deferrals:
-            last_apply["engine_deferrals"] = self.engine_deferrals
         write_record(collect(data=data, timers=after, last_apply=last_apply))
 
 
