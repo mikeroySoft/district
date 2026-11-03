@@ -7,7 +7,7 @@ name = "district"
 version = "0.1.8"
 description = "Fleet manager for agent-factory installs on one host: registry, ports, host config, upgrades, failure cap, status."
 requires-python = ">=3.11"
-dependencies = ["tomli_w>=1.0"]
+dependencies = ["packaging>=24.0", "tomli_w>=1.0"]
 
 [project.scripts]
 district = "district.cli:main"

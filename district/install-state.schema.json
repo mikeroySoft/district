@@ -105,7 +105,6 @@
         "stopped": {"$ref": "#/$defs/unitNames"},
         "drain": {"$ref": "#/$defs/drain"},
         "drains": {"type": "object", "additionalProperties": {"$ref": "#/$defs/drain"}},
-        "engine_deferrals": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
         "deferred": {
           "type": "array",
           "items": {

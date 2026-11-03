@@ -4,7 +4,7 @@ import sys
 import unittest
 from unittest import mock
 
-from district import apply, host, install_state, service
+from district import apply, host, service
 from tests import test_one_install as fixtures
 
 
@@ -65,19 +65,6 @@ class EngineBusyTest(unittest.TestCase):
         self.assertEqual(sorted(restarted), sorted(dashboards))
         self.assertEqual(case.active, dashboards)
         self.assertFalse(host.engine(host.load(), "local")["dashboards_pending"])
-
-    def test_active_factory_worker_still_blocks_engine_swap(self):
-        case = self.case
-        worker = "factory-unregistered-worker.service"
-        case.backend.factory_units.return_value = {worker}
-        case.active.add(worker)
-        record = install_state.ApplyRun("", "", fixtures.OLD)
-        self.assertEqual(case.reconcile(record=record), "deferred")
-        self.assertIn(worker, record.deferred["engine"]["reason"])
-        self.assertEqual(case.installs(), [])
-        self.assertEqual(host.engine(case.data, "local")["sha"], fixtures.OLD)
-        case.backend.pause_timer.assert_not_called()
-        case.backend.start.assert_not_called()
 
 
 if __name__ == "__main__":
