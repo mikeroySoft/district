@@ -344,8 +344,6 @@ def scheduler_rows(data: dict) -> list[dict[str, str]]:
     return rows
 
 
-
-
 def factory_rows(data: dict) -> list[dict[str, str]]:
     if not shutil.which("factory"):
         return [row("FAIL", "factory", "not found on PATH")]

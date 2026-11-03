@@ -24,32 +24,81 @@ def canonical_root(path: str, run_cmd) -> str:
     return proc.stdout.strip()
 
 
+def _working_directory(working: str, directory: str) -> str:
+    return (str(Path(working) / directory) if working and not directory.startswith(("~", "$"))
+            else directory)
+
+
+def _shell_commands(script: str) -> list[list[str]]:
+    # Keep quotes until command boundaries are identified: quoted/echoed text is not executed.
+    lexer = shlex.shlex(script, posix=False, punctuation_chars=";&|\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    commands, words = [], []
+    for token in [*lexer, ";"]:
+        if all(char in ";&|\n" for char in token):
+            commands.append(shlex.split(" ".join(words)))
+            words = []
+        else:
+            words.append(token)
+    return commands
+
+
+def _shell_root(script: str, working: str) -> str | None:
+    try:
+        commands = _shell_commands(script)
+    except ValueError:
+        return None
+    for command in commands:
+        if command[:1] == ["cd"] and len(command) == 2:
+            working = _working_directory(working, command[1])
+        elif root := _dispatch_root(command, working):
+            return root
+    return None
+
+
+def _uv_root(argv: list[str], working: str) -> str | None:
+    value_options = {
+        "--project", "--directory", "--package", "--python", "-p", "--with", "-w",
+        "--with-editable", "--with-requirements", "--group", "--extra", "--env-file",
+    }
+    flags = {
+        "--no-project", "--frozen", "--locked", "--offline", "--no-sync", "--isolated",
+        "--no-dev", "--all-extras", "--all-groups", "--no-config", "--no-progress",
+    }
+    while argv and argv[0].startswith("-"):
+        option, equals, value = argv[0].partition("=")
+        argv = argv[1:]
+        if option == "--":
+            break
+        if option in flags and not equals:
+            continue
+        if option not in value_options:
+            return None
+        if not equals:
+            if not argv:
+                return None
+            value, argv = argv[0], argv[1:]
+        if option == "--directory":
+            working = _working_directory(working, value)
+    return _dispatch_root(argv, working)
+
+
 def _dispatch_root(argv: list[str], working: str) -> str | None:
-    """Recognize Factory commands, including the usual `cd repo && exec factory` wrapper."""
+    """Recognize executed Factory dispatch/pass commands, not mentions in arguments."""
     if not argv or not all(isinstance(arg, str) for arg in argv):
         return None
     if Path(argv[0]).name in ("sh", "bash", "zsh") and len(argv) >= 3 and "c" in argv[1]:
-        lexer = shlex.shlex(argv[2], posix=True, punctuation_chars=";&|")
-        lexer.whitespace_split = True
-        try:
-            tokens = list(lexer)
-        except ValueError:
-            return None
-        if tokens[:1] == ["cd"] and len(tokens) >= 4 and tokens[2] == "&&":
-            directory = tokens[1]
-            working = (str(Path(working) / directory) if working and not directory.startswith(("~", "$"))
-                       else directory)
-            tokens = tokens[3:]
-        if tokens[:1] == ["exec"]:
-            tokens = tokens[1:]
-        return _dispatch_root(tokens, working)
+        return _shell_root(argv[2], working)
+    if argv[:1] == ["exec"]:
+        return _dispatch_root(argv[1:], working)
     if Path(argv[0]).name == "env":
         argv = argv[1:]
         while argv and "=" in argv[0]:
             argv = argv[1:]
         return _dispatch_root(argv, working)
     if Path(argv[0]).name == "uv" and argv[1:2] == ["run"]:
-        return _dispatch_root(argv[2:], working)
+        return _uv_root(argv[2:], working)
     command = argv[1:] if Path(argv[0]).name == "factory" else []
     if Path(argv[0]).name.startswith("python") and "-m" in argv:
         index = argv.index("-m")
@@ -60,10 +109,10 @@ def _dispatch_root(argv: list[str], working: str) -> str | None:
     return working or None
 
 
-def _settings(body: bytes) -> dict[str, str]:
+def _settings(body: bytes, *, errors: str = "strict") -> dict[str, str]:
     values = {}
     # Unit sections do not repeat the settings used here; honor the last assignment.
-    for line in body.decode().replace("\\\n", "").splitlines():
+    for line in body.decode(errors=errors).replace("\\\n", "").splitlines():
         key, separator, value = line.strip().partition("=")
         if separator:
             values[key] = value
@@ -86,15 +135,10 @@ def _definitions(backend, run_cmd):
                 yield {"label": doc.get("Label", name[:-6]), "root": root,
                        "files": [str(backend.agent_dir / name)], "timer": None}
         return
-    directory = (run_cmd.path(Path(run_cmd.facts()["config_home"]) / "systemd/user")
-                 if isinstance(run_cmd, host.RemoteRunner) else host.unit_dir())
+    directory = backend.unit_dir
     bodies = _definition_bytes(directory, "*.service")
     bodies.update(_definition_bytes(directory, "*.timer"))
-    timers = {}
-    for name, body in bodies.items():
-        if name.endswith(".timer"):
-            service = _settings(body).get("Unit", name[:-6] + ".service")
-            timers.setdefault(service, []).append(name)
+    schedulers = {}
     for name, body in bodies.items():
         if not name.endswith(".service"):
             continue
@@ -113,10 +157,20 @@ def _definitions(backend, run_cmd):
                     argv = systemd.words(value.lstrip("-+!:@"))
                     root = _dispatch_root(argv, words[0] if words else "") or root
         if root:
-            related = timers.get(name, [])
-            yield {"label": name[:-8], "root": root,
-                   "files": [str(directory / item) for item in [name, *related]],
-                   "timer": related[0] if related else None, "timers": related}
+            schedulers[name] = root
+    timers = {}
+    for name, body in bodies.items():
+        if not name.endswith(".timer"):
+            continue
+        service = _settings(body, errors="surrogateescape").get("Unit", name[:-6] + ".service")
+        if service in schedulers:
+            _settings(body)  # Relevant definitions must still be valid UTF-8.
+            timers.setdefault(service, []).append(name)
+    for name, root in schedulers.items():
+        related = timers.get(name, [])
+        yield {"label": name[:-8], "root": root,
+               "files": [str(directory / item) for item in [name, *related]],
+               "timer": related[0] if related else None, "timers": related}
 
 
 def scan(backend, run_cmd) -> list[dict]:

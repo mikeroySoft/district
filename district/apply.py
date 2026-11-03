@@ -1339,6 +1339,8 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                         if not reset(slug, table, data, record, backend=backend):
                             raise OSError("reset pass failed")
             except OSError as exc:
+                if not adoptions[slug]:
+                    raise
                 install_error = str(exc)
             finally:
                 if not (install_error and adoptions[slug]):
