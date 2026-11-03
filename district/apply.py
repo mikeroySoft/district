@@ -897,7 +897,7 @@ def _argv_error(argv, tool: Path, cli: Path, runner) -> str | None:
         resolved, real_cli = _resolved_paths([executable, cli], runner)
         if resolved == real_cli:
             return None
-    return f"Factory argv must use {cli} or {tool}/bin/python -m factory; got {shlex.join(argv)}"
+    return f"Factory argv must use {cli} or {tool}/bin/python [-P] -m factory; got {shlex.join(argv)}"
 
 
 def _render_errors(output: str, tool: Path, cli: Path, runner) -> list[str]:
@@ -910,18 +910,24 @@ def _render_errors(output: str, tool: Path, cli: Path, runner) -> list[str]:
             continue
         try:
             if name.endswith(".plist"):
-                argv = plistlib.loads(body.encode()).get("ProgramArguments")
+                commands = [plistlib.loads(body.encode()).get("ProgramArguments")]
             else:
-                commands = [line.removeprefix("ExecStart=").strip() for line in body.splitlines()
-                            if line.startswith("ExecStart=")]
-                argv = ([word.replace("%%", "%").replace("$$", "$") for word in systemd.words(commands[0])]
-                        if len(commands) == 1 else None)
-            error = _argv_error(argv, tool, cli, runner)
+                commands = [line.removeprefix("ExecStart=").strip().lstrip("-@:+!")
+                            for line in body.splitlines() if line.startswith("ExecStart=")]
         except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError,
                 plistlib.InvalidFileException) as exc:
-            error = f"invalid Factory argv: {exc}"
-        if error:
-            errors.append(f"{name}: {error}")
+            errors.append(f"{name}: invalid Factory argv: {exc}")
+            continue
+        for command in commands or [None]:
+            try:
+                argv = command
+                if not name.endswith(".plist") and command is not None:
+                    argv = [word.replace("%%", "%").replace("$$", "$") for word in systemd.words(command)]
+                error = _argv_error(argv, tool, cli, runner)
+            except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, AttributeError) as exc:
+                error = f"invalid Factory argv {command!r}: {exc}"
+            if error:
+                errors.append(f"{name}: {error}")
     return errors
 
 
