@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import subprocess
 import unittest
 from unittest import mock
 
@@ -96,3 +97,56 @@ class ApplyTimerTest(unittest.TestCase):
 
                 self.assertEqual(apply.main([]), 1, case.output.getvalue())
                 self.assertIn("DISABLED since" if failure == "disabled_at" else "FAIL doctor", case.output.getvalue())
+
+    def test_apply_launchd_hold_requires_recorded_engine_pause(self):
+        cases = [
+            (True, False, False, 1, "inactive", "disabled"),
+            (True, True, False, 0, "paused", "disabled"),
+            (False, False, False, 0, "active", "enabled"),
+            (True, True, True, 1, "inactive", "not-found"),
+        ]
+        for held, recorded, missing, expected_code, expected_timer, expected_enabled in cases:
+            with self.subTest(held=held, recorded=recorded, missing=missing), self.case() as case:
+                timer = "factory-widgets.timer"
+
+                def launchctl(argv, **kwargs):
+                    if argv == ["launchctl", "print", "gui/501/factory-widgets"]:
+                        return subprocess.CompletedProcess(
+                            argv, 3 if missing else 0, "" if missing else "state = waiting\n", "")
+                    self.assertEqual(argv, ["launchctl", "print-disabled", "gui/501"])
+                    return subprocess.CompletedProcess(
+                        argv, 0, f'gui/501 {{\n "factory-widgets" => {str(held).lower()}\n}}\n', "")
+
+                backend = service.LaunchdBackend(launchctl, home=case.root / "home", uid=501)
+                if not missing:
+                    case.render_plist = True
+                    name, body = case.rendered()
+                    backend.agent_dir.mkdir(parents=True)
+                    (backend.agent_dir / name).write_text(body)
+                case.backend.status.side_effect = lambda name, **kwargs: (
+                    backend.status(name, **kwargs) if name == timer
+                    else service.ServiceStatus("not-found", "inactive", "not-found")
+                )
+                case.backend.is_active.side_effect = lambda name, **kwargs: (
+                    backend.is_active(name, **kwargs) if name == timer else case.is_active(name, **kwargs)
+                )
+                if recorded:
+                    case.data["defaults"]["engine"]["paused_timers"] = [timer]
+                host.save(case.data)
+
+                rows, code, _ = apply._apply_host(
+                    case.data, "local", case.data["repo"],
+                    argparse.Namespace(upgrade=None, reset=None, allow_downgrade=False),
+                    install_state.ApplyRun("", "", fixtures.OLD), "OK",
+                    engine_result="unchanged", context=(case.run_cmd, case.backend),
+                )
+
+                self.assertEqual(code, expected_code, case.output.getvalue())
+                self.assertEqual(rows[0]["timer"], expected_timer)
+                self.assertEqual(rows[0]["fail"], [])
+                self.assertIsNone(rows[0]["disabled"])
+                self.assertEqual(backend.status(timer).unit_file_state, expected_enabled)
+                if expected_timer == "paused":
+                    self.assertIn("timer paused", case.output.getvalue())
+                else:
+                    self.assertNotIn("timer paused", case.output.getvalue())
