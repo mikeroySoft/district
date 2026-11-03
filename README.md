@@ -201,6 +201,17 @@ checks are FAIL; version-probe failures are WARN.
 `~/Library/LaunchAgents/<label>.plist` for macOS. Launchd jobs add
 `/opt/homebrew/bin` to the service PATH and write stdout/stderr under the
 factory's `.factory/logs/` directory. `local` is reserved for this machine.
+
+When adopting a host with a hand-made Factory scheduler, first run
+`district apply --dry-run`: it lists each foreign dispatch/pass agent's host,
+label, file path, and loaded state without changing anything. Apply refuses a
+busy agent rather than killing its pass; when idle, it copies the definitions
+to `~/.local/state/district/retired-agents/<UTC>/`, unloads/disables the old
+label, removes its files, then installs the District-named agent. If installation
+fails, it restores the files and the old agent's observed loaded/enabled state.
+`district doctor` FAILs on duplicate loaded schedulers and WARNs about foreign
+agents for checkouts not managed on that host.
+
 District-rendered systemd executable/argument, working-directory and environment
 values preserve spaces, quotes and backslashes; literal `%` and ExecStart `$`
 are escaped rather than expanded by the manager. Factory render validation and

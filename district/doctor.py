@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from district import drain, host, preflight, streak
+from district import drain, host, preflight, retired_agents, streak
 from district.add import remote_slug
 from district.apply import POLICY_ENV
 from district.service import SystemdUserBackend
@@ -280,6 +280,70 @@ def remote_config_rows(data: dict) -> list[dict[str, str]]:
     return rows
 
 
+def scheduler_rows(data: dict) -> list[dict[str, str]]:
+    """Report foreign and conflicting Factory schedulers without changing them."""
+    rows = []
+    targets = {"local": "local", **dict(sorted(host.hosts(data).items()))}
+    repos = host.repos(data)
+    errors = (OSError, ValueError, subprocess.TimeoutExpired,
+              host.RemoteHostError, host.DistrictError)
+    for name, target in targets.items():
+        runner = host.run if name == "local" else host.remote_runner(name, target)
+        try:
+            backend = host.service_backend(target, run=runner)
+            agents = retired_agents.scan(backend, runner)
+        except errors as exc:
+            rows.append(row("FAIL", f"host {name} scheduler scan", str(exc)))
+            continue
+
+        managed: dict[str, list[str]] = {}
+        for slug, table in repos.items():
+            if name not in host.repo_hosts(table, slug):
+                continue
+            try:
+                root = retired_agents.canonical_root(table["path"], runner)
+            except errors as exc:
+                rows.append(row("FAIL", f"host {name} repo {slug} scheduler scan", str(exc)))
+                continue
+            managed.setdefault(root, []).append(slug)
+
+        by_root: dict[str, list[dict]] = {}
+        for agent in agents:
+            by_root.setdefault(agent["root"], []).append(agent)
+        for root, serving in sorted(by_root.items()):
+            slugs = managed.get(root, [])
+            scope = f"repo {', '.join(sorted(slugs))}" if slugs else f"root {root}"
+            expected = host.unit_name(slugs[0]) if slugs else None
+            foreign = retired_agents.foreign(agents, root, expected) if expected else serving
+            foreign_labels = {agent["label"] for agent in foreign}
+            relevant = [
+                agent for agent in serving
+                if expected is None or agent["label"] == expected or agent["label"] in foreign_labels
+            ]
+            loaded = sorted(agent["label"] for agent in relevant if agent["loaded"])
+            if len(loaded) >= 2:
+                rows.append(row(
+                    "FAIL", f"host {name} {scope} scheduler conflict",
+                    f"{root}: loaded schedulers {', '.join(loaded)}",
+                ))
+                continue
+            if slugs:
+                if not foreign:
+                    continue
+                labels = sorted(agent["label"] for agent in foreign)
+                rows.append(row(
+                    "WARN", f"host {name} {scope} foreign scheduler",
+                    f"{root}: {', '.join(labels)}; run district apply {slugs[0]} to adopt",
+                ))
+            else:
+                labels = sorted(agent["label"] for agent in serving)
+                rows.append(row(
+                    "WARN", f"host {name} {scope} foreign scheduler",
+                    f"not in the District registry: {', '.join(labels)}",
+                ))
+    return rows
+
+
 def factory_rows(data: dict) -> list[dict[str, str]]:
     if not shutil.which("factory"):
         return [row("FAIL", "factory", "not found on PATH")]
@@ -471,6 +535,7 @@ def check() -> list[dict[str, str]]:
     rows.append(gh_auth())
     with contextlib.redirect_stdout(io.StringIO()):
         rows += toolchain_rows(data)
+        rows += scheduler_rows(data)
     rows += remote_config_rows(data)
     rows += parity_rows(data)
     if drain_status := drain.status():
