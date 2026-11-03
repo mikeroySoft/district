@@ -5,7 +5,7 @@ import plistlib
 from pathlib import Path
 from unittest import mock
 
-from district import apply, host, install_state
+from district import apply, host, install_state, service
 from tests.test_district import DistrictCase
 
 
@@ -94,6 +94,34 @@ class UvWrappedSchedulerTest(WrappedSchedulerChecks, DistrictCase):
 
 
 class ForeignAgentEdgeTest(DistrictCase):
+    def test_apply_keeps_legacy_backend_adapter_without_directory_attribute(self):
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        backend = mock.Mock(wraps=host.service_backend())
+        backend.configuration.return_value = backend.configuration()
+
+        with mock.patch.object(host, "service_backend", return_value=backend):
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn("install", self.calls("factory"))
+
+    def test_apply_scans_concrete_backend_custom_unit_directory(self):
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        directory = self.tmp / "custom-units"
+        directory.mkdir()
+        old = directory / "legacy.service"
+        old.write_text(f"[Service]\nWorkingDirectory={repo}\nExecStart=factory dispatch\n")
+        backend = service.SystemdUserBackend(host.run, unit_dir=directory)
+
+        with mock.patch.object(host, "service_backend", return_value=backend):
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertFalse(old.exists())
+        self.assertIn("disable --now legacy.service", self.calls("systemctl"))
+
     def test_apply_follows_checkout_change_after_shell_initialization(self):
         _, repo, old = self.foreign_launchd()
         other = self.repo("other", toml="")
