@@ -47,7 +47,7 @@ class ApplyTimerTest(unittest.TestCase):
                 self.assertIn("timer paused", case.output.getvalue())
                 self.assertEqual(case.backend.is_active("factory-widgets.timer"), "inactive")
                 if rollback:
-                    self.assertEqual(host.engine(host.load())["sha"], fixtures.TARGET)
+                    self.assertEqual(host.engine(host.load(), "local")["sha"], fixtures.TARGET)
 
     def test_apply_timer_health_and_engine_pause_precedence(self):
         cases = [
