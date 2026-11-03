@@ -151,6 +151,18 @@ host = "ultron"
 toolchain = "macos-xcode"
 ```
 
+`district add OWNER/REPO --host NAME` (or a GitHub URL) clones through that
+host's SSH connection. The clone parent is `[hosts.NAME].root` when set,
+otherwise `[defaults].clone_dir`, resolved against the remote home directory.
+`~/` uses the remote home, never the controller's. A checkout path is inspected
+on the assigned host; an existing checkout and `.factory.toml` are adopted.
+Check and fork detection, configuration writes, and label seeding run remotely.
+Without `--no-edit`, the controller's `$EDITOR` edits a local temporary copy of
+the proposal before it is copied back to the remote checkout.
+`--dry-run` prints the remote destination without cloning or changing either
+registry. Remote add installs no scheduler jobs; run `district apply <slug>`
+after onboarding to install them.
+
 `[hosts.NAME.defaults]` deep-merges over `[defaults]` for that remote host;
 nested tables merge key by key. `defaults_unset` removes inherited dotted keys
 after the merge. List each inherited signing environment key there to disable
