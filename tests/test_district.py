@@ -779,6 +779,75 @@ class AddTest(DistrictCase):
         self.assertFalse((Path(os.environ["HOME"]) / "factories/benito-app").exists())
         self.assertFalse((Path.cwd() / "mikeroySoft-org/benito-app").exists())
 
+    def test_add_remote_proposal_uses_local_editor(self) -> None:
+        target = "factory@ultron.example"
+        host.save({"hosts": {"ultron": {
+            "ssh": target, "platform": "macos", "root": "~/factories",
+        }}})
+        transport, remote_home, commands = self.fake_remote_transport()
+        runner = host.RemoteRunner("ultron", target, transport=transport)
+        editor = self.bin / "local-editor"
+        marker = self.tmp / "edited-path"
+        editor.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            f"assert os.environ['HOME'] == {os.environ['HOME']!r}\n"
+            "proposal = Path(sys.argv[1])\n"
+            "text = proposal.read_text()\n"
+            "assert 'pytest' in text\n"
+            "proposal.write_text(text.replace('\"pytest\"', '\"python3\", \"-m\", \"unittest\"'))\n"
+            f"Path({str(marker)!r}).write_text(str(proposal))\n"
+        )
+        editor.chmod(0o755)
+
+        with mock.patch.object(host, "remote_runner", return_value=runner), \
+                mock.patch.dict(os.environ, {"EDITOR": str(editor)}), \
+                mock.patch("builtins.input", return_value=""):
+            code, out = self.district("add", "acme/widgets", "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        proposal = remote_home / "factories/widgets/.factory.toml"
+        self.assertEqual(tomllib.loads(proposal.read_text())["gate"]["check"][0]["run"],
+                         ["python3", "-m", "unittest"])
+        edited_path = Path(marker.read_text())
+        self.assertFalse(edited_path.is_relative_to(remote_home))
+        self.assertFalse(edited_path.exists())
+        self.assertFalse(any(str(editor) in command for command in commands))
+        self.assertEqual(host.load()["repo"]["acme/widgets"]["host"], "ultron")
+
+    def test_add_remote_github_shaped_paths_are_not_clone_targets(self) -> None:
+        target = "factory@ultron.example"
+        host.save({"hosts": {"ultron": {
+            "ssh": target, "platform": "macos", "root": "~/factories",
+        }}})
+        transport, remote_home, commands = self.fake_remote_transport()
+        runner = host.RemoteRunner("ultron", target, transport=transport)
+        relative = "go/src/github.com/acme/widgets"
+        repo = remote_home / relative
+        repo.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                        "https://github.com/acme/widgets.git"], check=True)
+        original = '[[gate.check]]\nname = "tests"\nrun = ["pytest"]\n'
+        (repo / ".factory.toml").write_text(original)
+        destination = f"/Users/mike/{relative}"
+        for path in (f"~/{relative}", destination, f"./{relative}"):
+            with self.subTest(path=path), \
+                    mock.patch.object(host, "remote_runner", return_value=runner):
+                before = host.path().read_bytes()
+                code, out = self.district("add", path, "--host", "ultron", "--dry-run")
+                self.assertEqual(code, 0, out)
+                self.assertIn(f"path: {destination}", out)
+                self.assertNotIn("would clone", out)
+                self.assertEqual(host.path().read_bytes(), before)
+                code, out = self.district("add", path, "--host", "ultron", "--no-edit")
+                self.assertEqual(code, 0, out)
+                self.assertEqual(host.load()["repo"]["acme/widgets"]["path"], destination)
+        self.assertEqual((repo / ".factory.toml").read_text(), original)
+        self.assertFalse((remote_home / "factories").exists())
+        self.assertFalse(any(command.startswith("gh repo clone ") for command in commands))
+
     def test_add_remote_dry_run_prints_remote_destination_and_writes_nothing(self) -> None:
         target = "factory@ultron.example"
         host.save({"hosts": {"ultron": {
