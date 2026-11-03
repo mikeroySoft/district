@@ -510,6 +510,80 @@ class HostTest(DistrictCase):
         self.assertEqual(backups[0].read_bytes(), original)
         self.assertEqual(config.read_bytes(), host.tomli_w.dumps(host.remote_config(data, "ultron")).encode())
 
+    def test_sync_remote_config_is_idempotent_when_unchanged(self) -> None:
+        home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        config = home / ".config/factory/config.toml"
+        config.parent.mkdir(parents=True)
+        original = b'[defaults]\nfactory_ref = "old"\n'
+        config.write_bytes(original)
+        data = {"hosts": {"ultron": {"ssh": "factory@ultron.example"}},
+                "defaults": {"factory_ref": "main"}}
+        runner = host.remote_runner("ultron", data["hosts"]["ultron"])
+        host.sync_remote_config(data, "ultron", runner)
+        backups = list(config.parent.glob("config.toml.*.bak"))
+        self.assertEqual([p.read_bytes() for p in backups], [original])
+        before = {p.name: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                  for p in config.parent.iterdir()}
+
+        host.sync_remote_config(data, "ultron", runner)
+
+        after = {p.name: (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                 for p in config.parent.iterdir()}
+        self.assertEqual(after, before)
+        self.assertEqual(config.read_bytes(), host.tomli_w.dumps(host.remote_config(data, "ultron")).encode())
+
+    def test_sync_remote_config_backup_failure_leaves_config_untouched(self) -> None:
+        home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        config = home / ".config/factory/config.toml"
+        config.parent.mkdir(parents=True)
+        original = b'# keep bytes\r\n[repo."acme/hand"]\r\npath = "/srv/hand"\r\n'
+        config.write_bytes(original)
+        backup_name = "config.toml.blocked.bak"
+        (config.parent / f".{backup_name}.district.tmp").mkdir()
+        data = {"hosts": {"ultron": {"ssh": "factory@ultron.example"}}}
+        runner = host.remote_runner("ultron", data["hosts"]["ultron"])
+        with mock.patch.object(host, "_backup_name", return_value=backup_name):
+            with self.assertRaises(host.DistrictError) as raised:
+                host.sync_remote_config(data, "ultron", runner)
+
+        self.assertIn("ultron", str(raised.exception))
+        self.assertIn(str(config), str(raised.exception))
+        self.assertIn(str(config.with_name(backup_name)), str(raised.exception))
+        self.assertEqual(config.read_bytes(), original)
+        self.assertEqual(list(config.parent.glob("config.toml.*.bak")), [])
+
+    def test_sync_remote_config_reports_dropped_keys_without_values(self) -> None:
+        home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        config = home / ".config/factory/config.toml"
+        config.parent.mkdir(parents=True)
+        stored = {
+            "token": "secret-top-value",
+            "manual": {"credential": "secret-table-value"},
+            "defaults": {"triage": {"model": "secret-changed-value", "url": "secret-url-value"}},
+            "repo": {"acme/hand": {"dashboard": {"port": 9876, "theme": "secret-kept-value"}}},
+        }
+        config.write_text(host.tomli_w.dumps(stored))
+        data = {"hosts": {"ultron": {"ssh": "factory@ultron.example"}},
+                "defaults": {"triage": {"model": "managed"}},
+                "repo": {"acme/hand": {"path": "/srv/hand", "host": "ultron",
+                                      "dashboard": {"theme": "managed"}}}}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            host.sync_remote_config(data, "ultron", host.remote_runner("ultron", data["hosts"]["ultron"]))
+
+        backups = list(config.parent.glob("config.toml.*.bak"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual([line for line in out.getvalue().splitlines()
+                          if line.startswith("ultron: replacing ")], [
+            f"ultron: replacing {config} (backup {backups[0]}); dropping "
+            'token, manual, defaults.triage.url, repo."acme/hand".dashboard.port',
+        ])
+        for value in ("secret-top-value", "secret-table-value", "secret-changed-value",
+                      "secret-url-value", "secret-kept-value", "9876"):
+            self.assertNotIn(value, out.getvalue())
+        self.assertNotIn("defaults.triage.model", out.getvalue())
+        self.assertEqual(tomllib.loads(config.read_text()), host.remote_config(data, "ultron"))
+
 
     def test_multi_host_repo_requires_one_listed_triage_host(self) -> None:
         ultron = {"ssh": "factory@ultron.example", "platform": "macos"}
@@ -728,6 +802,53 @@ class AddTest(DistrictCase):
         code, out = self.district("add", str(repo))
         self.assertEqual(code, 0, out)
         self.assertEqual(list(host.load()["repo"]), ["other/name"])
+
+    def test_add_remote_dry_run_leaves_remote_config_untouched(self) -> None:
+        home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        config = home / ".config/factory/config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_bytes(b'# keep\r\n[repo."acme/hand"]\r\ntoken = "secret-remote-value"\r\n')
+        repo = self.repo(toml="")
+        registry = {"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}}}
+        host.save(registry)
+        before = {str(p.relative_to(home)): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                  for p in home.rglob("*") if p.is_file()}
+
+        code, out = self.district("add", str(repo), "--dry-run", "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"ultron: would replace {config}", out)
+        self.assertIn("would drop repo", out)
+        self.assertNotIn("secret-remote-value", out)
+        self.assertEqual(host.load(), registry)
+        self.assertEqual({str(p.relative_to(home)): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                          for p in home.rglob("*") if p.is_file()}, before)
+        self.assertFalse(any("install" in call for call in self.calls("factory")))
+        self.assertEqual(self.calls("launchctl"), [])
+
+    def test_add_remote_clone_dry_run_previews_config_without_writes(self) -> None:
+        home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        config = home / ".config/factory/config.toml"
+        config.parent.mkdir(parents=True)
+        config.write_bytes(b'[manual]\ntoken = "secret-remote-value"\n')
+        registry = {"hosts": {"ultron": {
+            "ssh": "factory@ultron.example", "platform": "macos", "root": "~/factories",
+        }}}
+        host.save(registry)
+        before = {str(p.relative_to(home)): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                  for p in home.rglob("*") if p.is_file()}
+
+        code, out = self.district("add", "acme/widgets", "--dry-run", "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        self.assertIn(f"would clone acme/widgets -> {home}/factories/widgets", out)
+        self.assertIn(f"ultron: would replace {config}", out)
+        self.assertIn("would drop manual", out)
+        self.assertNotIn("secret-remote-value", out)
+        self.assertEqual(host.load(), registry)
+        self.assertFalse((home / "factories").exists())
+        self.assertEqual({str(p.relative_to(home)): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                          for p in home.rglob("*") if p.is_file()}, before)
 
     def test_add_records_existing_host(self) -> None:
         host.save({"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}}})
@@ -1223,6 +1344,36 @@ class AddTest(DistrictCase):
 
 
 class ApplyTest(DistrictCase):
+    def test_apply_remote_dry_run_leaves_remote_files_untouched(self) -> None:
+        homes = self.fake_ssh("factory@ultron.example", "factory@benito.example")
+        configured = {}
+        for name in ("ultron", "benito"):
+            target = f"factory@{name}.example"
+            configured[name] = {"ssh": target, "platform": "macos"}
+            config = homes[target] / ".config/factory/config.toml"
+            config.parent.mkdir(parents=True)
+            config.write_bytes(b'# keep\r\n[manual]\r\ntoken = "secret-remote-value"\r\n')
+        registry = {"hosts": configured, "repo": {"acme/widgets": {
+            "path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron",
+        }}}
+        host.save(registry)
+        before = {str(p): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                  for home in homes.values() for p in home.rglob("*") if p.is_file()}
+
+        code, out = self.district("apply", "--dry-run")
+
+        self.assertEqual(code, 0, out)
+        for name in configured:
+            config = homes[f"factory@{name}.example"] / ".config/factory/config.toml"
+            self.assertIn(f"{name}: would replace {config}", out)
+        self.assertEqual(out.count("would drop manual"), 2)
+        self.assertNotIn("secret-remote-value", out)
+        self.assertEqual(host.load(), registry)
+        self.assertEqual({str(p): (p.stat().st_ino, p.stat().st_mtime_ns, p.read_bytes())
+                          for home in homes.values() for p in home.rglob("*") if p.is_file()}, before)
+        self.assertEqual(self.calls("factory"), [])
+        self.assertEqual(self.calls("launchctl"), [])
+
     def register(self, failures: int = 0, **extra) -> Path:
         repo = self.repo(toml="")
         host.save({"repo": {"acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}, **extra}}})

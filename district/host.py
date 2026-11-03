@@ -16,6 +16,7 @@ import base64
 import copy
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -682,7 +683,24 @@ def remote_config(data: dict, name: str) -> dict:
     return result
 
 
-def sync_remote_config(data: dict, name: str, runner: RemoteRunner, *, deadline: float | None = None) -> None:
+def _dropped_keys(stored: dict, rendered: dict, prefix: str = "") -> list[str]:
+    dropped = []
+    for key, value in stored.items():
+        part = key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key)
+        path = f"{prefix}.{part}" if prefix else part
+        if key not in rendered:
+            dropped.append(path)
+        elif isinstance(value, dict):
+            replacement = rendered[key]
+            if isinstance(replacement, dict):
+                dropped.extend(_dropped_keys(value, replacement, path))
+            else:
+                dropped.append(path)
+    return dropped
+
+
+def sync_remote_config(data: dict, name: str, runner: RemoteRunner, *, deadline: float | None = None,
+                       dry_run: bool = False) -> None:
     if deadline is None:
         deadline = time.monotonic() + 10
     config_path = PurePosixPath(runner.facts(timeout=service.remaining_timeout(deadline))["config_home"]) / "factory" / "config.toml"
@@ -699,10 +717,26 @@ def sync_remote_config(data: dict, name: str, runner: RemoteRunner, *, deadline:
         raise DistrictError(f"{name}: cannot read {config_path}: {exc}") from exc
     except tomllib.TOMLDecodeError:
         stored = None  # Successfully read bytes still need preservation before replacement.
-    if original is not None and (stored is None or _has_factory_source(stored)):
-        runner.path(config_path.with_name(_backup_name(config_path.name))).write_bytes(
-            original, timeout=service.remaining_timeout(deadline))
-    config.write_text(tomli_w.dumps(remote_config(data, name)), timeout=service.remaining_timeout(deadline))
+    rendered = remote_config(data, name)
+    body = tomli_w.dumps(rendered)
+    if original == body.encode():
+        return
+    backup = config_path.with_name(_backup_name(config_path.name)) if original is not None else None
+    dropped = _dropped_keys(stored, rendered) if stored is not None else []
+    if backup is not None and not dry_run:
+        try:
+            runner.path(backup).write_bytes(original, timeout=service.remaining_timeout(deadline))
+        except (OSError, DistrictError, RemoteHostError, subprocess.TimeoutExpired) as exc:
+            raise DistrictError(f"{name}: cannot back up {config_path} to {backup}") from exc
+    if not dry_run:
+        config.write_text(body, timeout=service.remaining_timeout(deadline))
+    action = "would replace" if dry_run else "replacing"
+    message = f"{name}: {action} {config_path}"
+    if backup is not None:
+        message += f" ({'would back up to' if dry_run else 'backup'} {backup})"
+    if dropped:
+        message += f"; {'would drop' if dry_run else 'dropping'} {', '.join(dropped)}"
+    print(message)
 
 
 def engine(data: dict, name: str) -> dict | None:

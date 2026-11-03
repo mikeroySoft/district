@@ -460,6 +460,41 @@ def onboard(root: Path | host.RemotePath, repo_file: Path | host.RemotePath,
         raise
 
 
+def preview_remote_registration(
+    data: dict, slug: str, root: Path | host.RemotePath, port: int, requested: str | None,
+) -> None:
+    """Preview the remote config produced by the normal in-memory registration."""
+    if requested in (None, "local"):
+        return
+    prospective = copy.deepcopy(data)
+    registered = host.repos(prospective)
+    for other in registered:
+        if other != slug and host.unit_name(other) == host.unit_name(slug):
+            raise DistrictError(f"{slug} would share unit {host.unit_name(slug)} with {other}; rename one checkout's origin")
+    current = host.repo_hosts(registered[slug], slug) if slug in registered else [requested]
+    joining = requested not in current
+    if joining:
+        names = [*current, requested]
+        if blocked := host.claims_blockers(prospective, names):
+            raise DistrictError(
+                f"{slug} already runs on {', '.join(current)}; a second host needs every host to coordinate "
+                f"ticket claims, but {blocked}; nothing written"
+            )
+    table = host.repo_table(prospective, slug)
+    table["path"] = str(root)
+    if joining:
+        table.pop("host", None)
+        table.setdefault("triage_host", current[0])
+        table["hosts"] = names
+        host.sync_local_claims(prospective)
+        print(f"{slug}: hosts {', '.join(names)} (triage on {table['triage_host']})")
+    elif "hosts" not in table:
+        table["host"] = requested
+    table.setdefault("dashboard", {})["port"] = port
+    runner = host.remote_runner(requested, prospective["hosts"][requested])
+    host.sync_remote_config(prospective, requested, runner, dry_run=True)
+
+
 def dry_run(target: str, args: argparse.Namespace, data: dict,
             runner: host.RemoteRunner | None = None) -> int:
     """Print what `add` would do — slug, port, fork parent, checks or lifted keys — and write nothing."""
@@ -472,6 +507,9 @@ def dry_run(target: str, args: argparse.Namespace, data: dict,
             parent = fork_parent(slug, run_cmd)
             print(f"fork of: {parent}" if parent else "not a fork")
             print("checks: detected after the clone")
+            port = dashboard_port(slug, {}, data)
+            print(f"dashboard port: {port}")
+            preview_remote_registration(data, slug, dest, port, args.host)
             return 0
         root = dest
     elif runner is None and ("://" in target or target.startswith("git@")):
@@ -516,6 +554,7 @@ def dry_run(target: str, args: argparse.Namespace, data: dict,
         print("checks (proposed):" if checks else "checks: none detected; pass --check name=cmd")
         for c in checks:
             print(f"  {c['name']}: {' '.join(c['run'])}   # from {c['source']}")
+    preview_remote_registration(data, slug, root, port, args.host)
     return 0
 
 
