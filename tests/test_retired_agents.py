@@ -3,12 +3,179 @@ import json
 import os
 import plistlib
 from pathlib import Path
+from unittest import mock
 
-from district import host
+from district import apply, host, install_state
 from tests.test_district import DistrictCase
 
 
+class WrappedSchedulerChecks:
+    def wrapped_launchd(self):
+        home, repo, old = self.foreign_launchd()
+        alias = self.tmp / "checkout-alias"
+        alias.symlink_to(repo, target_is_directory=True)
+        document = plistlib.loads(old.read_bytes())
+        document["WorkingDirectory"] = str(alias)
+        document["ProgramArguments"] = self.arguments
+        old.write_bytes(plistlib.dumps(document))
+        return home, repo, old
+
+    def test_apply_retires_wrapped_scheduler_before_install(self):
+        home, _, old = self.wrapped_launchd()
+        original = old.read_bytes()
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        calls = self.calls("launchctl")
+        bootout = f"bootout gui/{os.getuid()}/{old.stem}"
+        bootstrap = f"bootstrap gui/{os.getuid()} {old.parent / 'factory-widgets.plist'}"
+        self.assertIn(bootout, calls)
+        self.assertLess(calls.index(bootout), calls.index(bootstrap))
+        self.assertFalse(old.exists())
+        self.assertEqual([path.read_bytes() for path in home.glob(
+            f".local/state/district/retired-agents/*/{old.name}")], [original])
+        states = [json.loads(line) for line in (self.bin / "loaded.jsonl").read_text().splitlines()]
+        self.assertTrue(all(len(state) <= 1 for state in states), states)
+        self.assertEqual(states[-1], ["factory-widgets"])
+
+    def test_dry_run_lists_wrapped_scheduler_without_mutation(self):
+        home, _, old = self.wrapped_launchd()
+        registry = host.path().read_bytes()
+        before = {path.relative_to(home): path.read_bytes()
+                  for path in home.rglob("*") if path.is_file()}
+
+        code, out = self.district("apply", "--dry-run")
+
+        self.assertEqual(code, 0, out)
+        for text in ("would", "ultron", old.stem, str(old), "loaded", "factory-widgets"):
+            self.assertIn(text, out)
+        self.assertEqual(host.path().read_bytes(), registry)
+        self.assertEqual({path.relative_to(home): path.read_bytes()
+                          for path in home.rglob("*") if path.is_file()}, before)
+        self.assertFalse(install_state.state_path().exists())
+        self.assertFalse(any(call.startswith(("bootout ", "bootstrap ", "kill ", "disable ", "enable "))
+                             for call in self.calls("launchctl")))
+        self.assertFalse(any(call.startswith(("disable ", "enable ", "stop ", "start ", "daemon-reload"))
+                             for call in self.calls("systemctl")))
+        self.assertNotIn("install", self.calls("factory"))
+
+    def test_doctor_reports_wrapped_scheduler_conflict_without_mutation(self):
+        home, repo, old = self.wrapped_launchd()
+        (old.parent / "factory-widgets.plist").write_bytes(plistlib.dumps({
+            "Label": "factory-widgets", "WorkingDirectory": str(repo),
+            "ProgramArguments": ["factory", "dispatch"], "StartInterval": 600,
+        }))
+        before = {path.relative_to(home): path.read_bytes()
+                  for path in home.rglob("*") if path.is_file()}
+
+        code, out = self.district("doctor", "--json")
+
+        rows = json.loads(out)["rows"]
+        conflict = [row for row in rows
+                    if row["label"] == "host ultron repo acme/widgets scheduler conflict"]
+        self.assertEqual(code, 1, rows)
+        self.assertEqual(len(conflict), 1, rows)
+        self.assertEqual(conflict[0]["status"], "FAIL")
+        for text in (str(repo.resolve()), old.stem, "factory-widgets"):
+            self.assertIn(text, conflict[0]["detail"])
+        self.assertEqual({path.relative_to(home): path.read_bytes()
+                          for path in home.rglob("*") if path.is_file()}, before)
+        self.assertFalse(any(call.startswith(("bootout ", "bootstrap ", "kill ", "disable ", "enable "))
+                             for call in self.calls("launchctl")))
+
+
+class ShellWrappedSchedulerTest(WrappedSchedulerChecks, DistrictCase):
+    arguments = ["/bin/zsh", "-lc", "source ~/.zprofile; factory dispatch"]
+
+
+class UvWrappedSchedulerTest(WrappedSchedulerChecks, DistrictCase):
+    arguments = ["uv", "run", "--project", ".", "factory", "dispatch"]
+
+
 class ForeignAgentEdgeTest(DistrictCase):
+    def test_apply_ignores_quoted_and_echoed_factory_commands(self):
+        _, repo, old = self.foreign_launchd()
+        commands = [
+            "echo factory dispatch",
+            "source ~/.zprofile; echo 'factory dispatch'",
+            "source ~/.zprofile; 'factory dispatch'",
+            "echo ';' factory dispatch",
+            'printf "%s" "source ~/.zprofile; factory dispatch"',
+        ]
+        originals = {}
+        for index, command in enumerate(commands):
+            path = old.parent / f"maintenance-{index}.plist"
+            originals[path] = plistlib.dumps({
+                "Label": path.stem, "WorkingDirectory": str(repo),
+                "ProgramArguments": ["/bin/zsh", "-lc", command],
+            })
+            path.write_bytes(originals[path])
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertFalse(old.exists())
+        for path, original in originals.items():
+            self.assertEqual(path.read_bytes(), original)
+            self.assertFalse(any(call.startswith(("bootout ", "disable "))
+                                 and call.endswith(f"/{path.stem}") for call in self.calls("launchctl")))
+
+    def test_apply_ignores_non_utf8_unrelated_systemd_timer(self):
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        directory = host.unit_dir()
+        directory.mkdir(parents=True)
+        timer = directory / "maintenance.timer"
+        original = b"[Unit]\nDescription=Maintenance \xff\n[Timer]\nOnBootSec=1h\n"
+        timer.write_bytes(original)
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assertEqual(timer.read_bytes(), original)
+        self.assertIn("install", self.calls("factory"))
+
+    def test_apply_reports_non_utf8_relevant_systemd_definitions(self):
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        directory = host.unit_dir()
+        directory.mkdir(parents=True)
+        service = directory / "legacy.service"
+        service.write_text(f"[Service]\nWorkingDirectory={repo}\nExecStart=factory dispatch\n")
+        timer = directory / "custom.timer"
+        timer.write_bytes(b"[Unit]\nDescription=Factory \xff\n[Timer]\nUnit=legacy.service\n")
+
+        code, out = self.district("apply")
+
+        self.assertEqual(code, 1, out)
+        self.assertIn("cannot inspect scheduler agents", out)
+        self.assertTrue(service.exists())
+        self.assertTrue(timer.exists())
+        self.assertNotIn("install", self.calls("factory"))
+
+    def test_apply_propagates_install_oserror_without_foreign_agents(self):
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        original_run = apply.run
+
+        def run(argv, **kwargs):
+            if argv[1:] == ["install"]:
+                raise OSError("installer unavailable")
+            return original_run(argv, **kwargs)
+
+        with mock.patch.object(apply, "run", side_effect=run):
+            with self.assertRaisesRegex(OSError, "installer unavailable"):
+                self.district("apply")
+
+    def test_apply_propagates_drain_oserror_without_foreign_agents(self):
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+
+        with mock.patch.object(apply, "drain", side_effect=OSError("cannot drain scheduler")):
+            with self.assertRaisesRegex(OSError, "cannot drain scheduler"):
+                self.district("apply")
+
     def test_apply_finds_dispatch_before_later_oneshot_commands(self):
         repo = self.repo(toml="")
         host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
