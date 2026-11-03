@@ -7,6 +7,7 @@ exactly once, here. Afterwards the factory owns its floor.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import difflib
 import json
@@ -15,6 +16,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path, PurePosixPath
 
@@ -357,10 +359,10 @@ def dashboard_port(slug: str, existing: dict, data: dict) -> int:
 
 
 def target_slug(target: str) -> str | None:
-    if slug := remote_slug(target):
-        return slug
     if target.startswith(("/", "~", ".")):
         return None
+    if slug := remote_slug(target):
+        return slug
     parts = target.strip("/").split("/")
     return target.lower() if len(parts) == 2 and all(parts) else None
 
@@ -414,7 +416,7 @@ def write_repo_file(path: Path | host.RemotePath, checks: list[dict], upstream: 
 
 
 def onboard(root: Path | host.RemotePath, repo_file: Path | host.RemotePath,
-            args: argparse.Namespace, upstream: str | None, run_cmd=run) -> None:
+            args: argparse.Namespace, upstream: str | None) -> None:
     """Net-new: propose checks from markers (or --check), ask exclusivity, confirm in $EDITOR, write."""
     checks = [parse_check(s) for s in args.check] or propose_checks(root)
     if not checks:
@@ -435,12 +437,18 @@ def onboard(root: Path | host.RemotePath, repo_file: Path | host.RemotePath,
     write_repo_file(repo_file, checks, upstream)
     try:
         if not args.no_edit:
-            editor = shlex.split(os.environ.get("EDITOR") or "vi")
-            proc = (run_cmd([*editor, str(repo_file)])
-                    if isinstance(run_cmd, host.RemoteRunner)
-                    else subprocess.run([*editor, str(repo_file)], check=False))
-            if proc.returncode != 0:
-                raise DistrictError("editor exited nonzero; nothing written")
+            with contextlib.ExitStack() as stack:
+                edit_file = repo_file
+                if isinstance(repo_file, host.RemotePath):
+                    directory = stack.enter_context(tempfile.TemporaryDirectory(prefix="district-add-"))
+                    edit_file = Path(directory) / CONFIG_NAME
+                    edit_file.write_text(repo_file.read_text())
+                editor = shlex.split(os.environ.get("EDITOR") or "vi")
+                proc = subprocess.run([*editor, str(edit_file)], check=False)
+                if proc.returncode != 0:
+                    raise DistrictError("editor exited nonzero; nothing written")
+                if edit_file is not repo_file:
+                    repo_file.write_text(edit_file.read_text())
         try:
             final = tomllib.loads(repo_file.read_text())
         except tomllib.TOMLDecodeError as exc:
@@ -635,7 +643,7 @@ def main(argv: list[str]) -> int:
             print(f"WARN {CONFIG_NAME} does not set [repo].upstream = \"{upstream}\"; upstream sync stays off until it does")
     else:
         try:
-            onboard(root, repo_file, args, upstream, run_cmd)
+            onboard(root, repo_file, args, upstream)
         except DistrictError:
             # nothing for `apply` to resume without a repo file: forget the entry
             del data["repo"][slug]
