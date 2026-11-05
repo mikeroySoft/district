@@ -491,11 +491,11 @@ def check() -> list[dict[str, str]]:
     rows.append(row("PASS", "clone_dir", str(clone_dir)) if clone_dir.is_dir() else row("WARN", "clone_dir", f"{clone_dir} is not a directory"))
     rows += policy_rows(data)
     rows += unit_rows(backend)
-    for slug in host.repos(data):
-        alerts, gaps = streak.collect(data, slug)
-        rows += [row("FAIL", f"failure streak {alert['host']} {slug}", streak.describe(alert))
-                 for alert in alerts]
-        rows += [row("WARN", f"pass history {gap['host']} {slug}", gap["error"]) for gap in gaps]
+    alerts, gaps = streak.collect(data)
+    rows += [row("FAIL", f"failure streak {alert['host']} {alert['label']}", streak.describe(alert))
+             for alert in alerts]
+    rows += [row("FAIL" if gap["code"] in ("host_without_repos", "unrecognized_factory_job", "journalctl_unavailable") else "WARN",
+                 f"{gap['code']} {gap['host']} {gap['label'] or ''}", gap["error"]) for gap in gaps]
     return rows
 
 

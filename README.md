@@ -74,42 +74,56 @@ even when District temporarily disabled them. Missing or failed timers and
 unrecorded disabled timers still fail convergence, as do failed repo checks and
 registry `disabled_at` holds. Deferred rows keep their existing handling.
 
-## Repeated pass failures
+## Job health
 
-`district status` raises operational attention (exit 1) when a factory's last
-N recorded service passes **on the same host** all failed. The evidence column
-names the host, repo, N, first failure time in that window, and the last error
-line when available. `district doctor` reports the same streak as `FAIL`.
-Every assigned host is checked, not just a multi-host repo's triage host.
+`district status` raises operational attention (exit 1), and `district doctor`
+reports `FAIL`, when any of these holds **on the same host and job**:
 
-Configure N in the host registry; the default is 6:
+- The last 3 recorded service passes failed. `[defaults].failed_pass_streak`
+  can override this threshold; remote `[hosts.NAME.defaults]` overrides apply.
+- More than half the recorded runs in the last 6 hours failed.
+- An enabled scheduled job has not run for 2 hours and is not currently running.
+  A never-run job uses its installation/activation time when available.
 
-```toml
-[defaults]
-failed_pass_streak = 6 # positive integer; one hour at install.every = "10min"
-```
+These are read-only alerts, separate from `max_failed_passes` and apply's timer
+failure cap. A successful latest run clears the streak, but not an unhealthy
+six-hour failure rate. Nonzero service/dispatch exits count as failures even
+when triage or watch succeeded. A manager's latest exit is never expanded into
+multiple runs, and repeated status polls never create history.
 
-Remote `[hosts.NAME.defaults]` overrides apply to this setting too. This is a
-read-only alert, separate from `max_failed_passes` and apply's timer failure cap.
-One success among the last N passes clears the streak; fewer than N completions
-does not alert. Unreachable hosts do not produce streaks and retain unknown
-exit 2 when there is no other operational attention.
+Every configured `[hosts.NAME]` entry is inspected, including hosts without
+assigned repositories. Status adds `host:NAME` rows for `host_without_repos`
+and `unrecognized_factory_job` findings. Recognized hand-made launchd labels
+are matched by the `factory-REPO` suffix or an unambiguous working directory.
+`--slug` limits repository output, not host discovery. Unreachable hosts retain
+unknown exit 2 when there is no other operational attention.
 
-Linux reads retained systemd user-journal unit completion results, including
-failures before Factory can import. macOS reads the launchd plist's stdout/stderr
-pass logs, or conventional `.factory/logs/factory-REPO.{stdout,stderr}.log` and
-`~/Library/Logs/factory-REPO.log` paths when no plist log paths are declared.
-Pass logs need `=== end rc=CODE` markers and an ISO-8601 timestamp with timezone
-on the pass's opening marker or end line. A single manager exit status is not
-treated as N passes; status polls never create pass history. Reads are bounded
-to the latest 10,000 journal records or 4 MiB per log; missing, rotated-away,
-or insufficient history cannot establish a streak.
+Linux reads the systemd user journal plus `ExecMainStatus`, `Result`, timer
+enablement, and last-start/trigger timestamps. macOS reads `launchctl print`
+(`last exit code`, `runs`, running state), disabled-job state, and the actual
+plist's stdout/stderr logs. If no log paths are declared, it tries conventional
+`.factory/logs/factory-REPO.{stdout,stderr}.log` and
+`~/Library/Logs/factory-REPO.log` paths. macOS needs no journalctl. A dashboard
+or history read that cannot launch journalctl produces `journalctl_unavailable`
+rather than a traceback escaping District.
 
-`status --json` includes a `failure_streaks` list per repo, with `host`, `repo`,
-`count`, `first_failed_at`, `last_failed_at`, and nullable `last_error`. It also
-adds the evidence to the existing operational findings. History read errors
-appear in `pass_history_errors` (host, repo, error, unreachable) and as doctor
-warnings; an observation failure is not a failed factory pass.
+Pass logs use `=== end rc=CODE` markers. Opening/end markers may carry ISO-8601
+timestamps or the shell's plain `date` format, including PST/PDT. Undated
+completions still count toward streaks and the failure-rate sample; the rate
+explicitly marks its window uncertain and reports the undated count rather
+than silently discarding runs. Log mtime supplies last-run timing only when
+no dated completion is available. Missing timing is not proof of a stall.
+Reads are bounded to the latest 10,000 journal records or 4 MiB per log;
+rotated-away history is not evidence.
+
+`status --json` retains the per-repo `failure_streaks` list for job-health
+alerts. Each alert includes `host`, `repo` (null for an unregistered job),
+`label`, `rule` (`failure_streak`, `failure_rate`, or `stalled`), `count`
+(failures), `total`, `window_hours`, `first_failed_at`, `last_failed_at`,
+`last_run_at`, and nullable `first_error`/`last_error`. Rate alerts also include
+`undated_count`. The table names the host, label, failure count, window, and
+first error line. `pass_history_errors` includes host, repo, label, code,
+error, and unreachable state; read errors are not failed job runs.
 
 ## Ownership
 

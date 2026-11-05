@@ -574,11 +574,13 @@ class FleetCollector:
         self._pool = None
 
 
-def fleet(data: dict) -> dict[str, dict]:
+def fleet(data: dict, *, registry: dict | None = None) -> dict[str, dict]:
     """Collect one bounded runtime/full round, gathering target hosts in parallel."""
     collector = FleetCollector(data)
     if not collector.repos:
-        return {}
+        entries = {}
+        add_job_health(registry if registry is not None else data, entries, collector.timeout)
+        return entries
 
     def collect(slug: str) -> None:
         collector.collect_runtime(slug)
@@ -605,33 +607,65 @@ def fleet(data: dict) -> dict[str, dict]:
             pass
     entries = collector.fleet()
 
-    def collect_streaks(slug: str) -> None:
-        item = entries[slug]
-        skip = {item["host"]} if item["host_state"] == "unreachable" else set()
-        alerts, gaps = streak.collect(data, slug, skip=skip, timeout=collector.timeout)
-        item.update(failure_streaks=alerts, pass_history_errors=gaps)
-        sources = [{
-            "id": f"district.pass-history/{alert['host']}", "observed_at": _utcnow(),
-            "cadence_seconds": FULL_INTERVAL, "error": None,
-            "data": {"checks": [{
-                "condition": "runtime.dispatcher_failed", "resource": f"{alert['host']}/dispatcher",
-                "status": "failed", "detail": streak.describe(alert),
-                "impact": "The factory's last recorded passes all failed.",
-                "reference": "service pass history",
-            }]},
-        } for alert in alerts]
-        if sources:
-            classified = health.classify(slug, sources, {})
-            item["findings"].extend(classified["findings"])
-            item["sources"].extend(classified["sources"])
-            item["assessment"] = "attention"
-        elif any(gap["unreachable"] for gap in gaps) and item["assessment"] != "attention":
-            item["assessment"] = "unknown"
-
-    with ThreadPoolExecutor(max_workers=collector.concurrency) as pool:
-        for _ in pool.map(collect_streaks, entries):
-            pass
+    add_job_health(registry if registry is not None else data, entries, collector.timeout)
     return entries
+
+
+def add_job_health(data: dict, entries: dict[str, dict], timeout: float) -> None:
+    """Attach native evidence, including host-only findings, to CLI records."""
+    skip = {item["host"] for item in entries.values() if item["host_state"] == "unreachable"}
+    alerts, gaps = streak.collect(data, skip=skip, timeout=timeout)
+    for item in entries.values():
+        item.update(failure_streaks=[], pass_history_errors=[])
+
+    def destinations(record):
+        if record["repo"]:
+            return [record["repo"]] if record["repo"] in entries else []
+        if record["label"] is None and record.get("code") != "host_without_repos":
+            assigned = [slug for slug, table in host.repos(data).items()
+                        if record["host"] in host.repo_hosts(table, slug) and slug in entries]
+            if assigned:
+                return assigned
+        key = f"host:{record['host']}"
+        if key not in entries:
+            entries[key] = entry({"slug": key, "snap": None}, {"host": record["host"]})
+            entries[key].update(failure_streaks=[], pass_history_errors=[])
+        return [key]
+
+    sources_by_slug: dict[str, list[dict]] = {}
+    def finding(slug, condition, record, detail, impact):
+        sources = sources_by_slug.setdefault(slug, [])
+        source = {
+            "id": f"district.pass-history/{record['host']}/{record['label'] or 'registry'}/{record.get('rule', condition)}",
+            "observed_at": _utcnow(), "cadence_seconds": FULL_INTERVAL, "error": None,
+            "data": {"checks": [{
+                "condition": condition, "resource": f"{record['host']}/{record['label'] or 'registry'}",
+                "status": "failed", "detail": detail, "impact": impact, "reference": "native service job history",
+            }]},
+        }
+        sources.append(source)
+
+    for alert in alerts:
+        for slug in destinations(alert):
+            entries[slug]["failure_streaks"].append(alert)
+            condition = "scheduling.unexpected_stop" if alert["rule"] == "stalled" else "runtime.dispatcher_failed"
+            finding(slug, condition, alert, streak.describe(alert),
+                    "The enabled factory has stalled." if alert["rule"] == "stalled" else "Recorded factory job runs failed.")
+    for gap in gaps:
+        for slug in destinations(gap):
+            item = entries[slug]
+            item["pass_history_errors"].append(gap)
+            if gap["code"] in ("host_without_repos", "unrecognized_factory_job", "journalctl_unavailable"):
+                finding(slug, gap["code"], gap, f"{gap['code']}: {gap['error']}",
+                        "Fleet job coverage is incomplete or does not match the host registry.")
+            elif gap["unreachable"] and item["assessment"] != "attention":
+                item["assessment"] = "unknown"
+    for slug, sources in sources_by_slug.items():
+        item = entries[slug]
+        classified = health.classify(slug, sources, {})
+        item["findings"].extend(classified["findings"])
+        item["sources"].extend(classified["sources"])
+        item["assessment"] = "attention"
 
 
 def row(slug: str, e: dict) -> dict:
@@ -690,10 +724,11 @@ def main(argv: list[str]) -> int:
         if unknown:
             parser.error(f"unknown slug: {', '.join(unknown)}")
         known = {s: known[s] for s in args.slug}
+    registry = data
     data = {**data, "repo": known}
     gh = doctor.gh_auth()
     failed = gh["status"] == "FAIL"
-    entries = fleet(data)
+    entries = fleet(data, registry=registry)
     parity = doctor.parity_by_slug(data)
     if args.unhealthy:
         entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}
