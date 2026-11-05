@@ -83,7 +83,7 @@ for label, (doc, installed) in jobs.items():
     rc, status, error = command('print', domain + '/' + label)
     if rc:
         gaps.append(error or 'launchctl print unavailable: ' + label)
-    held = re.search(r'["\\x27]?' + re.escape(label) + r'["\\x27]?\\s*=>\\s*true', disabled)
+    held = re.search(r'^\\s*["\\x27]?' + re.escape(label) + r'["\\x27]?\\s*=>\\s*(?:true|disabled)\\b', disabled, re.M)
     result.append({'label': label, 'root': root, 'logs': logs, 'mtimes': mtimes,
                    'stderr': logs.get(error_path, ''), 'status': status,
                    'enabled': not bool(held) and not doc.get('Disabled', False) and

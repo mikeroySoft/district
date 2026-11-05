@@ -243,7 +243,9 @@ def render(entries: dict[str, dict], generated_at: datetime | None = None,
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district report", description=__doc__.split("\n", 1)[0])
     parser.parse_args(argv)
-    entries = status.fleet(host.load())
+    data = host.load()
+    entries = status.fleet(data)
+    status.add_job_health(data, entries, status.COLLECTION_TIMEOUT)
     print(render(entries, _now(), install_state.read_record()))
     if any(entry.get("assessment") == "attention" for entry in entries.values()):
         return 1

@@ -76,8 +76,9 @@ registry `disabled_at` holds. Deferred rows keep their existing handling.
 
 ## Job health
 
-`district status` raises operational attention (exit 1), and `district doctor`
-reports `FAIL`, when any of these holds **on the same host and job**:
+`district status` and `district report` raise operational attention (exit 1),
+and `district doctor` reports `FAIL`, when any of these holds
+**on the same host and job**:
 
 - The last 3 recorded service passes failed. `[defaults].failed_pass_streak`
   can override this threshold; remote `[hosts.NAME.defaults]` overrides apply.
@@ -100,8 +101,9 @@ unknown exit 2 when there is no other operational attention.
 
 Linux reads the systemd user journal plus `ExecMainStatus`, `Result`, timer
 enablement, and last-start/trigger timestamps. macOS reads `launchctl print`
-(`last exit code`, `runs`, running state), disabled-job state, and the actual
-plist's stdout/stderr logs. If no log paths are declared, it tries conventional
+(`last exit code`, `runs`, running state), disabled-job state (`true` or
+`disabled`, matched to the exact label), and the actual plist's stdout/stderr
+logs. If no log paths are declared, it tries conventional
 `.factory/logs/factory-REPO.{stdout,stderr}.log` and
 `~/Library/Logs/factory-REPO.log` paths. macOS needs no journalctl. A dashboard
 or history read that cannot launch journalctl produces `journalctl_unavailable`
