@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import ast
 import json
-import os
 import shlex
 import subprocess
 import sys
@@ -12,6 +11,7 @@ import unittest
 from pathlib import Path
 
 from district import engine_cleanup, host, postcheck, preflight, streak
+from tests.test_remote_shell import fish_model
 
 
 class RemotePythonTest(unittest.TestCase):
@@ -19,6 +19,7 @@ class RemotePythonTest(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.bin = self.root / "path-bin"
         self.bin.mkdir()
+        (self.bin / "sh").symlink_to("/bin/sh")
         self.old = self.root / "python39"
         self.old.write_text(
             f"#!{sys.executable}\n"
@@ -33,6 +34,7 @@ class RemotePythonTest(unittest.TestCase):
             "sys.argv = ['-c', *sys.argv[3:]]\n"
             "exec(code, {'__name__': '__main__'})\n"
         )
+        (self.bin / "env").symlink_to("/usr/bin/env")
         self.old.chmod(0o755)
         (self.bin / "python3").symlink_to(self.old)
         self.tools = self.root / "tools"
@@ -51,14 +53,17 @@ class RemotePythonTest(unittest.TestCase):
             "/usr/local/bin/python3": str(self.root / "missing-local"),
         }
 
-    def runner(self):
+    def runner(self, *, fish=False):
         def transport(ssh, **kwargs):
             command = ssh[-1]
             # Fake absolute macOS paths only in discovery, never in helper payloads.
             if command.startswith("/bin/sh -c "):
-                for source, target in self.layout.items():
+                for source, target in sorted(self.layout.items(), key=lambda item: -len(item[0])):
                     command = command.replace(source, target)
             self.commands.append(command)
+            if fish:
+                return fish_model(command, env=self.env, text=True, timeout=kwargs.get("timeout"),
+                                  input=kwargs.get("input"))
             return subprocess.run(
                 ["/bin/sh", "-c", command], env=self.env, text=True, capture_output=True,
                 timeout=kwargs.get("timeout"), input=kwargs.get("input"),
@@ -97,6 +102,23 @@ class RemotePythonTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.strip(), str(brew))
 
+    def test_explicit_interpreter_path_survives_fish_quoting(self):
+        self.tools = self.root / "tools\\\\name '$HOME"
+        self.modern = self.tools / "factory/bin/python"
+        self.modern.parent.mkdir(parents=True)
+        self.modern.symlink_to(sys.executable)
+        self.env["UV_TOOL_DIR"] = str(self.tools)
+        proc = self.runner(fish=True)(["python3", "-c", "import sys; print(sys.executable)"], quiet=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), str(self.modern))
+
+    def test_rejects_python39_interpreter_probe_before_cleanup(self):
+        def old_probe(ssh, **kwargs):
+            return subprocess.CompletedProcess(ssh, 0, json.dumps([str(self.old), [3, 9, 6]]), "")
+        runner = host.RemoteRunner("mac", "unused", transport=old_probe)
+        with self.assertRaisesRegex(host.DistrictError, r"mac:.*Python 3\.11\+"):
+            runner(["python3", "-c", engine_cleanup._CLEANUP_SCRIPT], input="{}", quiet=True)
+
     def test_preflight_reports_selected_version_and_rejects_python39_only_host(self):
         rendered = f"# factory-example.service\nEnvironment=PATH={self.bin}\nExecStart=factory\n"
         table = {"path": str(self.root)}
@@ -109,7 +131,7 @@ class RemotePythonTest(unittest.TestCase):
 
     def test_remote_scripts_parse_with_python39_grammar(self):
         # Inventory literal helper assignments and script constants, not just cleanup.
-        scripts = [engine_cleanup._CLEANUP_SCRIPT, host.REMOTE_DEADLINE,
+        scripts = [engine_cleanup._CLEANUP_SCRIPT, host.REMOTE_DEADLINE, host.REMOTE_EXEC,
                    postcheck._HTTP, postcheck._REMOTE_TEMP, postcheck._REMOTE_REMOVE, streak.LAUNCHD_LOGS]
         package = Path(host.__file__).parent
         for module in ("host", "drain", "doctor", "service", "apply", "postcheck", "streak"):

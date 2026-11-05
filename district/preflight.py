@@ -256,6 +256,10 @@ def check(data: dict, name: str, slug: str, table: dict, rendered: str, *, run_c
     rows: list[dict[str, str]] = []
     try:
         runner = _runner(data, name, run_cmd)
+        if isinstance(runner, host.RemoteRunner):
+            python = runner.python(timeout=PROBE_TIMEOUT)
+            rows.append(_row("PASS", f"host {name} remote helper python3",
+                             f"{python}: Python {runner.python_version} (requires >=3.11)"))
         environment = scheduler_environment(rendered, runner)
     except (OSError, TypeError, ValueError, KeyError, host.DistrictError, host.RemoteHostError,
             subprocess.TimeoutExpired) as exc:
