@@ -259,10 +259,35 @@ class DistrictCase(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.assertTrue(host.path().is_relative_to(self.tmp), host.path())
-        # Release observation is isolated here; fake API selection is covered in test_factory_release.
-        self.enterContext(mock.patch.object(apply, "latest_factory_release", return_value=("v0.2.0", "0" * 40)))
+        release_sha = "0" * 40
+        release = [[{
+            "tag_name": "v0.2.0",
+            "draft": False,
+            "prerelease": False,
+            "published_at": "2026-01-01T00:00:00Z",
+        }]]
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))
-        self.stub("gh", ("repo view *", json.dumps({"isFork": False, "parent": None})))
+        self.stub(
+            "gh",
+            ("api --paginate --slurp repos/mikeroySoft/factory/releases?per_page=100", json.dumps(release)),
+            ("repo view *", json.dumps({"isFork": False, "parent": None})),
+        )
+        real_git = next(
+            candidate.resolve()
+            for directory in os.environ["PATH"].split(os.pathsep)
+            if (candidate := Path(directory) / "git").is_file()
+        )
+        git = self.bin / "git"
+        git.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            'if sys.argv[1:3] == ["ls-remote", "--exit-code"] '
+            'and any(ref.startswith("refs/tags/v0.2.0") for ref in sys.argv[3:]):\n'
+            f'    print("{release_sha}\\trefs/tags/v0.2.0")\n'
+            "    raise SystemExit(0)\n"
+            f"os.execv({str(real_git)!r}, [{str(real_git)!r}, *sys.argv[1:]])\n"
+        )
+        git.chmod(0o755)
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         self.stub("uv")
         self.stub("ps")
@@ -273,7 +298,7 @@ class DistrictCase(unittest.TestCase):
         factory.unlink()
         factory.symlink_to(tool / "bin/factory")
         (tool / "uv-receipt.toml").write_text(
-            '[tool]\nrequirements = [{name="factory", rev="' + "0" * 40 + '"}]\n')
+            f'[tool]\nrequirements = [{{name="factory", rev="{release_sha}"}}]\n')
 
     def stub(self, name: str, *cases: tuple[str, str] | tuple[str, str, int]) -> None:
         exe = self.bin / name
@@ -519,7 +544,7 @@ class HostTest(DistrictCase):
         original = b'[defaults]\nfactory_ref = "old"\n'
         config.write_bytes(original)
         data = {"hosts": {"ultron": {"ssh": "factory@ultron.example"}},
-                "defaults": {"factory_ref": "main"}}
+                "defaults": {"factory_ref": "main", "factory_track_branch": True}}
         runner = host.remote_runner("ultron", data["hosts"]["ultron"])
         host.sync_remote_config(data, "ultron", runner)
         backups = list(config.parent.glob("config.toml.*.bak"))
@@ -2155,7 +2180,7 @@ class ApplyTest(DistrictCase):
     def test_apply_refuses_multi_host_repo_until_factory_supports_claims(self) -> None:
         repo = self.repo(toml="")
         host.save({
-            "defaults": {"factory_ref": "main"},
+            "defaults": {"factory_ref": "main", "factory_track_branch": True},
             "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local"}},
         })
@@ -2173,7 +2198,7 @@ class ApplyTest(DistrictCase):
     def test_apply_reports_unreachable_fleet_host_as_unreachable(self) -> None:
         repo = self.repo(toml="")
         host.save({
-            "defaults": {"factory_ref": "main"},
+            "defaults": {"factory_ref": "main", "factory_track_branch": True},
             "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local"}},
         })
@@ -2196,7 +2221,7 @@ class ApplyTest(DistrictCase):
         """#134 'single-host repos: no behavior change': `district apply SLUG` for a repo off the
         fleet neither probes, syncs, nor reconciles the engine on the fleet hosts, even with --upgrade."""
         host.save({
-            "defaults": {"factory_ref": "main"},
+            "defaults": {"factory_ref": "main", "factory_track_branch": True},
             "hosts": {name: {"ssh": f"factory@{name}.example", "platform": "macos"} for name in ("ultron", "benito")},
             "repo": {
                 "acme/widgets": {"path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron"},
@@ -2229,7 +2254,7 @@ class ApplyTest(DistrictCase):
         and `reconcile`, if given, is reconcile_fleet_engine's side effect."""
         repo = self.repo(toml="")
         host.save({
-            "defaults": {"factory_ref": "main"},
+            "defaults": {"factory_ref": "main", "factory_track_branch": True},
             "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local"}},
         })
@@ -2547,8 +2572,9 @@ class StatusTest(DistrictCase):
         host.save({"repo": {"acme/widgets": table}})
         code, out = self.district("status")
         self.assertEqual(code, 2, out)  # Legacy snapshots lack execution telemetry.
-        self.assertIn("operating", out.splitlines()[0])
-        self.assertIn("execution", out.splitlines()[0])
+        repo_header = next(line for line in out.splitlines() if line.startswith("repo"))
+        self.assertIn("operating", repo_header)
+        self.assertIn("execution", repo_header)
         code, out = self.district("status", "--json")
         e = json.loads(out)["acme/widgets"]
         self.assertEqual((e["assessment"], e["execution_state"], e["metrics"], e["error"]), ("unknown", "unknown", None, None))
@@ -2563,6 +2589,38 @@ class StatusTest(DistrictCase):
     def test_empty_json_is_machine_readable(self) -> None:
         code, out = self.district("status", "--json")
         self.assertEqual((code, json.loads(out)), (0, {}))
+
+    def test_status_reports_release_drift_for_every_registered_host(self) -> None:
+        ultron, benito = "factory@ultron.example", "factory@benito.example"
+        homes = self.fake_ssh(ultron, benito)
+        (homes[benito] / ".local/share/uv/tools/factory/uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{name="factory", rev="' + "1" * 40 + '"}]\n')
+        host.save({"hosts": {
+            "ultron": {"ssh": ultron, "platform": "macos"},
+            "benito": {"ssh": benito, "platform": "macos"},
+        }})
+
+        code, out = self.district("status", "--json")
+
+        engines = json.loads(out)["engines"]
+        self.assertEqual(code, 1, out)
+        self.assertEqual(set(engines), {"ultron", "benito"})
+        self.assertEqual(engines["ultron"], {
+            "assessment": "normal",
+            "installed": {"sha": "0" * 40, "ref": "v0.2.0"},
+            "latest": {"tag": "v0.2.0", "sha": "0" * 40},
+            "error": None,
+        })
+        self.assertEqual(engines["benito"]["assessment"], "attention")
+        self.assertEqual(engines["benito"]["installed"], {"sha": "1" * 40, "ref": None})
+        self.assertIn(
+            "api --paginate --slurp repos/mikeroySoft/factory/releases?per_page=100",
+            self.calls("gh"),
+        )
+        text_code, text = self.district("status")
+        self.assertEqual(text_code, 1, text)
+        self.assertRegex(text, r"ultron\s+normal\s+000000000000 \(v0\.2\.0\)")
+        self.assertRegex(text, r"benito\s+attention\s+111111111111")
 
     def test_mixed_local_remote_and_unreachable_host(self) -> None:
         live, dead = "factory@ultron.example", "factory@dead.example"
@@ -2591,7 +2649,11 @@ class StatusTest(DistrictCase):
 
         entries = json.loads(out)
         self.assertEqual(code, 2, out)
-        self.assertEqual(set(entries), {"acme/local", "acme/remote", "acme/offline"})
+        self.assertEqual(set(entries), {"engines", "acme/local", "acme/remote", "acme/offline"})
+        self.assertEqual(set(entries["engines"]), {"local", "ultron", "dead"})
+        self.assertEqual(entries["engines"]["local"]["assessment"], "normal")
+        self.assertEqual(entries["engines"]["ultron"]["assessment"], "normal")
+        self.assertEqual(entries["engines"]["dead"]["assessment"], "unknown")
         self.assertEqual(entries["acme/local"]["host"], "local")
         self.assertEqual(entries["acme/remote"]["host"], "ultron")
         self.assertEqual(entries["acme/remote"]["host_state"], "reachable")
@@ -2666,10 +2728,15 @@ class StatusTest(DistrictCase):
         snap = mock.Mock(side_effect=lambda slug, table, timeout=None: {"slug": slug, "error": "down"})
         with mock.patch.object(status, "snapshot", snap):
             code, out = self.district("status", "--json", "--slug", "acme/b")
-            self.assertEqual(list(json.loads(out)), ["acme/b"], out)
+            report = json.loads(out)
+            self.assertEqual([key for key in report if key != "engines"], ["acme/b"], out)
+            self.assertEqual(set(report["engines"]), {"local"})
             self.assertEqual([c.args[0] for c in snap.call_args_list], ["acme/b"])
             code, out = self.district("status", "--slug", "acme/c", "--slug", "acme/a")
-        self.assertEqual([line.split()[0] for line in out.splitlines()[1:]], ["acme/c", "acme/a"])
+        self.assertEqual(
+            [line.split()[0] for line in out.splitlines() if line.startswith("acme/")],
+            ["acme/c", "acme/a"],
+        )
 
     def test_unhealthy_omits_healthy(self) -> None:
         self.three()
@@ -2677,9 +2744,11 @@ class StatusTest(DistrictCase):
         fake = lambda slug, sources, table: {**real(slug, sources, table), "assessment": "normal" if slug == "acme/a" else "attention"}  # noqa: E731
         with mock.patch.object(health, "classify", fake):
             code, out = self.district("status", "--json", "--unhealthy")
-            self.assertEqual((code, sorted(json.loads(out))), (1, ["acme/b", "acme/c"]))
+            report = json.loads(out)
+            self.assertEqual((code, sorted(set(report) - {"engines"})), (1, ["acme/b", "acme/c"]))
             code, out = self.district("status", "--unhealthy", "--slug", "acme/a")
-        self.assertEqual((code, out.strip()), (0, "no unhealthy repositories"))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[-1], "no unhealthy repositories")
 
     def test_unknown_slug_is_named(self) -> None:
         self.three()
@@ -2705,7 +2774,7 @@ class StatusTest(DistrictCase):
         report = json.loads(out)
         self.assertEqual(code, 1)
         self.assertEqual(report["host"], {"status": "FAIL", "label": "gh auth", "detail": "- The token in default is invalid."})
-        self.assertEqual(set(report) - {"host"}, {"acme/widgets", "acme/gadgets"})
+        self.assertEqual(set(report) - {"host", "engines"}, {"acme/widgets", "acme/gadgets"})
         self.assertEqual(self.calls("gh").count("auth status"), 4)
 
     def test_gh_auth_failure_survives_empty_and_filtered_fleets(self) -> None:
@@ -2731,11 +2800,12 @@ class StatusTest(DistrictCase):
                         if mode:
                             report = json.loads(out)
                             self.assertEqual(report["host"], {"status": "FAIL", "label": "gh auth", "detail": detail})
-                            self.assertEqual(set(report) - {"host"}, {"acme/b"} if filters == ["--slug", "acme/b"] else set())
+                            expected = {"acme/b"} if filters == ["--slug", "acme/b"] else set()
+                            self.assertEqual(set(report) - {"host", "engines"}, expected)
                         else:
                             self.assertEqual(out.splitlines()[0], f"  FAIL  gh auth: {detail}")
                             if "--unhealthy" in filters:
-                                self.assertEqual(out.splitlines()[1], "no unhealthy repositories")
+                                self.assertEqual(out.splitlines()[-1], "no unhealthy repositories")
                             elif not filters:
                                 self.assertEqual(out.splitlines()[1], "no repositories registered (district add)")
 

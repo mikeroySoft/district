@@ -177,10 +177,15 @@ class OneInstallTest(unittest.TestCase):
         if argv[:4] == ["git", "remote", "get-url", "origin"]:
             out = REPO + "\n"
         elif argv[:2] == ["git", "ls-remote"]:
-            out = f"{self.tip}\trefs/heads/main\n"
+            out = f"{TARGET}\trefs/tags/v0.4.7\n{self.tip}\trefs/heads/main\n"
         elif argv[:2] == ["gh", "api"]:
             endpoint = next((arg for arg in argv[2:] if arg.startswith("repos/")), "")
-            if "check-runs" in endpoint:
+            if "/releases?" in endpoint:
+                out = json.dumps([[{
+                    "tag_name": "v0.4.7", "draft": False, "prerelease": False,
+                    "published_at": "2026-01-01T00:00:00Z",
+                }]])
+            elif "check-runs" in endpoint:
                 conclusion = "failure" if TIP in endpoint else "success"
                 out = json.dumps({"total_count": 1, "check_runs": [
                     {"status": "completed", "conclusion": conclusion}]})
@@ -1180,7 +1185,7 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(host.engine(host.load(), "local")["sha"], TARGET)
         self.assertFalse(host.engine(host.load(), "local").get("install_pending"))
         self.assertEqual(interrupted["defaults"]["engine"]["install_pending"],
-                         {"target": TARGET, "previous": OLD, "ref": "main"})
+                         {"target": TARGET, "previous": OLD, "ref": "v0.4.7"})
         self.assertEqual(len(self.installs()), 1)
         self.backend.pause_timer.assert_not_called()
         self.backend.resume_timer.assert_not_called()
