@@ -230,8 +230,9 @@ POSIX login shells preserve argument quotes, backslashes, and stdin identically.
 Before sending helpers, District uses a fixed `/bin/sh` bootstrap to verify and
 pin Python >=3.11, preferring the Factory uv tool's `bin/python`, then
 `/usr/bin/python3`, `/bin/python3`, `/opt/homebrew/bin/python3`, and
-`/usr/local/bin/python3`. The selected absolute path runs every helper, launcher,
-and deadline watchdog; login-shell PATH order never selects their interpreter.
+`/usr/local/bin/python3`. The selected absolute path runs every helper (including
+doctor's controller-path checks), launcher, and deadline watchdog; login-shell
+PATH order never selects their interpreter.
 The watchdog kills the command's process group on timeout. Factory, `uv`, git,
 and authenticated `gh` must still be on the host's noninteractive PATH.
 District keeps the authoritative registry and operation lock on the controller,
