@@ -495,6 +495,13 @@ Native job discovery intentionally enumerates the owning host's service manager;
 temporary `HOME`/XDG directories alone do not isolate that manager. Service
 fixtures still use their stubbed `systemctl` on `PATH`.
 
+The Factory gate inherits the same environment; isolate both endpoints when
+running it on a live controller as well:
+
+```sh
+XDG_RUNTIME_DIR=/tmp/district-test-no-runtime DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/district-test-no-session-bus factory gate
+```
+
 District shells out to the `factory` CLI and never imports `agent_factory`
 internals. If District needs a per-repo fact or action, the fix is a flag on
 `factory`, not a reimplementation here.
