@@ -494,8 +494,7 @@ def check() -> list[dict[str, str]]:
     alerts, gaps = streak.collect(data)
     rows += [row("FAIL", f"failure streak {alert['host']} {alert['label']}", streak.describe(alert))
              for alert in alerts]
-    rows += [row("FAIL" if gap["code"] in ("host_without_repos", "unrecognized_factory_job", "journalctl_unavailable") else "WARN",
-                 f"{gap['code']} {gap['host']} {gap['label'] or ''}", gap["error"]) for gap in gaps]
+    rows += [row("WARN", f"{gap['code']} {gap['host']} {gap['label'] or ''}", gap["error"]) for gap in gaps]
     return rows
 
 

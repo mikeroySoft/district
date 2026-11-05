@@ -346,8 +346,9 @@ def collect(data: dict, *, skip: set[str] | None = None, timeout: float = 10) ->
                 # Exclude known auxiliary services, not hand-made dispatcher labels.
                 if label not in expected and label.endswith(("-dashboard", "-triage-probe", "-eval")):
                     continue
-                matches = [slug for stem, slug in slugs.items()
-                           if label == stem or label.endswith("." + stem) or job["root"] == tables[slug]["path"]]
+                matches = [slug for stem, slug in slugs.items() if label == stem or label.endswith("." + stem)]
+                if not matches:
+                    matches = [slug for slug in slugs.values() if job["root"] == tables[slug]["path"]]
                 slug = matches[0] if len(matches) == 1 else None
                 if slug is None:
                     gap("unrecognized_factory_job", f"{name} {label}: factory job is not assigned to a registered repository", label=label)

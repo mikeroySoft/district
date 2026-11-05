@@ -574,13 +574,11 @@ class FleetCollector:
         self._pool = None
 
 
-def fleet(data: dict, *, registry: dict | None = None) -> dict[str, dict]:
+def fleet(data: dict) -> dict[str, dict]:
     """Collect one bounded runtime/full round, gathering target hosts in parallel."""
     collector = FleetCollector(data)
     if not collector.repos:
-        entries = {}
-        add_job_health(registry if registry is not None else data, entries, collector.timeout)
-        return entries
+        return {}
 
     def collect(slug: str) -> None:
         collector.collect_runtime(slug)
@@ -605,10 +603,7 @@ def fleet(data: dict, *, registry: dict | None = None) -> dict[str, dict]:
         slugs = [slug for group in pool.map(probe_host, groups.items()) for slug in group]
         for _ in pool.map(collect, slugs):
             pass
-    entries = collector.fleet()
-
-    add_job_health(registry if registry is not None else data, entries, collector.timeout)
-    return entries
+    return collector.fleet()
 
 
 def add_job_health(data: dict, entries: dict[str, dict], timeout: float) -> None:
@@ -728,7 +723,8 @@ def main(argv: list[str]) -> int:
     data = {**data, "repo": known}
     gh = doctor.gh_auth()
     failed = gh["status"] == "FAIL"
-    entries = fleet(data, registry=registry)
+    entries = fleet(data)
+    add_job_health(registry, entries, COLLECTION_TIMEOUT)
     parity = doctor.parity_by_slug(data)
     if args.unhealthy:
         entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}

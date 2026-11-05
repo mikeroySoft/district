@@ -27,7 +27,8 @@ class TestJobHealth(DistrictCase):
         at = datetime.now(timezone.utc) - timedelta(hours=age, minutes=10 * len(codes))
         lines = []
         for i, code in enumerate(codes):
-            stamp = (at + timedelta(minutes=10 * (i + 1))).strftime("%a %b %e %H:%M:%S UTC %Y") if dated else "undated"
+            when = (at + timedelta(minutes=10 * (i + 1))).astimezone(timezone(timedelta(hours=-8)))
+            stamp = when.strftime("%a %b %e %H:%M:%S PST %Y") if dated else "undated"
             lines.append(f"=== pass {stamp}\ntriage OK\n{ERROR}\nwatch OK\n=== end rc={code}")
         logfile.write_text("\n".join(lines) + "\n")
         stamp = (datetime.now(timezone.utc) - timedelta(hours=age)).timestamp()
@@ -196,3 +197,14 @@ class TestJobHealth(DistrictCase):
         findings = [f for f in entry["findings"] if f["condition_code"] == "runtime.dispatcher_failed"]
         self.assertEqual(len(findings), 1)
         self.assertEqual(len(findings[0]["evidence"]), 2)
+
+    def test_exact_job_label_wins_over_shared_working_directory(self):
+        data = self.systemd([1, 1, 1])
+        data["repo"]["acme/other"] = dict(data["repo"]["acme/widgets"])
+        host.save(data)
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 1, out)
+        fleet = json.loads(out)
+        self.assertNotIn("host:local", fleet)
+        self.assertEqual(fleet["acme/widgets"]["failure_streaks"][0]["count"], 3)
+        self.assertEqual(fleet["acme/other"]["failure_streaks"], [])
