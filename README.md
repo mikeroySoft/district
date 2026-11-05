@@ -478,28 +478,19 @@ README.
 ## Development
 
 ```sh
-uv run python -m unittest discover -s tests
+uv run --frozen python -m unittest discover -s tests
 ```
 
 Standalone filesystem/CLI fixtures must isolate `HOME`, XDG config/state/data/cache,
 and uv tool/bin directories under temporary roots and replace external runners.
-The suite does not require the invoking shell to sandbox the developer's home.
-
-On a controller with a live systemd user manager, isolate its runtime socket and bus too:
-
-```sh
-XDG_RUNTIME_DIR=/tmp/district-test-no-runtime DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/district-test-no-session-bus uv run --frozen python -m unittest discover -s tests
-```
-
-Native job discovery intentionally enumerates the owning host's service manager;
-temporary `HOME`/XDG directories alone do not isolate that manager. Service
-fixtures still use their stubbed `systemctl` on `PATH`.
-
-The Factory gate inherits the same environment; isolate both endpoints when
-running it on a live controller as well:
+Fixtures that can reach native job discovery must also isolate `XDG_RUNTIME_DIR`
+and `DBUS_SESSION_BUS_ADDRESS`: systemd can reach the live user manager through
+either endpoint even with a temporary home. Projection fixtures isolate both;
+service integration fixtures use their stubbed `systemctl` on `PATH`.
+The suite and Factory gate do not require a shell-level environment sandbox:
 
 ```sh
-XDG_RUNTIME_DIR=/tmp/district-test-no-runtime DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/district-test-no-session-bus factory gate
+factory gate
 ```
 
 District shells out to the `factory` CLI and never imports `agent_factory`
