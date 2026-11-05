@@ -160,3 +160,39 @@ class TestJobHealth(DistrictCase):
             "sys.stderr.write(\"FileNotFoundError: [Errno 2] No such file or directory: 'journalctl'\\n\")"))
         _, entry = self.entry()
         self.assertIn("journalctl_unavailable", str(entry["findings"]))
+
+    def test_systemd_native_timestamp_detects_stall_without_journal_history(self):
+        self.systemd([0])
+        when = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%a %Y-%m-%d %H:%M:%S UTC")
+        self.stub("journalctl", ("*", ""))
+        self.stub("systemctl", ("show factory-widgets.service *",
+                               f"ExecMainStatus=0\nResult=success\nExecMainStartTimestamp={when}\n"),
+                  ("show factory-widgets.timer *", f"UnitFileState=enabled\nLastTriggerUSec={when}\n"))
+        code, entry = self.entry()
+        self.assertEqual(code, 1, entry)
+        self.assertEqual(entry["failure_streaks"][0]["rule"], "stalled")
+
+    def test_manager_exit_does_not_invent_historical_runs(self):
+        self.launchd([])
+        self.stub("launchctl", ("print */com.mikeroysoft.factory-widgets",
+                               "state = exited\nruns = 300\nlast exit code = 1\n"))
+        _, entry = self.entry()
+        self.assertFalse(any(a["rule"] == "failure_streak" for a in entry["failure_streaks"]))
+        rate = next(a for a in entry["failure_streaks"] if a["rule"] == "failure_rate")
+        self.assertEqual((rate["count"], rate["total"], rate["undated_count"]), (1, 1, 1))
+
+    def test_disabled_or_running_launchd_does_not_stall(self):
+        self.launchd([0], age=3)
+        for state, disabled in (("exited", "true"), ("running", "false")):
+            with self.subTest(state=state):
+                self.stub("launchctl", ("print-disabled *", f'"com.mikeroysoft.factory-widgets" => {disabled}'),
+                          ("print */com.mikeroysoft.factory-widgets",
+                           f"state = {state}\nruns = 1\nlast exit code = 0\n"))
+                self.assertEqual(self.entry()[1]["failure_streaks"], [])
+
+    def test_streak_and_rate_share_one_finding_with_both_evidence_windows(self):
+        self.launchd([1, 1, 1])
+        _, entry = self.entry()
+        findings = [f for f in entry["findings"] if f["condition_code"] == "runtime.dispatcher_failed"]
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(len(findings[0]["evidence"]), 2)
