@@ -32,6 +32,7 @@ class FactoryRefTest(unittest.TestCase):
         defaults = {"factory_repo": ORIGIN}
         if ref is not None:
             defaults["factory_ref"] = ref
+            defaults["factory_track_branch"] = ref == "main"
         if sha is not None:
             defaults["engine"] = {"sha": sha, "ref": "old"}
         return {"defaults": defaults, "repo": {"acme/widgets": {"path": "/repo"}}}
