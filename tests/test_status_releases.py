@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from district import apply, doctor, host, status
+from district.dashboard_read import safe_fleet
 from tests.remote_transport import remote_command
 
 OLD = "1" * 40
@@ -89,6 +90,15 @@ class StatusReleaseTest(unittest.TestCase):
         with mock.patch.object(host, "load", return_value=data), contextlib.redirect_stdout(output):
             code = status.main(list(argv))
         return code, output.getvalue()
+
+    def test_host_release_metadata_does_not_hide_or_truncate_repository_projections(self) -> None:
+        for count in (64, 65):
+            with self.subTest(count=count):
+                entries = {f"acme/repo-{index}": {} for index in range(count)}
+                fleet = safe_fleet({"engines": {"ultron": {"assessment": "attention"}}, **entries})
+                self.assertEqual(set(fleet), set(list(entries)[:64]))
+                for entry in fleet.values():
+                    self.assertEqual(entry["projection"]["omitted"]["factories"], count - 64)
 
     def test_every_registered_host_reports_release_drift_independent_of_repositories(self) -> None:
         data = {
