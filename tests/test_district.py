@@ -259,6 +259,8 @@ class DistrictCase(unittest.TestCase):
         self.env.start()
         self.addCleanup(self.env.stop)
         self.assertTrue(host.path().is_relative_to(self.tmp), host.path())
+        # Release observation is isolated here; fake API selection is covered in test_factory_release.
+        self.enterContext(mock.patch.object(apply, "latest_factory_release", return_value=("v0.2.0", "0" * 40)))
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))
         self.stub("gh", ("repo view *", json.dumps({"isFork": False, "parent": None})))
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
@@ -2008,6 +2010,7 @@ class ApplyTest(DistrictCase):
         if engine:
             data["defaults"] = {
                 "factory_ref": "main",
+                "factory_track_branch": True,
                 "engine_idle_timeout": "1s",
                 "engine": {"ref": "main", "sha": old},
             }
@@ -2312,7 +2315,7 @@ class ApplyTest(DistrictCase):
 
         def run_fleet(ultron: tuple, benito: tuple):
             host.save({
-                "defaults": {"factory_ref": "main", "engine_idle_timeout": "30min"},
+                "defaults": {"factory_ref": "main", "factory_track_branch": True, "engine_idle_timeout": "30min"},
                 "hosts": {
                     name: {"ssh": f"factory@{name}.example",
                            "engine": {"ref": "main", "sha": old}}
@@ -2464,7 +2467,7 @@ class ApplyTest(DistrictCase):
 
         backend.is_active = mock.Mock(side_effect=service_started_after_pause)
         with mock.patch.object(apply, "run", side_effect=target_revision):
-            result = apply.upgrade(host.load(), record=record, backend=backend)
+            result = apply.upgrade(host.load(), "main", record=record, backend=backend)
 
         self.assertEqual(result, "deferred")
         self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))

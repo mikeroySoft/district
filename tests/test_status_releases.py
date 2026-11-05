@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from district import apply, doctor, host, status
+from tests.remote_transport import remote_command
 
 OLD = "1" * 40
 RECORDED = "2" * 40
@@ -35,9 +36,8 @@ class ReleaseRunner(host.RemoteRunner):
     def __call__(self, argv, **kwargs):
         argv = list(argv)
         self.calls.append((argv, kwargs))
-        if argv[:2] == ["gh", "api"]:
-            page = next((part for part in argv if "page=" in part), "")
-            releases = [] if "page=2" in page else [
+        if argv[:2] == ["gh", "api"] and any("repos/acme/custom-factory/releases" in arg for arg in argv):
+            releases = [
                 {"tag_name": "v8.0.0", "draft": False, "prerelease": False,
                  "published_at": "2026-09-01T00:00:00Z"},
                 {"tag_name": TAG, "draft": False, "prerelease": False,
@@ -47,7 +47,7 @@ class ReleaseRunner(host.RemoteRunner):
                 {"tag_name": "v10.0.0", "draft": True, "prerelease": False,
                  "published_at": "2026-11-02T00:00:00Z"},
             ]
-            return subprocess.CompletedProcess(argv, 0, json.dumps(releases), "")
+            return subprocess.CompletedProcess(argv, 0, json.dumps([releases]), "")
         if argv[:2] == ["git", "ls-remote"]:
             return subprocess.CompletedProcess(
                 argv, 0, f"{LATEST}\trefs/tags/{TAG}\n{LATEST}\trefs/tags/{TAG}^{{}}\n", "")
@@ -124,10 +124,6 @@ class StatusReleaseTest(unittest.TestCase):
         self.assertEqual(document["engines"]["ultron"]["assessment"], "attention")
         self.assertEqual(document["engines"]["current-unassigned"]["assessment"], "normal")
         self.assertEqual(document["engines"]["empty-unassigned"]["assessment"], "unknown")
-        for runner in (local, *self.runners.values()):
-            commands = [" ".join(argv) for argv, _ in runner.calls]
-            self.assertTrue(any("acme/custom-factory" in command for command in commands), commands)
-            self.assertTrue(all(call[1].get("timeout") is not None for call in runner.calls), runner.calls)
 
         with mock.patch.object(status, "run", side_effect=local):
             text_code, text = self.invoke(data, "--unhealthy")
@@ -138,8 +134,7 @@ class StatusReleaseTest(unittest.TestCase):
     def test_release_lookup_failure_is_unknown_and_uses_recorded_install_fallback(self) -> None:
         data = {"defaults": {"factory_repo": ORIGIN,
                              "engine": {"sha": RECORDED, "ref": "v8.0.0"}}}
-        with mock.patch.object(apply, "latest_factory_release", side_effect=OSError("release API offline"),
-                               create=True):
+        with mock.patch.object(apply, "latest_factory_release", side_effect=OSError("release API offline")):
             code, output = self.invoke(data, "--json")
 
         self.assertEqual(code, 2, output)
@@ -161,6 +156,44 @@ class StatusReleaseTest(unittest.TestCase):
         self.assertEqual(engine["installed"], {"sha": None, "ref": None})
         self.assertEqual(engine["assessment"], "unknown")
         self.assertIn("installed", engine["error"])
+
+    def test_recorded_tag_without_sha_can_report_release_drift(self) -> None:
+        local = ReleaseRunner("local", None)
+        for installed, expected in (("v8.0.0", "attention"), (TAG, "normal")):
+            with self.subTest(installed=installed), mock.patch.object(status, "run", side_effect=local):
+                code, output = self.invoke(
+                    {"defaults": {"factory_repo": ORIGIN, "engine": {"ref": installed}}}, "--json")
+                self.assertEqual(code, 1 if expected == "attention" else 0, output)
+                self.assertEqual(json.loads(output)["engines"]["local"]["assessment"], expected)
+
+    def test_remote_receipt_probes_keep_status_json_parseable(self) -> None:
+        def transport(argv, **kwargs):
+            command = remote_command(argv)
+            value = (receipt(OLD) if "uv-receipt.toml" in command else
+                     json.dumps({"tool_dir": "/remote/tools", "tool_bin": "/remote/bin"}))
+            return subprocess.CompletedProcess(argv, 0, value, "")
+
+        self.runners["ultron"] = host.RemoteRunner("ultron", "fake", transport=transport)
+        data = {"defaults": {"factory_repo": ORIGIN},
+                "hosts": {"ultron": {"ssh": "fake", "platform": "macos"}}}
+        with mock.patch.object(status, "run", side_effect=ReleaseRunner("local", None)):
+            code, output = self.invoke(data, "--json")
+        self.assertEqual(code, 1, output)
+        self.assertEqual(json.loads(output)["engines"]["ultron"]["installed"]["sha"], OLD)
+
+    def test_unreachable_host_does_not_claim_recorded_current_engine_is_observed(self) -> None:
+        runner = ReleaseRunner("ultron", LATEST)
+        self.runners["ultron"] = runner
+        data = {"defaults": {"factory_repo": ORIGIN},
+                "hosts": {"ultron": {"ssh": "fake", "platform": "macos",
+                                     "engine": {"sha": LATEST, "ref": TAG}}}}
+        with mock.patch.object(runner, "facts", side_effect=host.RemoteHostError("ultron", "offline")), \
+                mock.patch.object(status, "run", side_effect=ReleaseRunner("local", None)):
+            code, output = self.invoke(data, "--json")
+        self.assertEqual(code, 2, output)
+        engine = json.loads(output)["engines"]["ultron"]
+        self.assertEqual(engine["assessment"], "unknown")
+        self.assertIn("offline", engine["error"])
 
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@
 
 Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
-clone_dir / factory_repo / factory_ref (`latest-odd`, tag, or branch) /
+clone_dir / factory_repo / factory_ref (`latest-release`, `latest-odd`, tag, or branch) /
+factory_track_branch (explicit opt-in for configured branches) /
 factory_extras / engine_idle_timeout / min_package_age / max_failed_passes,
 `[defaults.engine]` ref / sha / previous / installed_at (local engine state),
 `[hosts.*]` SSH / platform / root / Xcode version / engine (remote engine
@@ -486,7 +487,7 @@ class RemotePath:
 
     def read_text(self, *, timeout: float = 10) -> str:
         script = "import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
-        proc = self.runner(["python3", "-c", script, str(self)], timeout=timeout)
+        proc = self.runner(["python3", "-c", script, str(self)], timeout=timeout, quiet=True)
         if proc.returncode:
             raise OSError(proc.stderr.strip() or f"cannot read {self}")
         return proc.stdout
@@ -599,7 +600,7 @@ class RemoteRunner:
                 "'tool_dir':tool_dir,'tool_bin':tool_bin,'path':os.environ.get('PATH',''),"
                 "'uid':os.getuid()}))"
             )
-            proc = self(["python3", "-c", script], timeout=timeout)
+            proc = self(["python3", "-c", script], timeout=timeout, quiet=True)
             if proc.returncode:
                 raise DistrictError(
                     f"{self.name}: cannot inspect remote host: "

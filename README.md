@@ -240,10 +240,14 @@ is required. The chosen SHA (`target`), `target_ref`, and `resolved_at` are
 recorded beside the installed `sha` in `[defaults.engine]` locally.
 A resolved target alone does not establish installed identity; a deferred first
 upgrade reports missing installed SHA/ref as `unknown`.
-`latest-odd` selects the highest odd-patch semver tag, including prereleases;
-a tag or branch such as `"v0.4.7"` or `"main"` selects that remote ref. A
-selected tag commit must itself be green. For a branch, District walks up to 50
-remote commits back to the newest commit whose GitHub checks are complete and
+`latest-release` selects the latest published, non-prerelease, non-draft GitHub
+release on `factory_repo`. `latest-odd` selects the highest odd-patch semver tag,
+including prereleases. A tag such as `"v0.4.7"` selects that remote tag.
+To track any branch, explicitly set both `factory_ref = "main"` (or another
+branch) and `factory_track_branch = true`; an unmarked branch policy fails
+without changing the engine. A selected tag commit must itself be green.
+For an opted-in branch, District walks up to 50 remote commits back to the
+newest commit whose GitHub checks are complete and
 green. Remote hosts record that target under `[hosts.NAME.engine]`; their
 filtered config receives the same target under `[defaults.engine]`.
 Resolution, ancestry, target persistence, receipt, and dashboard completion timeouts
@@ -351,11 +355,22 @@ registered dashboards restart after a verified change. Roles come from the
 registry, not a `-dashboard` suffix, and if both installs fail affected repos
 fail without trying another `factory` on `PATH`.
 
-`district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
-when no ref is supplied. It resolves only against the remote repository, never a
-local checkout. Installing an ancestor is refused with both revisions named
-unless `--allow-downgrade` is present. Without `factory_ref`, ordinary apply
-leaves a verified installed engine unchanged.
+`district apply --upgrade` with no REF selects the latest published stable
+Factory release, regardless of `factory_ref`. Drafts and prereleases are excluded;
+unavailable releases fail the upgrade without falling back to a branch.
+`--upgrade main` (or another explicit branch) opts into the newest CI-green
+commit on that branch for this invocation. Tags and full SHAs remain explicit
+targets. Resolution uses only the remote `factory_repo`, never a local checkout.
+Installing an ancestor is refused with both revisions named unless
+`--allow-downgrade` is present. Without `factory_ref`, ordinary apply leaves a
+verified installed engine unchanged.
+
+`district status` also checks each registered host's installed engine against
+the latest stable release, including hosts without assigned repositories.
+Release drift names the host, installed SHA or tag, and latest tag, and exits 1;
+unknown release or installed identity exits 2 unless another row needs attention.
+`--json` includes these host observations in a top-level `engines` map;
+repo runtime failures remain visible independently.
 
 `install-state` obtains ahead/behind counts from GitHub compare, or reports
 `unknown` when that bounded lookup is unavailable. Installed identity and counts

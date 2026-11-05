@@ -47,7 +47,7 @@ class OneInstallTest(unittest.TestCase):
         self.repo = self.root / "widgets"
         self.repo.mkdir()
         self.data = {
-            "defaults": {"factory_repo": REPO, "factory_ref": "main",
+            "defaults": {"factory_repo": REPO, "factory_ref": "main", "factory_track_branch": True,
                          "factory_source": str(self.checkout),
                          "engine": {"sha": OLD, "ref": "main"}},
             "repo": {"acme/widgets": {"path": str(self.repo)}},
@@ -279,7 +279,7 @@ class OneInstallTest(unittest.TestCase):
                         self.events.clear()
                         self.output.truncate(0)
                         self.output.seek(0)
-                        self.assertEqual(self.apply(upgrade="HEAD" if upgrade else None), 0, self.output.getvalue())
+                        self.assertEqual(self.apply(upgrade="main" if upgrade else None), 0, self.output.getvalue())
                         output = self.output.getvalue()
                         self.assertIn("acme/widgets  0.4.7", output)
                         self.assertNotIn("FAIL", output)
@@ -639,7 +639,7 @@ class OneInstallTest(unittest.TestCase):
         self.backend.start.assert_not_called()
 
     def test_upgrade_uses_remote_ref_not_stale_checkout_head(self):
-        self.assertEqual(self.apply(upgrade="HEAD"), 0)
+        self.assertEqual(self.apply(upgrade="main"), 0)
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], TARGET)
         self.assertFalse(any(kwargs.get("cwd") == self.checkout for _, kwargs in self.calls))
         self.assertFalse(any(argv[:2] in (["git", "archive"], ["git", "rev-parse"]) for argv, _ in self.calls))
@@ -956,7 +956,7 @@ class OneInstallTest(unittest.TestCase):
                 raise FileNotFoundError(str(self.cli))
             return self.run_cmd(argv, **kwargs)
         with mock.patch.object(apply, "run", side_effect=broken_install):
-            self.assertEqual(self.apply(upgrade="HEAD"), 1)
+            self.assertEqual(self.apply(upgrade="main"), 1)
         self.assertEqual(self.active, set(), "a broken tool must not resume dispatch")
         self.assertEqual(host.load()["defaults"]["engine"]["paused_timers"], ["factory-widgets.timer"])
         self.assertEqual(len(self.installs()), 2)
@@ -988,6 +988,7 @@ class OneInstallTest(unittest.TestCase):
                 remote_config.write_bytes(remote_original)
                 original = (
                     f'# controller original\n[defaults]\nfactory_repo = "{REPO}"\nfactory_ref = "main"\n'
+                    'factory_track_branch = true\n'
                     f'factory_source = "{self.checkout}"\n'
                     '[hosts.remote]\nssh = "fake@remote"\nplatform = "linux"\n'
                     f'factory_source = "{self.checkout}"\n'
@@ -1094,7 +1095,7 @@ class OneInstallTest(unittest.TestCase):
                         install_state, "load_releases", return_value=install_state.unknown_releases()), mock.patch.object(
                         install_state, "tool_versions", return_value={"district": "test", "factory": "test"}), mock.patch.object(
                         Path, "open", new=open_without_checkout):
-                    self.assertEqual(apply.main(["--upgrade"] if explicit else []), 0)
+                    self.assertEqual(apply.main(["--upgrade", "main"] if explicit else []), 0)
                     for config, before in ((host.path(), original), (remote_config, remote_original)):
                         backups = list(config.parent.glob("config.toml.*.bak"))
                         self.assertIn(before, [backup.read_bytes() for backup in backups])
@@ -1104,13 +1105,13 @@ class OneInstallTest(unittest.TestCase):
                     self.assertEqual(len(installed), 1)
                     self.assertTrue(legacy.exists(), "remote historical folder is still referenced")
                     self.tip, self.compare_status = OLD, "behind"
-                    self.assertEqual(apply.main(["--upgrade"]), 1)
+                    self.assertEqual(apply.main(["--upgrade", "main"]), 1)
                     self.assertIn(TARGET, self.output.getvalue())
                     self.assertIn(OLD, self.output.getvalue())
                     self.assertEqual(len(installed), 1, "ancestor must not install without override")
                     self.tip, self.compare_status = TARGET, "ahead"
                     reference.unlink()
-                    self.assertEqual(apply.main(["--upgrade"]), 0)
+                    self.assertEqual(apply.main(["--upgrade", "main"]), 0)
                     self.assertFalse(legacy.exists(), "unreferenced historical folder must be removed remotely")
                     self.assertEqual(len(installed), 1)
                 self.assertFalse(any(parts[:2] in (["git", "archive"], ["git", "rev-parse"]) for parts in commands))
