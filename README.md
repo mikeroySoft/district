@@ -370,7 +370,8 @@ the latest stable release, including hosts without assigned repositories.
 Release drift names the host, installed SHA or tag, and latest tag, and exits 1;
 unknown release or installed identity exits 2 unless another row needs attention.
 `--json` includes these host observations in a top-level `engines` map;
-repo runtime failures remain visible independently.
+repo runtime failures remain visible independently. Host metadata is excluded from
+the public dashboard's repository projection limit.
 
 `install-state` obtains ahead/behind counts from GitHub compare, or reports
 `unknown` when that bounded lookup is unavailable. Installed identity and counts
