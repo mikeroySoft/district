@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import ast
+import contextlib
+import io
 import json
 import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
-from district import engine_cleanup, host, postcheck, preflight, streak
+from district import doctor, engine_cleanup, host, postcheck, preflight, streak
 from tests.test_remote_shell import fish_model
 
 
@@ -84,6 +87,26 @@ class RemotePythonTest(unittest.TestCase):
         envelopes = [shlex.split(command) for command in self.commands if not command.startswith("/bin/sh -c ")]
         self.assertTrue(all(parts[0] == str(self.modern) for parts in envelopes))
         self.assertEqual(sum(command.startswith("/bin/sh -c ") for command in self.commands), 1)
+
+    def test_doctor_reports_controller_paths_without_python_on_login_path(self):
+        (self.bin / "python3").unlink()
+        runner = self.runner()
+        missing = str(Path.home() / self.root.name / "controller config")
+        data = {
+            "defaults": {"install": {"dispatch_env": {"GH_CONFIG_DIR": missing}}},
+            "hosts": {"mac": {"ssh": "unused", "platform": "macos"}},
+        }
+        output = io.StringIO()
+        with mock.patch("district.doctor.run", side_effect=runner.transport), \
+                mock.patch("district.host.remote_runner", return_value=runner), \
+                contextlib.redirect_stdout(output):
+            rows = doctor.remote_config_rows(data)
+        self.assertEqual(rows, [{
+            "status": "WARN",
+            "label": "host mac remote config install.dispatch_env.GH_CONFIG_DIR",
+            "detail": f"controller path {missing} does not exist on host",
+        }])
+        self.assertEqual(output.getvalue(), "")
 
     def test_python39_only_host_fails_clearly_before_running_helper(self):
         self.modern.unlink()
