@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests import test_one_install as fixtures
-from tests.remote_transport import remote_command
+from tests.remote_transport import remote_command, with_remote_python
 from district import apply, drain, host, install_state
 
 
@@ -301,14 +301,14 @@ class DrainTest(unittest.TestCase):
 
             def transport(argv, **kwargs):
                 parts = shlex.split(remote_command(argv))
-                if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                if parts[1:3] == ["-c", host.REMOTE_DEADLINE]:
                     parts = shlex.split(parts[-1])
-                if parts[:2] == ["python3", "-c"] and "XDG_STATE_HOME" in parts[2]:
+                if parts[1:2] == ["-c"] and "XDG_STATE_HOME" in parts[2]:
                     return subprocess.run([sys.executable, *parts[1:]], capture_output=True, text=True,
                                           input=kwargs.get("input"), timeout=kwargs.get("timeout"))
                 return original(argv, **kwargs)
 
-            runner.transport = transport
+            runner.transport = with_remote_python(transport)
             host.save(case.data)
             with mock.patch.object(host, "remote_runner", return_value=runner):
                 self.assertEqual(apply.main(["--drain"]), 0)
@@ -317,9 +317,9 @@ class DrainTest(unittest.TestCase):
             self.assertEqual(host.engine(host.load(), "remote")["sha"], fixtures.TARGET)
             self.assertIsNotNone(self.record()["drains"]["remote"]["cleared_at"])
             self.assertTrue(any("os.replace" in command[2] and command[-1].endswith("/drain")
-                                for command in commands if command[:2] == ["python3", "-c"]))
+                                for command in commands if command[1:2] == ["-c"]))
             self.assertTrue(any("unlink" in command[2] and command[-1].endswith("/drain")
-                                for command in commands if command[:2] == ["python3", "-c"]))
+                                for command in commands if command[1:2] == ["-c"]))
             self.assert_no_timer_changes(case)
             remote_config = Path(runner.facts()["config_home"]) / "factory/config.toml"
             before = remote_config.read_bytes()

@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest import mock
 
 from district import apply, host, install_state, service
-from tests.remote_transport import remote_command
+from tests.remote_transport import remote_command, with_remote_python
 
 OLD = "b" * 40
 TARGET = "a" * 40
@@ -1029,7 +1029,7 @@ class OneInstallTest(unittest.TestCase):
                 def transport(argv, **kwargs):
                     parts = shlex.split(remote_command(argv))
                     command_cwd = None
-                    if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                    if parts[1:3] == ["-c", host.REMOTE_DEADLINE]:
                         parts = shlex.split(parts[-1])
                     if parts[:1] == ["cd"]:
                         command_cwd = Path(parts[1])
@@ -1045,7 +1045,7 @@ class OneInstallTest(unittest.TestCase):
                     commands.append(parts)
                     if parts[:2] == ["/usr/bin/env", "-i"]:
                         return self.run_cmd(parts, cwd=command_cwd, **kwargs)
-                    if parts[:2] == ["python3", "-c"]:
+                    if parts[1:2] == ["-c"]:
                         return subprocess.run([sys.executable, *parts[1:]], env=remote_env,
                                               capture_output=True, text=True, check=False,
                                               input=kwargs.get("input"), timeout=kwargs.get("timeout"))
@@ -1077,7 +1077,8 @@ class OneInstallTest(unittest.TestCase):
 
                 receipt(OLD)
                 self.tip, self.compare_status = TARGET, "ahead"
-                runner = host.RemoteRunner("remote", "fake@remote", transport=transport)
+                runner = host.RemoteRunner(
+                    "remote", "fake@remote", transport=with_remote_python(transport))
                 def controller(argv, **kwargs):
                     self.assertNotIn(argv[0], ("git", "gh"), "target resolution must run remotely")
                     self.assertNotEqual(kwargs.get("cwd"), self.checkout)
@@ -1357,7 +1358,7 @@ class OneInstallTest(unittest.TestCase):
             self.assertGreater(timeout, 0)
             deadlines.append(timeout)
             parts = shlex.split(remote_command(argv))
-            if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+            if parts[1:3] == ["-c", host.REMOTE_DEADLINE]:
                 parts = shlex.split(parts[-1])
             if parts[0] == "fake-resume":
                 if parts[1] == timers[0]:
@@ -1365,7 +1366,7 @@ class OneInstallTest(unittest.TestCase):
                     raise subprocess.TimeoutExpired(parts, timeout)
                 resumed.append(parts[1])
                 return subprocess.CompletedProcess(parts, 0, "", "")
-            if parts[:2] == ["python3", "-c"]:
+            if parts[1:2] == ["-c"]:
                 if "read_bytes()" in parts[2] and paused and clock[0] < 5:
                     self.assertLessEqual(timeout, 5 - clock[0])
                     clock[0] = 5
@@ -1374,7 +1375,7 @@ class OneInstallTest(unittest.TestCase):
                                       input=kwargs.get("input"), timeout=timeout)
             return self.run_cmd(parts, **kwargs)
 
-        runner = host.RemoteRunner("remote", "fake", transport=transport)
+        runner = host.RemoteRunner("remote", "fake", transport=with_remote_python(transport))
         runner._facts = {"home": str(Path.home()), "config_home": str(self.root / "remote-config"),
                          "data_home": str(self.root / "remote-data"),
                          "tool_dir": str(self.tool.parent), "tool_bin": str(self.cli.parent)}
@@ -1466,8 +1467,8 @@ class OneInstallTest(unittest.TestCase):
                     # Execute the real remote watchdog locally, never SSH/launchctl.
                     return subprocess.run(shlex.split(argv[-1]), capture_output=True, text=True,
                                           timeout=kwargs.get("timeout"), input=kwargs.get("input"))
-
-                runner = host.RemoteRunner("fake-mac", "unused", transport=transport)
+                runner = host.RemoteRunner(
+                    "fake-mac", "unused", transport=with_remote_python(transport))
                 backend = service.LaunchdBackend(
                     runner, home=runner.path(str(backend_home)), uid=501, executable=str(launchctl))
                 self.data["defaults"]["engine"]["dashboards_pending"] = True
@@ -1489,7 +1490,7 @@ class OneInstallTest(unittest.TestCase):
         def transport(argv, **kwargs):
             parts = shlex.split(remote_command(argv))
             command_cwd = None
-            if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+            if parts[1:3] == ["-c", host.REMOTE_DEADLINE]:
                 parts = shlex.split(parts[-1])
             if parts[0] == "cd":
                 command_cwd = Path(parts[1])
@@ -1501,7 +1502,7 @@ class OneInstallTest(unittest.TestCase):
             commands.append(parts)
             if parts[:2] == ["/usr/bin/env", "-i"]:
                 return self.run_cmd(parts, cwd=command_cwd, **kwargs)
-            if parts[:2] == ["python3", "-c"]:
+            if parts[1:2] == ["-c"]:
                 sync = "os.replace" in parts[2] and parts[-1].endswith("config.toml")
                 if synced and synced[-1].get("target") == TARGET and parts[-1].endswith("uv-receipt.toml"):
                     receipts.append(parts)
@@ -1524,7 +1525,7 @@ class OneInstallTest(unittest.TestCase):
                                       input=kwargs.get("input"), timeout=kwargs.get("timeout"))
             return self.run_cmd(parts, **kwargs)
 
-        runner = host.RemoteRunner("remote", "unused", transport=transport)
+        runner = host.RemoteRunner("remote", "unused", transport=with_remote_python(transport))
         runner._facts = {"home": str(Path.home()), "path": os.environ["PATH"], "uid": 501,
                          "config_home": str(self.root / "remote-config"),
                          "data_home": str(self.root / "remote-data"),
@@ -1657,13 +1658,13 @@ class OneInstallTest(unittest.TestCase):
 
             def remote_transport(argv, **kwargs):
                 parts = shlex.split(remote_command(argv))
-                if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
+                if parts[1:3] == ["-c", host.REMOTE_DEADLINE]:
                     parts = shlex.split(parts[-1])
                 if parts[0] == "launchctl":
                     return launchctl(parts, **kwargs)
                 return transport(argv, **kwargs)
 
-            runner.transport = remote_transport
+            runner.transport = with_remote_python(remote_transport)
         backend = service.LaunchdBackend(runner or launchctl,
             home=runner.path(str(home)) if runner else home, uid=501, raw_path=os.defpath)
         return backend, runner, agents
