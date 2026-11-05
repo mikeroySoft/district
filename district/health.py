@@ -112,6 +112,9 @@ CHECKS = {
     "host.configuration_drift": "warning",
     "host.configuration_invalid": "error",
     "host.policy_violation": "error",
+    "host_without_repos": "warning",
+    "unrecognized_factory_job": "warning",
+    "journalctl_unavailable": "warning",
 }
 EXECUTION_STATES = ("stage-active", "blocked", "known wait", "unknown", "failed", "interrupted", "completed")
 TERMINAL_STATES = {"failed", "interrupted", "completed"}
@@ -146,6 +149,15 @@ def _latest(records: list[tuple[dict, dict]]) -> tuple[dict, dict] | None:
 
 def snapshot_sources(snap: dict | None, error: str | None = None) -> list[dict]:
     """Adapt only documented legacy facts; do not claim execution/owner support."""
+    if error and "journalctl" in error and ("FileNotFoundError" in error or "not found" in error):
+        source = {"id": "factory.snapshot", "observed_at": None, "cadence_seconds": None,
+                  "error": "journalctl_unavailable", "data": {"checks": [{
+                      "condition": "journalctl_unavailable", "resource": "journalctl", "status": "failed",
+                      "detail": "journalctl_unavailable: Factory dashboard cannot read the systemd journal.",
+                      "impact": "Dashboard job history is unavailable; native job health is collected independently.",
+                      "reference": "factory dashboard --json",
+                  }]}}
+        return [source] + (snapshot_sources(snap) if isinstance(snap, dict) else [])
     if not isinstance(snap, dict):
         return [{"id": "factory.snapshot", "observed_at": None, "cadence_seconds": None,
                  "data": None, "error": error or "snapshot unavailable"}]
