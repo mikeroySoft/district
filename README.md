@@ -111,8 +111,10 @@ Pass logs use `=== end rc=CODE` markers. Opening/end markers may carry ISO-8601
 timestamps or the shell's plain `date` format, including PST/PDT. Undated
 completions still count toward streaks and the failure-rate sample; the rate
 explicitly marks its window uncertain and reports the undated count rather
-than silently discarding runs. Log mtime supplies last-run timing only when
-no dated completion is available. Missing timing is not proof of a stall.
+than silently discarding runs. Log mtime supplies last-run timing only for an
+actual undated log completion. A manager-only exit does not inherit an old
+log/plist timestamp; installation time is used only for a never-run job.
+Missing timing is not proof of a stall.
 Reads are bounded to the latest 10,000 journal records or 4 MiB per log;
 rotated-away history is not evidence.
 
@@ -482,6 +484,16 @@ uv run python -m unittest discover -s tests
 Standalone filesystem/CLI fixtures must isolate `HOME`, XDG config/state/data/cache,
 and uv tool/bin directories under temporary roots and replace external runners.
 The suite does not require the invoking shell to sandbox the developer's home.
+
+On a controller with a live systemd user manager, isolate its runtime socket and bus too:
+
+```sh
+XDG_RUNTIME_DIR=/tmp/district-test-no-runtime DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/district-test-no-session-bus uv run --frozen python -m unittest discover -s tests
+```
+
+Native job discovery intentionally enumerates the owning host's service manager;
+temporary `HOME`/XDG directories alone do not isolate that manager. Service
+fixtures still use their stubbed `systemctl` on `PATH`.
 
 District shells out to the `factory` CLI and never imports `agent_factory`
 internals. If District needs a per-repo fact or action, the fix is a flag on

@@ -128,7 +128,7 @@ def _error(line: str) -> bool:
     return bool(re.search(r"error|exception|failed|fatal", line, re.I))
 
 
-def journal_passes(text: str, unit: str) -> list[PassResult]:
+def journal_passes(text: str, unit: str) -> tuple[list[PassResult], str | None]:
     passes = []
     error = None
     for line in text.splitlines():
@@ -143,9 +143,10 @@ def journal_passes(text: str, unit: str) -> list[PassResult]:
             passes.append(PassResult(failed, timestamp, error))
             error = None
         elif isinstance(message, str) and message.strip() and item.get("MESSAGE_ID") is None:
-            if error is None or (_error(message) and not _error(error)):
-                error = message.strip().splitlines()[-1]
-    return passes
+            for detail in message.strip().splitlines():
+                if detail.strip() and (error is None or (_error(detail) and not _error(error))):
+                    error = detail.strip()
+    return passes, error
 
 
 def launchd_passes(text: str) -> list[PassResult]:
@@ -227,18 +228,19 @@ def _systemd_job(runner, label: str, root: str, timeout: float) -> dict:
     try:
         text = _output(runner, ["journalctl", "--user", "-u", f"{label}.service", "--output=json",
                                "--no-pager", "-n", "10000"], timeout)
-        passes = journal_passes(text, f"{label}.service")
+        passes, pending_error = journal_passes(text, f"{label}.service")
     except OSError as exc:
         code = "journalctl_unavailable" if isinstance(exc, FileNotFoundError) or "not found" in str(exc) else "pass_history_unavailable"
         gaps.append({"code": code, "error": str(exc)})
-        passes = []
+        passes, pending_error = [], None
     last_run = _stamp(service.get("ExecMainStartTimestamp", "")) or _stamp(timer.get("LastTriggerUSec", ""))
     completed = _stamp(service.get("ExecMainExitTimestamp", "")) or last_run
     if (completed and "ExecMainStatus" in service and service.get("ActiveState") not in ("active", "activating")
             and (not passes or not passes[-1].at or datetime.fromisoformat(completed) > datetime.fromisoformat(passes[-1].at))):
         failed = service["ExecMainStatus"] != "0" or service.get("Result", "success") != "success"
-        passes.append(PassResult(failed, completed, f"ExecMainStatus={service['ExecMainStatus']} Result={service.get('Result', 'unknown')}"))
-    return {"label": label, "root": root, "passes": passes, "enabled": timer.get("UnitFileState") == "enabled",
+        passes.append(PassResult(failed, completed, pending_error or
+                                 f"ExecMainStatus={service['ExecMainStatus']} Result={service.get('Result', 'unknown')}"))
+    return {"label": label, "root": root, "passes": passes, "enabled": timer.get("UnitFileState") in ("enabled", "enabled-runtime"),
             "last_run_at": last_run, "installed_at": _stamp(timer.get("ActiveEnterTimestamp", "")),
             "errors": gaps, "running": service.get("ActiveState") in ("active", "activating")}
 
@@ -249,6 +251,10 @@ def _jobs(runner, platform: str, expected: dict[str, str], timeout: float) -> tu
         jobs = payload["jobs"]
         for job in jobs:
             job["passes"] = _launchd_history(job)
+            dated = [p.at for p in job["passes"] if p.at]
+            job["last_run_at"] = dated[-1] if dated else None
+            if not job["last_run_at"] and job["passes"] and job["mtimes"]:
+                job["last_run_at"] = datetime.fromtimestamp(max(job["mtimes"].values()), timezone.utc).isoformat()
             status = job["status"]
             exit_code = re.search(r"last exit code\s*=\s*(-?\d+)", status)
             runs = re.search(r"runs\s*=\s*(\d+)", status)
@@ -260,10 +266,6 @@ def _jobs(runner, platform: str, expected: dict[str, str], timeout: float) -> tu
                     job["passes"][-1] = replace(job["passes"][-1], failed=failed)
                 else:
                     job["passes"] = [PassResult(failed, None, f"launchctl last exit code={exit_code[1]}")]
-            dated = [p.at for p in job["passes"] if p.at]
-            job["last_run_at"] = dated[-1] if dated else None
-            if not job["last_run_at"] and job["passes"] and job["mtimes"]:
-                job["last_run_at"] = datetime.fromtimestamp(max(job["mtimes"].values()), timezone.utc).isoformat()
             installed = job["installed_at"]
             job["installed_at"] = datetime.fromtimestamp(installed, timezone.utc).isoformat() if installed else None
             job["running"] = bool(re.search(r"^\s*state\s*=\s*running\s*$", status, re.M))
@@ -308,7 +310,7 @@ def _alerts(job: dict, count: int, name: str, slug: str | None, at: datetime) ->
         rate = alert("failure_rate", window, len(window), 6)
         rate["undated_count"] = sum(p.at is None for p in window)
         alerts.append(rate)
-    last = job.get("last_run_at") or (passes[-1].at if passes else None) or job.get("installed_at")
+    last = job.get("last_run_at") or (passes[-1].at if passes else job.get("installed_at"))
     if job.get("enabled") and not job.get("running") and last and at - datetime.fromisoformat(last) >= timedelta(hours=2):
         alerts.append(alert("stalled", [], 0, 2))
     return alerts
