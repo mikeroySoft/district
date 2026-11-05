@@ -8,7 +8,7 @@ import unittest
 
 from district import host, service, systemd, update_transaction
 from tests import test_one_install as fixtures
-from tests.remote_transport import remote_command
+from tests.remote_transport import remote_command, with_remote_python
 
 
 class SystemdPathsTest(unittest.TestCase):
@@ -65,7 +65,7 @@ class SystemdPathsTest(unittest.TestCase):
         (unit_dir / 'factory-paths.service').write_text(body)
 
         def manager(argv, **kwargs):
-            if argv[0] == 'python3':
+            if argv[1:2] == ['-c']:
                 return subprocess.run([sys.executable, *argv[1:]], capture_output=True,
                                       text=True, timeout=5, input=kwargs.get('input'))
             self.assertEqual(argv[0], 'systemctl')
@@ -79,10 +79,11 @@ class SystemdPathsTest(unittest.TestCase):
                 if remote:
                     def transport(argv, **kwargs):
                         parts = shlex.split(remote_command(argv))
-                        if parts[:2] == ['python3', '-c'] and parts[2] == host.REMOTE_DEADLINE:
+                        if parts[1:3] == ['-c', host.REMOTE_DEADLINE]:
                             parts = shlex.split(parts[-1])
                         return manager(parts, **kwargs)
-                    runner = host.RemoteRunner('fake', 'unused', transport=transport)
+                    runner = host.RemoteRunner(
+                        'fake', 'unused', transport=with_remote_python(transport))
                     directory = runner.path(str(unit_dir))
                 else:
                     runner, directory = manager, unit_dir

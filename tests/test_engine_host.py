@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from district import host
-from tests.remote_transport import remote_command
+from tests.remote_transport import remote_command, with_remote_python
 
 
 class EngineHostTest(unittest.TestCase):
@@ -208,7 +208,8 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         ["sh", "-c", argv[-1]], capture_output=True, text=True,
                         env=remote_env, input=kwargs.get("input"), timeout=kwargs["timeout"])
 
-                runner = host.RemoteRunner("remote", "unused", transport=transport)
+                runner = host.RemoteRunner(
+                    "remote", "unused", transport=with_remote_python(transport))
                 data = {"defaults": {"factory_ref": "main"},
                         "hosts": {"remote": {}}, "repo": {"acme/widgets": {"host": "remote"}}}
                 with mock.patch.object(runner, "facts", return_value={"config_home": str(remote / "config")}):
@@ -236,7 +237,8 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         return subprocess.CompletedProcess(argv, returncode, "", detail)
                     return subprocess.CompletedProcess(argv, 0, "", "")
 
-                runner = host.RemoteRunner("remote", "unused", transport=transport)
+                runner = host.RemoteRunner(
+                    "remote", "unused", transport=with_remote_python(transport))
                 data = {"defaults": {"factory_ref": "main"}, "hosts": {"remote": {}}}
                 with mock.patch.object(
                     runner, "facts", return_value={"config_home": str(remote / "config")}
@@ -261,7 +263,8 @@ target = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 argv, 44 if "read_bytes()" in command else 0, "", ""
             )
 
-        runner = host.RemoteRunner("remote", "unused", transport=transport)
+        runner = host.RemoteRunner(
+            "remote", "unused", transport=with_remote_python(transport))
         data = {"defaults": {"factory_ref": "main"}, "hosts": {"remote": {}}}
         with mock.patch.object(
             runner, "facts", return_value={"config_home": str(remote / "config")}
