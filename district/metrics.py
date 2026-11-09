@@ -125,15 +125,42 @@ def has_bug(issue: dict) -> bool:
     return any("bug" in (label.get("name") or "").lower() for label in issue.get("labels", []))
 
 
+# `gh issue/pr list --search` first runs a SearchType introspection query that gh caches for 24h,
+# GraphQL error bodies included (HTTP 200). One exhausted GraphQL hour then fails every --search
+# call for a day with "API rate limit already exceeded" while quota remains, so search directly.
+SEARCH_QUERY = (
+    "query($q: String!, $first: Int!, $endCursor: String) {"
+    " search(query: $q, type: ISSUE, first: $first, after: $endCursor) {"
+    " pageInfo { hasNextPage endCursor }"
+    " nodes { ... on Issue { createdAt closedAt labels(first: 100) { nodes { name } } }"
+    " ... on PullRequest { headRefName mergedAt } } } }"
+)
+
+
+def search(slug: str, qualifiers: str, limit: int = 500) -> list[dict]:
+    """Issues or PRs in `slug` matching `qualifiers`, up to `limit`, via `gh api graphql` (uncached)."""
+    found: list[dict] = []
+    cursor = None
+    while len(found) < limit:
+        args = ["api", "graphql", "-f", f"query={SEARCH_QUERY}", "-F", f"first={min(100, limit - len(found))}",
+                "-f", f"q=repo:{slug} {qualifiers}"]
+        if cursor:
+            args += ["-f", f"endCursor={cursor}"]
+        page = gh_json(*args)["data"]["search"]
+        found += [{**node, "labels": node["labels"]["nodes"]} if "labels" in node else node for node in page["nodes"]]
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+    return found[:limit]
+
+
 def github(slug: str, at: datetime) -> dict:
     since = (at - timedelta(days=30)).strftime("%Y-%m-%d")
     repo = gh_json("repo", "view", slug, "--json", "stargazerCount,forkCount,watchers")
     open_issues = gh_json("issue", "list", "--repo", slug, "--state", "open", "--limit", "1000", "--json", "labels")
-    closed = gh_json("issue", "list", "--repo", slug, "--state", "closed", "--limit", "500", "--json", "createdAt,closedAt,labels",
-                     "--search", f"closed:>={since}")
+    closed = search(slug, f"is:issue is:closed closed:>={since}")
     open_prs = gh_json("pr", "list", "--repo", slug, "--state", "open", "--limit", "1000", "--json", "number")
-    merged = gh_json("pr", "list", "--repo", slug, "--state", "merged", "--limit", "500", "--json", "headRefName,mergedAt",
-                     "--search", f"merged:>={since}")
+    merged = search(slug, f"is:pr is:merged merged:>={since}")
     by_label: Counter = Counter(
         label["name"] for issue in open_issues for label in issue.get("labels", []) if label.get("name") in FACTORY_LABELS
     )
@@ -186,8 +213,14 @@ def main(argv: list[str]) -> int:
             return 1
         max_age = hours(args.max_age, "--max-age")
         out, code = {}, 0
-        for slug, table in host.select(host.load(), args.slug).items():
+        data = host.load()
+        for slug, table in host.select(data, args.slug).items():
             try:
+                if host.is_remote(data, slug):
+                    # `path` lives on another host: git stats would read it on this one.
+                    names = ", ".join(host.repo_hosts(table, slug))
+                    print(f"{slug}: skipped (runs on remote host {names})", file=sys.stderr)
+                    continue
                 out[slug] = cached(slug, table, max_age, args.refresh)
             except DistrictError as exc:
                 print(f"{slug}: {exc}", file=sys.stderr)

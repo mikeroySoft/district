@@ -3340,6 +3340,11 @@ class DoctorTest(DistrictCase):
         self.assertIn({"status": "FAIL", "label": "factory", "detail": "not found on PATH"}, rows)
 
 
+def gql_search(nodes: list[dict]) -> str:
+    """One last page of a GraphQL `search` connection, as `gh api graphql` prints it."""
+    return json.dumps({"data": {"search": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}})
+
+
 GH_METRICS = [
     ("repo view *", json.dumps({"stargazerCount": 3, "forkCount": 1, "watchers": {"totalCount": 2}})),
     ("issue list * --state open *", json.dumps([
@@ -3349,14 +3354,14 @@ GH_METRICS = [
         {"labels": [{"name": "wontfix"}]},  # obsolete name: ignored
         {"labels": []},
     ])),
-    ("issue list * --state closed *", json.dumps([
-        {"createdAt": "2026-09-01T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": [{"name": "Bug"}]},
-        {"createdAt": "2026-09-02T00:00:00Z", "closedAt": "2026-09-02T12:00:00Z", "labels": []},
-        {"createdAt": "2026-09-02T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": []},
+    ("api graphql * q=repo:* is:issue is:closed closed:>=*", gql_search([
+        {"createdAt": "2026-09-01T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": {"nodes": [{"name": "Bug"}]}},
+        {"createdAt": "2026-09-02T00:00:00Z", "closedAt": "2026-09-02T12:00:00Z", "labels": {"nodes": []}},
+        {"createdAt": "2026-09-02T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": {"nodes": []}},
     ])),
     ("pr list * --state open *", json.dumps([{"number": 1}, {"number": 2}])),
-    ("pr list * --state merged *", json.dumps([{"headRefName": "agent/7", "mergedAt": "2026-09-01T00:00:00Z"},
-                                               {"headRefName": "feat/x", "mergedAt": "2026-09-02T00:00:00Z"}])),
+    ("api graphql * q=repo:* is:pr is:merged merged:>=*", gql_search([{"headRefName": "agent/7", "mergedAt": "2026-09-01T00:00:00Z"},
+                                                                      {"headRefName": "feat/x", "mergedAt": "2026-09-02T00:00:00Z"}])),
     ("api repos/*/traffic/views", '{"message":"Bad credentials","status":"401"}', 1),
     ("api repos/*/traffic/clones", json.dumps({"count": 40, "uniques": 9, "clones": []})),
 ]
@@ -3391,7 +3396,7 @@ class MetricsTest(DistrictCase):
         self.assertEqual(m["traffic"], {"views": "unavailable", "clones": {"count": 40, "uniques": 9}})
         self.assertRegex(m["collected_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertRegex(m["head"], r"^[0-9a-f]{7,}$")
-        self.assertIn("--search closed:>=", " ".join(self.calls("gh")))
+        self.assertIn("is:issue is:closed closed:>=", " ".join(self.calls("gh")))
 
     def test_cache_honours_max_age(self) -> None:
         repo = self.committed_repo()
@@ -3410,6 +3415,52 @@ class MetricsTest(DistrictCase):
             self.assertEqual(self.district("metrics", "--max-age", "soon")[0], 1)
             self.assertEqual(metrics.read("acme/widgets")["loc"], 6)
             self.assertIsNone(metrics.read("acme/nothing"))
+
+    def test_search_bypasses_gh_cached_search_feature_detection(self) -> None:
+        # gh issue/pr list --search first runs a SearchType introspection query that gh caches for
+        # 24h, error bodies included: one exhausted GraphQL hour poisons every --search call for a
+        # day with "API rate limit already exceeded" while plenty of quota remains (Tank, Nov 2026).
+        repo = self.committed_repo()
+        poisoned = "GraphQL: API rate limit already exceeded for user ID 1.\n"
+        self.stub("gh", ("issue list * --search *", poisoned, 1), ("pr list * --search *", poisoned, 1), *GH_METRICS)
+        m = metrics.collect("acme/widgets", {"path": str(repo)})
+        self.assertEqual((m["closed_issues_30d"], m["closed_bugs_30d"], m["median_days_to_close"]), (3, 1, 1.0))
+        self.assertEqual((m["merged_prs_30d"], m["agent_prs_30d"]), (2, 1))
+        calls = self.calls("gh")
+        self.assertFalse([c for c in calls if "--search" in c], calls)
+        self.assertTrue([c for c in calls if c.startswith("api graphql") and "is:issue is:closed closed:>=" in c], calls)
+        self.assertTrue([c for c in calls if c.startswith("api graphql") and "is:pr is:merged merged:>=" in c], calls)
+
+    def test_search_follows_pages_up_to_the_limit(self) -> None:
+        def page(nodes: list[dict], cursor: str | None) -> str:
+            info = {"hasNextPage": cursor is not None, "endCursor": cursor}
+            return json.dumps({"data": {"search": {"pageInfo": info, "nodes": nodes}}})
+        pr = {"headRefName": "agent/1", "mergedAt": "2026-09-01T00:00:00Z"}
+        self.stub("gh", ("api graphql * endCursor=c1", page([pr], None)), ("api graphql *", page([pr] * 100, "c1")))
+        self.assertEqual(len(metrics.search("acme/widgets", "is:pr is:merged")), 101)
+        self.stub("gh", ("api graphql *", page([pr] * 100, "more")))
+        self.assertEqual(len(metrics.search("acme/widgets", "is:pr is:merged", limit=300)), 300)
+        self.assertEqual(len(self.calls("gh")), 2 + 3, "stops paging once the limit is reached")
+
+    def test_remote_factories_are_skipped_not_fatal(self) -> None:
+        # Tank's registry lists benito-app on Ultron at a macOS path; collecting it locally raised
+        # FileNotFoundError and aborted the run before the local factories' caches were written.
+        repo = self.committed_repo()
+        self.stub("gh", *GH_METRICS)
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.tmp / "cache")}):
+            host.save({
+                "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+                "repo": {
+                    "acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}},
+                    "acme/benito-app": {"path": "/Users/mike/factories/benito-app", "hosts": ["ultron"]},
+                },
+            })
+            code, out = self.district("metrics", "--refresh")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(metrics.read("acme/widgets")["loc"], 6)
+            self.assertIsNone(metrics.read("acme/benito-app"))
+            self.assertIn("acme/benito-app: skipped (runs on remote host ultron)", out)
+            self.assertFalse([c for c in self.calls("gh") if "benito-app" in c], "no GitHub calls for a skipped factory")
 
 
 def fleet_entry(loc: int | None, assessment: str = "unknown", upstream: str | None = None, **snap_kw) -> dict:
