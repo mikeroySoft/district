@@ -138,7 +138,7 @@
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
-      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.8 (November 3, 2026)</a></p>
+      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.9 (November 9, 2026)</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
@@ -299,8 +299,24 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="changelog">
     <div class="kicker">Changelog</div>
     <h2>From fleet registry to operational evidence.</h2>
-    <p class="lede">Selected milestones through November 3, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
+    <p class="lede">Selected milestones through November 9, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
     <ol class="timeline">
+      <li>
+        <div><time datetime="2026-11-09">November 9, 2026</time><span class="status shipped">Release · v0.1.9</span></div>
+        <div>
+          <h3>Metrics and the /tmp reaper run clean again; engine upgrades default to the latest release.</h3>
+          <ul>
+            <li><strong>Metrics skip remote factories:</strong> <code>district metrics</code> skips repos that run only on a remote host (<code>&lt;slug&gt;: skipped (runs on remote host NAME)</code>) instead of reading their path on the controller, which aborted every hourly refresh on a macOS path.</li>
+            <li><strong>Metrics search without gh's cached detection:</strong> closed-issue and merged-PR counts come from a paginated <code>gh api graphql</code> search. <code>gh issue/pr list --search</code> replayed a cached GraphQL rate-limit error for up to 24 hours while quota remained.</li>
+            <li><strong>Temporary /tmp reaper tracked and fixed:</strong> <code>scripts/tmp-reaper-temp.sh</code> restores owner permissions on read-only Factory review snapshots before removing them, counts failed removals instead of aborting, logs <code>failed=N</code>, and exits non-zero only after logging. District does not install it.</li>
+            <li><strong>Engine upgrades follow releases:</strong> with no ref, <code>district apply --upgrade</code> targets the latest published non-prerelease Factory release; tracking a branch needs <code>--upgrade BRANCH</code> or <code>[defaults].factory_track_branch = true</code>, and <code>district status</code> flags hosts whose engine is behind the latest release.</li>
+            <li><strong>Paused timers:</strong> an inactive but enabled factory timer is reported as <code>timer paused</code> and no longer fails apply by itself.</li>
+            <li><strong>Remote onboarding:</strong> <code>district add OWNER/REPO --host NAME</code> clones and configures through that host's SSH connection; remote config replacements are atomic and keep a timestamped backup of changed bytes.</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> both District maintenance units on the Tank controller had failed every hourly run since November 4 and 7, and an unpinned <code>factory_ref = "main"</code> had silently moved an engine off the latest release.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/releases/tag/v0.1.9">Release v0.1.9</a> · <a href="https://github.com/mikeroySoft/district/pull/181">Metrics #181</a> · <a href="https://github.com/mikeroySoft/district/pull/182">Reaper #182</a> · <a href="https://github.com/mikeroySoft/district/issues/174">Release default #174</a> · <a href="https://github.com/mikeroySoft/district/issues/161">Paused timers #161</a> · <a href="https://github.com/mikeroySoft/district/issues/129">Remote add #129</a> · <a href="https://github.com/mikeroySoft/district/issues/165">Remote config backup #165</a></p>
+        </div>
+      </li>
       <li>
         <div><time datetime="2026-11-03">November 3, 2026</time><span class="status shipped">Release · v0.1.8</span></div>
         <div>
@@ -527,7 +543,7 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district status
 <span class="p">$</span> district report                       <span class="c"># on-demand read-only Markdown review on stdout</span>
 <span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span>
-<span class="p">$</span> district update --to v0.1.8 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
+<span class="p">$</span> district update --to v0.1.9 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
     <p style="color:var(--text-muted)">Factories are local unless their repo table names a <code>host</code> defined under <code>[hosts.NAME]</code> (<code>ssh</code>, <code>platform</code>, optional <code>root</code>); <code>local</code> is reserved for this machine. The single controller keeps the registry and operation lock, reaches remote hosts through BatchMode SSH with a bounded connection attempt, and writes each host's filtered Factory config there. Status, report, health, and Atlas retain every factory, label it by host, and show an unreachable host as unknown/unreachable with its last-seen time while other hosts continue.</p>
