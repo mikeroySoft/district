@@ -38,7 +38,8 @@ class SchedulerPreflightTest(DistrictCase):
                 "path": str(repo), "hosts": ["local", "ultron"], "triage_host": "ultron",
             }},
         })
-        with mock.patch.object(host, "remote_runner", side_effect=AssertionError("local onboarding contacted remote host")):
+        with mock.patch.object(host, "claims_supported", return_value=True), \
+                mock.patch.object(host, "remote_runner", side_effect=AssertionError("local onboarding contacted remote host")):
             code, output = self.district("add", str(repo), "--host", "local")
         self.assertEqual(code, 0, output)
         self.assertIn("install", self.calls("factory"))

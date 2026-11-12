@@ -657,6 +657,7 @@ class HostTest(DistrictCase):
                 # factory#526 reads these keys directly from each host's [repo."SLUG"] table
                 self.assertEqual(tables["acme/widgets"], {
                     "path": "/srv/widgets", "claim_ttl": "1h", "host_name": name, "triage_host": "local",
+                    "release_host": "local",
                 })
         self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/solo"], {"path": "/srv/solo"})
         self.assertNotIn("acme/solo", host.remote_config(data, "benito")["repo"])
@@ -668,23 +669,27 @@ class HostTest(DistrictCase):
         self.assertTrue(host.sync_local_claims(data))
         self.assertFalse(host.sync_local_claims(data))
         self.assertEqual(table, {"path": "/srv/widgets", "hosts": ["local", "ultron"], "triage_host": "ultron",
-                                 "claim_ttl": "1h", "host_name": "local"})
+                                 "claim_ttl": "1h", "host_name": "local", "release_host": "ultron"})
         self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/widgets"],
-                         {"path": "/srv/widgets", "claim_ttl": "1h", "host_name": "ultron", "triage_host": "ultron"})
+                         {"path": "/srv/widgets", "claim_ttl": "1h", "host_name": "ultron",
+                          "triage_host": "ultron", "release_host": "ultron"})
 
         table["hosts"] = ["ultron"]
         del table["triage_host"]
         self.assertTrue(host.sync_local_claims(data))
         self.assertNotIn("host_name", table)
+        self.assertNotIn("release_host", table)
         self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/widgets"],
                          {"path": "/srv/widgets", "claim_ttl": "1h"})
 
     def test_claims_probe_matches_factory_contract(self) -> None:
-        """factory#526: `factory claims --supported` prints exactly `host-claims 1`, exit 0, run with
+        """factory#722: `factory claims --supported` prints exactly `host-claims 1`, exit 0, run with
         ~/.local/bin first on PATH and a 10-second timeout; older engines exit 2 (unknown command)."""
         data = {"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "linux"}}}
         cases = (("host-claims 1\n", 0, True), ("host-claims\n", 0, False), ("host-claims 10\n", 0, False),
-                 ("", 2, False), ("host-claims 1\n", 1, False))
+                 ("host-claims 1", 0, True), ("", 2, False), ("host-claims 1\n", 1, False),
+                 (" host-claims 1\n", 0, False), ("host-claims 1 \n", 0, False),
+                 ("host-claims 1\n\n", 0, False))
         for stdout, rc, expected in cases:
             with self.subTest(stdout=stdout, rc=rc):
                 with mock.patch.object(host, "run", return_value=subprocess.CompletedProcess([], rc, stdout, "")) as local:
@@ -759,6 +764,111 @@ class HostTest(DistrictCase):
             host.load()
 
 
+
+
+class MultiHostClaimsTest(DistrictCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.remote_home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        self.root = self.repo(toml="")
+        self.registry = {
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+            "repo": {"acme/widgets": {
+                "path": str(self.root), "hosts": ["local", "ultron"], "triage_host": "local",
+                "claim_ttl": "1h", "dashboard": {"port": 8765},
+            }},
+        }
+        # Both hosts execute this stub; select the probe result by their isolated HOME.
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            "for pat, out, rc in",
+            'if args == "claims --supported":\n'
+            '    name = "ultron" if pathlib.Path.home().name == "remote-0" else "local"\n'
+            '    out, rc = json.loads((here / "claims.json").read_text())[name]\n'
+            '    sys.stdout.write(out)\n'
+            '    sys.exit(rc)\n'
+            "for pat, out, rc in",
+        ))
+        self.results = {name: ["host-claims 1\n", 0] for name in ("local", "ultron")}
+
+    def save_probe_results(self) -> None:
+        (self.bin / "claims.json").write_text(json.dumps(self.results))
+
+    def test_add_and_apply_refuse_any_unsupported_host_without_registry_writes(self) -> None:
+        for command in ("join", "readd", "bare", "preview", "apply"):
+            for name in ("local", "ultron"):
+                for stdout, rc in (("", 2), ("host-claims 10\n", 0), ("host-claims 1\n", 1)):
+                    with self.subTest(command=command, host=name, stdout=stdout, rc=rc):
+                        registry = json.loads(json.dumps(self.registry))
+                        if command == "join":
+                            table = registry["repo"]["acme/widgets"]
+                            table.pop("hosts")
+                            table.pop("triage_host")
+                        host.save(registry)
+                        before = host.path().read_bytes()
+                        self.results = {n: ["host-claims 1\n", 0] for n in ("local", "ultron")}
+                        self.results[name] = [stdout, rc]
+                        self.save_probe_results()
+                        argv = ("apply",) if command == "apply" else (
+                            "add", str(self.root), "--host", "ultron")
+                        if command == "bare":
+                            argv = ("add", str(self.root))
+                        elif command == "preview":
+                            argv = (*argv, "--dry-run")
+
+                        code, out = self.district(*argv)
+
+                        self.assertEqual(code, 1, out)
+                        self.assertIn(f"factory on {name}", out)
+                        self.assertIn("https://github.com/mikeroySoft/factory/issues/722", out)
+                        self.assertEqual(host.path().read_bytes(), before)
+                        self.assertFalse((self.remote_home / ".config/factory/config.toml").exists())
+                        self.assertEqual(self.calls("launchctl"), [])
+                        self.assertFalse(host.unit_dir().exists())
+
+    def assert_claim_config(self) -> None:
+        local = host.load()["repo"]["acme/widgets"]
+        remote = tomllib.loads(
+            (self.remote_home / ".config/factory/config.toml").read_text())["repo"]["acme/widgets"]
+        for name, table in (("local", local), ("ultron", remote)):
+            with self.subTest(host=name):
+                self.assertEqual({key: table[key] for key in (
+                    "host_name", "triage_host", "release_host", "claim_ttl",
+                )}, {"host_name": name, "triage_host": "local", "release_host": "local", "claim_ttl": "1h"})
+
+    def test_add_writes_claim_config_when_every_host_supports_claims(self) -> None:
+        table = self.registry["repo"]["acme/widgets"]
+        table.pop("hosts")
+        table.pop("triage_host")
+        host.save(self.registry)
+        self.save_probe_results()
+
+        code, out = self.district("add", str(self.root), "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        self.assert_claim_config()
+
+    def test_readd_repairs_local_release_host(self) -> None:
+        self.registry["repo"]["acme/widgets"]["release_host"] = "ultron"
+        host.save(self.registry)
+        self.save_probe_results()
+
+        code, out = self.district("add", str(self.root), "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        self.assert_claim_config()
+
+    def test_apply_writes_claim_config_when_every_host_supports_claims(self) -> None:
+        host.save(self.registry)
+        self.save_probe_results()
+        # Engine reconciliation and unit convergence have their own tests. Keep the real
+        # claims probes, host contexts, registry persistence, and remote config sync.
+        with mock.patch.object(apply, "reconcile_fleet_engine", return_value="unchanged"), \
+                mock.patch.object(apply, "_apply_host", return_value=([], 0, (0, []))):
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assert_claim_config()
 
 
 class AddTest(DistrictCase):
@@ -1150,7 +1260,7 @@ class AddTest(DistrictCase):
 
         self.assertEqual(code, 1, out)
         self.assertIn("acme/widgets already runs on local", out)
-        self.assertIn("https://github.com/mikeroySoft/factory/issues/526", out)
+        self.assertIn("https://github.com/mikeroySoft/factory/issues/722", out)
         self.assertEqual(host.load(), registry)
         self.assertEqual([c for c in self.calls("factory") if c != "claims --supported"], [])
 
@@ -2190,7 +2300,7 @@ class ApplyTest(DistrictCase):
 
         self.assertEqual(code, 1, out)
         self.assertIn("acme/widgets lists several hosts", out)
-        self.assertIn("https://github.com/mikeroySoft/factory/issues/526", out)
+        self.assertIn("https://github.com/mikeroySoft/factory/issues/722", out)
         self.assertEqual([c for c in self.calls("uv") if "install" in c], [])
         self.assertEqual([c for c in self.calls("factory") if c != "claims --supported"], [])
         self.assertFalse(any("factory install" in " ".join(call) for call in self.ssh_calls()))
