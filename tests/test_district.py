@@ -683,11 +683,11 @@ class HostTest(DistrictCase):
                          {"path": "/srv/widgets", "claim_ttl": "1h"})
 
     def test_claims_probe_matches_factory_contract(self) -> None:
-        """factory#526: `factory claims --supported` prints exactly `host-claims 1`, exit 0, run with
+        """factory#722: `factory claims --supported` prints exactly `host-claims 1`, exit 0, run with
         ~/.local/bin first on PATH and a 10-second timeout; older engines exit 2 (unknown command)."""
         data = {"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "linux"}}}
         cases = (("host-claims 1\n", 0, True), ("host-claims\n", 0, False), ("host-claims 10\n", 0, False),
-                 ("", 2, False), ("host-claims 1\n", 1, False),
+                 ("host-claims 1", 0, True), ("", 2, False), ("host-claims 1\n", 1, False),
                  (" host-claims 1\n", 0, False), ("host-claims 1 \n", 0, False),
                  ("host-claims 1\n\n", 0, False))
         for stdout, rc, expected in cases:
@@ -795,7 +795,7 @@ class MultiHostClaimsTest(DistrictCase):
         (self.bin / "claims.json").write_text(json.dumps(self.results))
 
     def test_add_and_apply_refuse_any_unsupported_host_without_registry_writes(self) -> None:
-        for command in ("join", "readd", "apply"):
+        for command in ("join", "readd", "bare", "preview", "apply"):
             for name in ("local", "ultron"):
                 for stdout, rc in (("", 2), ("host-claims 10\n", 0), ("host-claims 1\n", 1)):
                     with self.subTest(command=command, host=name, stdout=stdout, rc=rc):
@@ -811,16 +811,20 @@ class MultiHostClaimsTest(DistrictCase):
                         self.save_probe_results()
                         argv = ("apply",) if command == "apply" else (
                             "add", str(self.root), "--host", "ultron")
+                        if command == "bare":
+                            argv = ("add", str(self.root))
+                        elif command == "preview":
+                            argv = (*argv, "--dry-run")
 
                         code, out = self.district(*argv)
 
                         self.assertEqual(code, 1, out)
-                        self.assertIn(name, out)
+                        self.assertIn(f"factory on {name}", out)
                         self.assertIn("https://github.com/mikeroySoft/factory/issues/722", out)
                         self.assertEqual(host.path().read_bytes(), before)
                         self.assertFalse((self.remote_home / ".config/factory/config.toml").exists())
                         self.assertEqual(self.calls("launchctl"), [])
-                        self.assertEqual(self.calls("systemctl"), [])
+                        self.assertFalse(host.unit_dir().exists())
 
     def assert_claim_config(self) -> None:
         local = host.load()["repo"]["acme/widgets"]

@@ -414,11 +414,13 @@ Set either `host` or `hosts`, not both. With more than one host,
 `triage_host` is required and must be one of them; with one host it is
 refused. It is the only host that triages, and `district status` reads the
 repo's state from it. Each host's Factory config carries that host's
-`host_name` and the `triage_host` directly in its `[repo."SLUG"]` table, as
-factory#526 reads them. On the controller that config is this registry, which
-already holds `triage_host`, so `district add` and `district apply` keep
-`host_name = "local"` there. Other keys such as `claim_ttl` set in the
-registry's `[repo."SLUG"]` reach every host.
+`host_name`, `triage_host`, and `release_host = <triage_host>` directly in its
+`[repo."SLUG"]` table. The triage host also owns releases
+([factory#723](https://github.com/mikeroySoft/factory/issues/723)).
+On the controller that config is this registry, so `district add` and
+`district apply` keep `host_name = "local"` and the matching `release_host`
+there. Other keys such as `claim_ttl` set in the registry's `[repo."SLUG"]`
+reach every host.
 `district add --host NAME` on a repo already registered
 on another host appends `NAME` to `hosts`, keeping the first host as
 `triage_host`; a bare `district add` leaves the repo's hosts alone.
@@ -427,12 +429,15 @@ nothing, while any of them is running a pass unless you pass `--wait`.
 `district doctor` checks a repo's `toolchain` on every host that runs it.
 
 Several hosts on one repo need Factory's host claims
-([factory#526](https://github.com/mikeroySoft/factory/issues/526)) so two hosts
-never work the same ticket. Until `factory claims --supported` prints exactly `host-claims 1` and exits
-0 on every listed host (run with `~/.local/bin` first on `PATH` and a
-10-second timeout), `district add` refuses to add a second host and
-`district apply` refuses to apply a repo that shares a host with any
-multi-host repo, both with a link to that issue. A host that can't be reached
+([factory#722](https://github.com/mikeroySoft/factory/issues/722)) so two hosts
+never work the same ticket. Before every multi-host `district add` or
+`district apply`, `factory claims --supported` must print exactly
+`host-claims 1` (with an optional final newline) and exit 0 on every listed
+host (run with `~/.local/bin` first on `PATH` and a 10-second timeout).
+No version sniffing: a missing command, different output, or non-zero exit
+refuses the operation without changing the registry, naming the failing
+host and linking factory#722. Apply also enforces this when the selected
+repo shares a host with any multi-host repo. A host that can't be reached
 is reported as unreachable, not as lacking support. Applying a repo whose hosts
 run no multi-host repo never contacts the fleet hosts.
 
