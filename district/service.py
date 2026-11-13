@@ -514,11 +514,25 @@ class LaunchdBackend(ServiceBackend):
         return units
 
     def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
-        # Disable scheduling without bootout, which would kill the in-flight pass.
-        return self._run("disable", f"{self.domain}/{self._label(name)}", timeout=timeout)
+        # Stop new scheduled passes without `launchctl disable` (which persists across
+        # reboots, breaking the never-disable protocol) and without killing a running
+        # pass. When the agent is idle, bootout (unload) it, leaving its plist on disk
+        # and enabled. When a pass is in flight, leave it loaded and rely on the
+        # District drain flag the scheduled pass consults to admit no new work until
+        # resume; the running pass finishes on its own.
+        label = self._label(name)
+        target = f"{self.domain}/{label}"
+        if self.is_active(f"{label}.service", timeout=timeout) in ("active", "activating", "deactivating"):
+            return subprocess.CompletedProcess([self.executable, "bootout", target], 0, "", "")
+        return self._run("bootout", target, check=False, timeout=timeout)
 
     def resume_timer(self, name: str, *, timeout: float = 10) -> subprocess.CompletedProcess:
-        return self._run("enable", f"{self.domain}/{self._label(name)}", check=False, timeout=timeout)
+        # Re-admit scheduled passes by reloading the agent if it was unloaded; never
+        # `launchctl enable`, which would also clear an operator's own disable.
+        label = self._label(name)
+        if self.status(f"{label}.service", timeout=timeout).loaded:
+            return subprocess.CompletedProcess([self.executable, "bootstrap", self.domain], 0, "", "")
+        return self._run("bootstrap", self.domain, str(self._path(label)), check=False, timeout=timeout)
 
 
     @property

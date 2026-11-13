@@ -11,7 +11,7 @@ from district import host, service
 
 
 class EngineWindowTest(unittest.TestCase):
-    def test_launchd_pause_preserves_process_and_respects_disabled_schedule(self):
+    def test_launchd_pause_unloads_idle_without_disable_and_never_kills_running(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             with mock.patch.dict(os.environ, {
@@ -19,19 +19,27 @@ class EngineWindowTest(unittest.TestCase):
                 "XDG_DATA_HOME": str(root / "data"), "UV_TOOL_DIR": str(root / "tools"),
                 "UV_TOOL_BIN_DIR": str(root / "bin"),
             }):
-                disabled = set()
-                killed = []
+                state = {"loaded": True, "running": True}
+                ops = []
 
                 def run(argv, **kwargs):
                     operation = argv[1]
-                    if operation == "disable":
-                        disabled.add("factory-widgets")
-                    elif operation == "enable":
-                        disabled.discard("factory-widgets")
-                    elif operation in ("bootout", "kill"):
-                        killed.append(operation)
-                    output = ('"factory-widgets" => true' if disabled else "") if operation == "print-disabled" else "state = running\npid = 42\n"
-                    return subprocess.CompletedProcess(argv, 0, output, "")
+                    ops.append(operation)
+                    self.assertNotIn(operation, ("disable", "enable", "kill"),
+                                     f"launchd pause/resume must never {operation}")
+                    if operation == "bootout":
+                        self.assertTrue(not state["running"], "bootout would kill a running pass")
+                        state["loaded"] = False
+                    elif operation == "bootstrap":
+                        state["loaded"] = True
+                    elif operation == "print-disabled":
+                        return subprocess.CompletedProcess(argv, 0, "", "")
+                    elif operation == "print":
+                        if not state["loaded"]:
+                            return subprocess.CompletedProcess(argv, 3, "", "not loaded")
+                        body = "state = running\npid = 42\n" if state["running"] else "state = exited\nlast exit code = 0\n"
+                        return subprocess.CompletedProcess(argv, 0, body, "")
+                    return subprocess.CompletedProcess(argv, 0, "", "")
 
                 backend = service.LaunchdBackend(run, home=root, uid=501, raw_path=os.defpath)
                 backend.agent_dir.mkdir(parents=True)
@@ -39,13 +47,21 @@ class EngineWindowTest(unittest.TestCase):
                     "Label": "factory-widgets", "StartInterval": 600,
                     "ProgramArguments": [str(root / "tools/factory/bin/python"), "-P", "-m", "factory", "dispatch"],
                 }))
-                self.assertEqual(backend.is_active("factory-widgets.timer"), "active")
+                # A pass is in flight: pausing must not bootout (which would kill it) and
+                # must not disable; the District drain flag the pass consults gates new work.
+                self.assertEqual(backend.is_active("factory-widgets.service"), "activating")
                 backend.pause_timer("factory-widgets.timer", timeout=1)
-                self.assertEqual(backend.is_active("factory-widgets.timer"), "inactive")
+                self.assertNotIn("bootout", ops)
                 self.assertEqual(backend.status("factory-widgets.service").main_pid, 42)
+                # The pass finishes; now pausing unloads the agent without disabling it.
+                state["running"] = False
+                backend.pause_timer("factory-widgets.timer", timeout=1)
+                self.assertIn("bootout", ops)
+                self.assertEqual(backend.is_active("factory-widgets.timer"), "inactive")
+                # Resume reloads the agent; the plist was never disabled.
                 backend.resume_timer("factory-widgets.timer")
+                self.assertIn("bootstrap", ops)
                 self.assertEqual(backend.is_active("factory-widgets.timer"), "active")
-                self.assertEqual(killed, [])
 
     def test_discovery_includes_auxiliary_and_loaded_unregistered_services(self):
         with tempfile.TemporaryDirectory() as directory:

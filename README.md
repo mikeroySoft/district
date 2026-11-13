@@ -280,6 +280,11 @@ waits up to `--drain-timeout` (default 90 minutes) for existing Factory services
 to finish. It logs progress while waiting. The deadline is
 configurable; expiry aborts replacement and proceeds directly to timer restoration.
 `--drain` is no longer required to make an engine replacement safe.
+Timers stay enabled throughout. On Linux District stops and starts the timer
+unit; on macOS it unloads an idle launchd agent with `launchctl bootout` (never
+`launchctl disable`, which persists), and while a pass is in flight it leaves the
+agent loaded and relies on the District drain flag the scheduled pass consults,
+so a running pass is never killed.
 
 While those timers are paused, District never stops, kills, or starts a service.
 Linux unit reconciliation uses `factory install --print`; District writes the

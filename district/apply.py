@@ -406,6 +406,7 @@ def _resolved_paths(paths: list[Path], runner, *, timeout: float = SMOKE_TIMEOUT
 def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, deadline: float | None = None) -> None:
     paused = list((host.engine(data, name) or {}).get("paused_timers", []))
     remaining = list(paused)
+    interrupt: BaseException | None = None
     for timer in paused:
         try:
             proc = backend.resume_timer(timer, timeout=RESTORE_TIMEOUT)
@@ -413,7 +414,18 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, de
             _progress(f"engine:{name} restart {timer} ActiveState={state}")
             if proc.returncode or state != "active":
                 raise OSError(f"restart exited {proc.returncode}, ActiveState={state}")
-        except (Exception, DistrictError) as exc:
+        except DistrictError as exc:
+            # DistrictError subclasses SystemExit; treat it as a per-timer failure,
+            # not a process interrupt.
+            _progress(f"engine:{name} FAIL restoring {timer} ActiveState=unknown: {exc}")
+            continue
+        except (SystemExit, KeyboardInterrupt) as exc:
+            # A signal mid-restore must not abandon the remaining timers; finish the
+            # loop, persist intent, then honor the interrupt.
+            interrupt = exc
+            _progress(f"engine:{name} interrupted restoring {timer}; finishing remaining timers")
+            continue
+        except Exception as exc:
             _progress(f"engine:{name} FAIL restoring {timer} ActiveState=unknown: {exc}")
             continue
         remaining.remove(timer)
@@ -421,6 +433,8 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, de
             record.reenabled.add(timer)
     if paused:
         _save_engine(data, name, runner, paused_timers=remaining)
+    if interrupt is not None:
+        raise interrupt
     if remaining:
         raise DistrictError(f"could not restore paused timers: {', '.join(remaining)}")
 
@@ -521,7 +535,20 @@ def _paused_engine(data: dict, name: str, runner, backend, repos: dict, record):
             record.drain_deadlines[name] = (deadline, time.monotonic() + 900)
             yield record.drain_deadlines[name][1]
     finally:
-        _restore_engine_timers(data, name, runner, backend, record)
+        try:
+            _restore_engine_timers(data, name, runner, backend, record)
+        except DistrictError:
+            # DistrictError subclasses SystemExit, so it must be handled before the
+            # genuine-interrupt clause below. When the pause is held across the whole
+            # apply, a restore failure fails the run cleanly (and blocks the dashboard
+            # restart) rather than unwinding the ExitStack with a traceback; the paused
+            # intent is already persisted for the next apply.
+            if record is not None and record.drain_stack is not None:
+                record.completion_failed = True
+            else:
+                raise
+        except (SystemExit, KeyboardInterrupt):
+            raise
 
 
 @contextmanager
@@ -552,6 +579,13 @@ def _finish_dashboards(data: dict, name: str, runner, repos: dict, backend, *,
 
 
 def _finish_after_pause(data, name, runner, repos, backend, record) -> None:
+    paused = (host.engine(data, name) or {}).get("paused_timers", [])
+    if paused:
+        # Restoration left timers stopped: never restart dashboards onto a paused
+        # factory. Fail the run and keep the paused intent for recovery.
+        record.completion_failed = True
+        _progress(f"engine:{name} FAIL not restarting dashboards; timers still stopped: {', '.join(paused)}")
+        return
     try:
         _finish_dashboards(data, name, runner, repos, backend)
     except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
@@ -609,8 +643,7 @@ def _replace_engine(data: dict, name: str, runner, origin: str, ref: str, sha: s
 
 def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record) -> str | None:
     """Finish the durable transaction before consulting a new remote policy."""
-    if record is not None and name in record.drains and not record.drains[name].get("cleared_at"):
-        return None
+    draining = record is not None and name in record.drains and not record.drains[name].get("cleared_at")
     engine = host.engine(data, name) or {}
     pending = engine.get("install_pending") or {}
     if not pending and not engine.get("paused_timers") and not engine.get("dashboards_pending"):
@@ -639,7 +672,8 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
             _save_engine(data, name, runner, sha=receipt, install_pending={},
                          ref=pending.get("ref") or engine.get("target_ref", engine.get("ref", "unknown")),
                          installed_at=iso(now()), dashboards_pending=True, deadline=deadline)
-        if engine.get("paused_timers"):
+        if engine.get("paused_timers") and not draining:
+            # A held drain restores timers at window close, not mid-recovery.
             _restore_engine_timers(data, name, runner, backend, record, deadline=deadline)
         _finish_dashboards(data, name, runner, repos, backend, deadline=deadline, record=record)
     except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as exc:
@@ -1320,18 +1354,25 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
     changes = plan_apply(targets, run_cmd=run_cmd, backend=backend, env=install_env, errors=render_errors,
                          rendered=rendered, include_disabled=bool(args.reset))
     for slug, table in targets.items():
-        if (engine_result == "failed" or slug in render_errors or host_name in record.drains
+        if (engine_result == "failed" or slug in render_errors
                 or (table.get("disabled_at") and not args.reset)):
             continue
-        timer = f"{host.unit_name(slug)}.timer"
-        if not (args.reset or changes[slug] or backend.is_active(timer) != "active"):
-            continue
+        drained = host_name in record.drains
+        if drained:
+            # Only changed Linux units are written during a drain; preflight those
+            # before any unit is installed/enabled, and never run a reset pass.
+            if not (changes[slug] and backend.configuration()["platform"] == "linux"):
+                continue
+        else:
+            timer = f"{host.unit_name(slug)}.timer"
+            if not (args.reset or changes[slug] or backend.is_active(timer) != "active"):
+                continue
         for item in preflight.check(data, host_name, slug, table, rendered[slug], run_cmd=run_cmd):
             if item["status"] == "FAIL":
                 render_errors.setdefault(slug, []).append(f"{item['label']}: {item['detail']}")
             elif item["status"] == "WARN":
                 print(f"WARN {item['label']}: {item['detail']}")
-        if args.reset and slug not in render_errors and not reset(slug, table, data, record, backend=backend):
+        if not drained and args.reset and slug not in render_errors and not reset(slug, table, data, record, backend=backend):
             code = 1
     _, factory_cli = host.factory_tool_paths(run_cmd)
     for slug, table in targets.items():
@@ -1368,7 +1409,7 @@ def _apply_host(data: dict, host_name: str, targets: dict[str, dict], args: argp
                 rows.append(deferred_row(slug, table, reason, backend))
                 continue
             timer = f"{host.unit_name(slug)}.timer"
-            timer_state = backend.is_active(timer) if changed else None
+            timer_state = backend.is_active(timer)
             if timer_state == "inactive" and backend.status(timer).unit_file_state == "not-found":
                 timer_state = None  # First install has no operator state to preserve.
             active_timers = [timer] if timer_state == "active" and host_name not in record.drains else []

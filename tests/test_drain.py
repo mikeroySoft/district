@@ -9,7 +9,6 @@ import shlex
 import subprocess
 import sys
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from tests import test_one_install as fixtures
@@ -281,6 +280,19 @@ class DrainTest(unittest.TestCase):
             self.assertIsNone(self.record()["drain"]["applied_at"])
             self.assertFalse(drain.path().exists())
             self.assertIn("legacy engine cleanup incomplete", case.output.getvalue())
+
+    def test_drained_recovery_completes_pending_install(self):
+        with self.case() as case:
+            case.install_receipt(fixtures.TARGET)
+            case.data["defaults"]["engine"] = {
+                "sha": fixtures.OLD, "ref": "main",
+                "install_pending": {"target": fixtures.TARGET, "ref": "v0.4.7"}}
+            self.assertEqual(self.run_apply(case), 0, case.output.getvalue())
+            engine = host.engine(host.load(), "local")
+            self.assertEqual(engine["sha"], fixtures.TARGET)
+            self.assertFalse(engine.get("install_pending"))
+            self.assertEqual(case.installs(), [])  # the TARGET receipt is verified, not reinstalled
+            self.assertFalse(drain.path().exists())
 
 if __name__ == "__main__":
     unittest.main()

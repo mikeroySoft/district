@@ -1314,12 +1314,16 @@ class OneInstallTest(unittest.TestCase):
                         host_name="remote" if remote else "local"), "applied", self.output.getvalue())
                     self.assertEqual(len(self.installs()), 1)
                     self.assertEqual(self.launchd_disabled, set())
-                    mutations = [(argv[1], argv[-1]) for argv, _ in self.launchd_calls
-                                 if argv[1] in ("disable", "enable")]
-                    self.assertIn(("disable", "gui/501/factory-aux"), mutations)
-                    self.assertIn(("enable", "gui/501/factory-aux"), mutations)
+                    operations = [argv[1] for argv, _ in self.launchd_calls]
+                    self.assertNotIn("disable", operations, "launchd pause must never disable")
+                    self.assertNotIn("enable", operations, "launchd resume must never enable")
+                    self.assertNotIn("kill", operations, "launchd pause must never kill a pass")
+                    # An idle timer is paused by unloading it (bootout) without disabling,
+                    # so its plist stays enabled for the restored schedule.
+                    paused = [argv[-1] for argv, _ in self.launchd_calls if argv[1] == "bootout"]
+                    self.assertIn("gui/501/factory-aux", paused)
                     self.assertTrue(all(0 < kwargs["timeout"] <= 30 for argv, kwargs in self.launchd_calls
-                                        if argv[1] in ("disable", "enable")))
+                                        if argv[1] == "bootout"))
                     self.assertEqual(host.engine(host.load(), "remote" if remote else "local")["sha"], TARGET)
                 for path in agents.glob("*.plist"):
                     path.unlink()
@@ -1411,6 +1415,103 @@ class OneInstallTest(unittest.TestCase):
                             self.assertEqual((agents / filename).read_bytes(), raw)
                         if drift.startswith("malformed"):
                             self.assertIn(filename, self.output.getvalue())
+
+    def test_already_current_upgrade_keeps_operator_disabled_timer_inactive(self):
+        self.install_receipt(TARGET)
+        self.data["defaults"]["engine"] = {"sha": TARGET, "ref": "main"}
+        self.backend.definitions_changed.return_value = False
+        self.active = set()  # the timer is inactive before apply
+        # An existing operator-disabled timer, not a first install (unit_file_state present).
+        self.backend.status.return_value = service.ServiceStatus("loaded", "inactive", "disabled", 0)
+        self.backend.stop.side_effect = lambda name, **kwargs: self.enable(name, False, **kwargs)
+        self.apply(upgrade="main")
+        self.assertNotIn("factory-widgets.timer", self.active)
+        self.backend.stop.assert_called_once_with("factory-widgets.timer", timeout=apply.DRAIN_TIMEOUT)
+
+    def test_double_install_failure_with_missing_cli_has_no_path_fallback_and_restores_timers(self):
+        def broken_install(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                self.calls.append((list(argv), kwargs))
+                self.events.append(("install", argv[argv.index("--from") + 1]))
+                self.cli.unlink(missing_ok=True)
+                return subprocess.CompletedProcess(argv, 1, "", "install and rollback unavailable")
+            if argv[0] in ("factory", str(self.cli)):
+                raise FileNotFoundError(str(self.cli))  # never fall back to another factory on PATH
+            return self.run_cmd(argv, **kwargs)
+
+        with mock.patch.object(apply, "run", side_effect=broken_install):
+            self.assertEqual(self.apply(upgrade="main"), 1)
+        self.assertEqual(len(self.installs()), 2)  # TARGET then OLD rollback, no PATH fallback
+        self.assertIn(TARGET, self.output.getvalue())
+        self.assertIn(OLD, self.output.getvalue())
+        self.assertEqual(self.active, {"factory-widgets.timer"})  # timers restored on exit
+        self.assertFalse(host.load()["defaults"]["engine"].get("paused_timers"))
+
+    def _fleet_backend(self, active_set, units):
+        backend = mock.Mock()
+        backend.factory_units.return_value = set(units)
+        backend.is_active.side_effect = lambda name, **_: "active" if name in active_set else "inactive"
+        backend.pause_timer.side_effect = lambda name, **_: (
+            active_set.discard(name) or subprocess.CompletedProcess([], 0, "", ""))
+        backend.resume_timer.side_effect = lambda name, **_: (
+            active_set.add(name) or subprocess.CompletedProcess([], 0, "", ""))
+        backend.status.return_value = service.ServiceStatus("loaded", "inactive", "enabled")
+        backend.configuration.return_value = {"platform": "linux", "unit_dir": str(host.unit_dir())}
+        backend.definitions_changed.return_value = False
+        return backend
+
+    def test_fleet_busy_worker_blocks_every_install_and_restores_timers(self):
+        worker = "factory-unregistered-worker.service"
+        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
+        self.active = {"factory-widgets.timer"}
+        self.backend.factory_units.return_value = {worker, "factory-widgets.timer"}
+        remote_active = {"factory-other.timer"}
+        remote = self._fleet_backend(remote_active, {"factory-other.timer"})
+        remote_repos = {"acme/other": {"path": str(self.other_repo)}}
+        contexts = {
+            "local": (self.run_cmd, self.backend, self.data["repo"]),
+            "remote": (self.run_cmd, remote, remote_repos),
+        }
+        self.service_states[worker] = "active"  # the discovered worker never drains
+        clock = [0.0]
+        self.sleep.side_effect = lambda s: clock.__setitem__(0, clock[0] + s)
+        record = install_state.ApplyRun("", "", OLD, drain_timeout=2)
+        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(apply.reconcile_fleet_engine(self.data, record, contexts),
+                             "failed", self.output.getvalue())
+        self.assertIn(worker, self.output.getvalue())
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(host.engine(self.data, "local")["sha"], OLD)
+        self.assertEqual(host.engine(self.data, "remote")["sha"], OLD)
+        self.assertEqual(self.active, {"factory-widgets.timer"})  # paused then restored
+        self.assertEqual(remote_active, {"factory-other.timer"})
+        self.backend.stop.assert_not_called()
+        remote.stop.assert_not_called()
+
+    def test_fleet_rechecks_factory_service_before_each_host_install(self):
+        worker = "factory-unregistered-worker.service"
+        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
+        self.backend.factory_units.return_value = {worker, "factory-widgets.timer"}
+        clock = [0.0]
+        self.sleep.side_effect = lambda s: clock.__setitem__(0, clock[0] + s)
+
+        def install_then_activate(argv, **kwargs):
+            result = self.run_cmd(argv, **kwargs)
+            if argv[:3] == ["uv", "tool", "install"] and f"@{TARGET}" in argv[5]:
+                self.service_states[worker] = "active"  # a pass starts after the first install
+            return result
+
+        context = (install_then_activate, self.backend, self.data["repo"])
+        record = install_state.ApplyRun("", "", OLD, drain_timeout=2)
+        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(apply.reconcile_fleet_engine(
+                self.data, record, {"local": context, "remote": context}), "failed", self.output.getvalue())
+        self.assertEqual(len(self.installs()), 1)
+        self.assertIn(worker, record.deferred.get("engine:remote", {}).get("reason", ""))
+        self.assertIn("could not roll back local", self.output.getvalue())
+        self.assertEqual(host.engine(self.data, "local")["sha"], TARGET)
+        self.assertEqual(host.engine(self.data, "remote")["sha"], OLD)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,6 +22,11 @@ class EngineHostTest(unittest.TestCase):
             "XDG_CONFIG_HOME": str(self.root / "config"),
         }, clear=True))
 
+    def test_defaults_have_no_checkout_and_use_canonical_engine_policy(self) -> None:
+        self.assertEqual(host.DEFAULTS["clone_dir"], "~/dev")
+        self.assertEqual(host.DEFAULTS["factory_repo"], "https://github.com/mikeroySoft/factory")
+        self.assertNotIn("factory_source", host.DEFAULTS)
+        self.assertNotIn("engine_idle_timeout", host.DEFAULTS)
 
     def test_factory_tool_paths_follow_uv_environment_precedence(self) -> None:
         home = self.root / "home"

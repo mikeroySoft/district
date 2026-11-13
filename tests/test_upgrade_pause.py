@@ -404,6 +404,61 @@ class UpgradePauseTest(unittest.TestCase):
             self.assertEqual(case.active, {self.timer})
             self.assertIn("rolled back", case.output.getvalue())
 
+    def test_restoration_interrupt_still_resumes_every_timer(self):
+        with self.case() as case:
+            second = "factory-second.timer"
+            case.active = {self.timer, second}
+            case.backend.factory_units.return_value = {self.worker, self.timer, second}
+            base_resume = case.backend.resume_timer.side_effect
+            resumed = []
+
+            def resume(name, **kwargs):
+                result = base_resume(name, **kwargs)
+                resumed.append(name)
+                if len(resumed) == 1:
+                    raise SystemExit(143)  # signal lands after the first resume
+                return result
+
+            case.backend.resume_timer.side_effect = resume
+            with self.assertRaises(SystemExit) as raised:
+                self.run_apply(case)
+            self.assertEqual(raised.exception.code, 143)
+            self.assertEqual(sorted(resumed), sorted([self.timer, second]))
+            self.assertEqual(case.active, {self.timer, second})
+
+    def test_failed_restoration_blocks_dashboard_restart_and_fails(self):
+        with self.case() as case:
+            def failing_resume(name, **kwargs):
+                case.lifecycle.append(("resume-fail", name))
+                return subprocess.CompletedProcess([], 1, "", "resume failed")
+
+            case.backend.resume_timer.side_effect = failing_resume
+            restart = mock.Mock()
+            with mock.patch.object(apply, "restart_dashboards", restart):
+                code, _ = self.run_apply(case)
+            self.assertEqual(code, 1, case.output.getvalue())
+            restart.assert_not_called()
+            engine = host.engine(host.load(), "local")
+            self.assertEqual(engine["sha"], fixtures.TARGET)
+            self.assertEqual(engine["paused_timers"], [self.timer])
+            self.assertIn("timers still stopped", case.output.getvalue())
+
+    def test_missing_scheduler_binary_blocks_paused_unit_write(self):
+        with self.case(changed=True) as case:
+            failing = [{"status": "FAIL",
+                        "label": "host local scheduler tool gate-missing",
+                        "detail": "not executable; required by gate"}]
+            wrote = mock.Mock()
+            with mock.patch.object(apply.preflight, "check", return_value=failing), \
+                    mock.patch.object(apply, "_write_paused_units", wrote):
+                code, _ = self.run_apply(case)
+            self.assertEqual(code, 1, case.output.getvalue())
+            wrote.assert_not_called()
+            self.assertIn("gate-missing", case.output.getvalue())
+            self.assertEqual(case.lifecycle, [("pause", self.timer), ("resume", self.timer)])
+            self.assertEqual(case.active, {self.timer})
+            self.assertEqual(host.engine(host.load(), "local")["sha"], fixtures.TARGET)
+
 
 
 if __name__ == "__main__":

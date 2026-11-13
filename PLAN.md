@@ -196,21 +196,33 @@ Non-interactive: `--exclusive a,b --no-edit --check …`.
    Select the newest CI-green commit in bounded branch history; a selected tag
    must itself be green. Record one immutable target per host; fleet hosts agree
    on the same target. Refuse an ancestor unless `--allow-downgrade` is supplied.
-   Before any pause, defer with a named reason for outside hand work (including
-   gate/dispatch owned by a dashboard). Pause only active managed Factory timers,
-   recording exactly which; wait within `engine_idle_timeout` for non-dashboard
-   services and uv-tool processes to become idle, rechecking outside work and
-   owning-host PID/start-time identities under the same deadline.
+   Every engine replacement pauses the factory and never waits for an idle
+   window. Record which managed `factory-*.timer`s are active and stop only
+   those, leaving them enabled: Linux `systemctl --user stop`/`start`; macOS
+   unloads (`launchctl bootout`) an idle agent without `launchctl disable`, and
+   while a pass is running relies on the District drain flag the scheduled pass
+   consults — never `launchctl disable`/`enable`, never a kill. Open the host
+   drain flag, then wait up to `--drain-timeout` (default 90min, config
+   `drain_timeout`) for non-dashboard Factory services to finish on their own; a
+   timeout restores the timers, leaves the engine unchanged, and exits non-zero
+   with the blocking units and tickets. Before writing any changed unit while
+   drained, run the scheduler-toolchain preflight (every required
+   gate/review/manager binary); a missing binary fails before a unit is written.
    Replace the one `factory` tool once with
    `uv tool install --force --from git+<factory_repo>@<sha>[extras] factory`.
-   Verify the receipt revision, CLI ownership, and successful `--version`.
-   On install/verification failure, recheck outside work and the original idle
-   deadline before reinstalling and verifying the previous revision; fleet
-   replacement/rollback uses the same guards. Restore exactly the paused timers
-   in `finally`, including deferral/timeout and verified rollback. If the tool
-   cannot be verified or rollback is blocked, retain named paused/recovery intent
-   for the next idle apply rather than starting unsafe code. Restart dashboards
-   after a verified change, then continue repo reconciliation at step 3.
+   Verify the receipt revision, CLI ownership, and a clean `--version` against
+   distribution metadata and release-tag versions. On install/verification
+   failure, recheck services and the deadline before reinstalling and verifying
+   the previous revision; fleet replacement/rollback uses the same guards and
+   rolls moved hosts back. Restore exactly the paused timers in a `finally` on
+   every exit path — success, failure, drain timeout, exception, SIGTERM,
+   SIGINT — attempting every saved timer even if a signal interrupts
+   restoration; timers inactive before apply stay inactive. If restoration fails
+   or the tool cannot be verified, keep the factory paused, retain named
+   paused/recovery intent for the next apply (which completes a pending install
+   even while a drain is already open), fail the apply, and do not restart
+   dashboards. Restart dashboards only after a verified change and successful
+   restoration, then continue repo reconciliation at step 3.
 2. Supply-chain policy → **host `[install].env`**, not global package-manager
    config: `NPM_CONFIG_MIN_RELEASE_AGE=<days>` (duration → whole days, minimum
    1), `UV_EXCLUDE_NEWER=<age as relative uv duration>` (ISO 8601, whole hours →
