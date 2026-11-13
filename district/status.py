@@ -17,7 +17,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from district import doctor, health, host, metrics, streak
+from district import apply, doctor, health, host, metrics, streak
 from district.host import run
 
 COLUMNS = ("repo", "host", "operating", "execution", "observation", "assessment", "version", "next", "last", "pass", "esc", "gate1", "bounce", "fails", "upstream", "evidence")
@@ -703,33 +703,109 @@ def table(rows: list[dict]) -> str:
     return "\n".join([fmt({c: c for c in COLUMNS}), *(fmt(r) for r in rows)])
 
 
+def _engine_status(data: dict, name: str, run_cmd, latest: dict | None, release_error: str | None) -> dict:
+    engine = host.engine(data, name) or {}
+    recorded = apply.installed_engine_commit(data, name)
+    recorded_ref = engine.get("ref")
+    if not isinstance(recorded_ref, str) or not recorded_ref:
+        recorded_ref = None
+    errors = [release_error] if release_error else []
+    try:
+        tool, _ = host.factory_tool_paths(run_cmd, timeout=COLLECTION_TIMEOUT)
+        receipt = apply._receipt_sha(tool, run_cmd, timeout=COLLECTION_TIMEOUT)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.TimeoutExpired,
+            host.RemoteHostError, host.DistrictError) as exc:
+        errors.append(f"installed engine observation failed: {exc}")
+        receipt = None
+    installed_sha = receipt or recorded
+    installed_ref = recorded_ref if receipt is None or receipt == recorded else None
+    if installed_sha is None and installed_ref is None:
+        errors.insert(0, "installed engine unknown: no readable uv receipt or recorded engine")
+    if latest is None or (installed_sha is None and installed_ref is None):
+        assessment = "unknown"
+    elif installed_sha == latest["sha"] or (installed_sha is None and installed_ref == latest["tag"]):
+        assessment = "unknown" if errors else "normal"
+        installed_ref = installed_ref or latest["tag"]
+    else:
+        assessment = "attention"
+    return {
+        "assessment": assessment,
+        "installed": {"sha": installed_sha, "ref": installed_ref},
+        "latest": latest,
+        "error": "; ".join(errors) or None,
+    }
+
+
+def engine_releases(data: dict) -> dict[str, dict]:
+    """Observe the installed and latest Factory release on every registered engine host."""
+    configured = host.hosts(data)
+    local = host.engine(data, "local") is not None or any(
+        "local" in host.repo_hosts(table, slug) for slug, table in host.repos(data).items())
+    names = [*(["local"] if local else []), *configured]
+    latest, release_error = None, None
+    if names:
+        try:
+            tag, sha = apply.latest_factory_release(host.default(data, "factory_repo"), run)
+            latest = {"tag": tag, "sha": sha}
+        except (OSError, ValueError, TypeError, subprocess.TimeoutExpired, host.DistrictError) as exc:
+            release_error = str(exc)
+
+    def observe(name: str) -> dict:
+        runner = run if name == "local" else host.remote_runner(name, configured[name])
+        return _engine_status(data, name, runner, latest, release_error)
+
+    if not names:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(COLLECTION_CONCURRENCY, len(names))) as pool:
+        return dict(zip(names, pool.map(observe, names)))
+
+
+def engine_table(engines: dict[str, dict]) -> str:
+    rows = []
+    for name, entry in engines.items():
+        installed = entry["installed"]
+        installed_text = installed["sha"][:12] if installed["sha"] else "unknown"
+        if installed["ref"]:
+            installed_text += f" ({installed['ref']})"
+        latest = entry["latest"]
+        latest_text = f"{latest['tag']} ({latest['sha'][:12]})" if latest else "unknown"
+        rows.append({
+            "host": name, "assessment": entry["assessment"], "installed": installed_text,
+            "latest": latest_text, "diagnostic": entry["error"] or "-",
+        })
+    columns = ("host", "assessment", "installed", "latest", "diagnostic")
+    widths = {column: max(len(column), *(len(row[column]) for row in rows)) for column in columns}
+    render = lambda row: "  ".join(row[column].ljust(widths[column]) for column in columns).rstrip()  # noqa: E731
+    return "\n".join([render({column: column for column in columns}), *(render(row) for row in rows)])
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district status", description=__doc__.split("\n", 1)[0])
-    parser.add_argument("--json", action="store_true", help="dump shared operational classification, evidence, snapshot and project metrics keyed by slug; a failed `gh auth status` adds a top-level `host` row; a repo on several hosts adds `parity` rows to its entry")
+    parser.add_argument("--json", action="store_true", help="dump release status plus shared operational classification, evidence, snapshot and project metrics keyed by slug; a failed `gh auth status` adds a top-level `host` row; a repo on several hosts adds `parity` rows to its entry")
     parser.add_argument("--slug", action="append", metavar="OWNER/REPO", help="limit output and collection to this slug (repeatable)")
     parser.add_argument("--unhealthy", action="store_true", help="limit output to slugs whose assessment is not normal")
     args = parser.parse_args(argv)
-    data = host.load()
-    host.hosts(data)
-    known = host.repos(data)
+    registry = host.load()
+    host.hosts(registry)
+    known = host.repos(registry)
     for slug in known:
-        host.factory_host(data, slug)
+        host.factory_host(registry, slug)
     if args.slug:
         unknown = [s for s in args.slug if s not in known]
         if unknown:
             parser.error(f"unknown slug: {', '.join(unknown)}")
         known = {s: known[s] for s in args.slug}
-    registry = data
-    data = {**data, "repo": known}
+    data = {**registry, "repo": known}
     gh = doctor.gh_auth()
     failed = gh["status"] == "FAIL"
     entries = fleet(data)
     add_job_health(registry, entries, COLLECTION_TIMEOUT)
     parity = doctor.parity_by_slug(data)
+    engines = engine_releases(registry)
     if args.unhealthy:
         entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}
     if args.json:
-        extra = {"host": gh} if failed else {}
+        extra = {**({"host": gh} if failed else {}), **({"engines": engines} if engines else {})}
         for slug, rows in parity.items():
             if slug in entries:
                 entries[slug] = {**entries[slug], "parity": rows}
@@ -737,6 +813,8 @@ def main(argv: list[str]) -> int:
     else:
         if failed:
             print(f"  FAIL  {gh['label']}: {gh['detail']}")
+        if engines:
+            print(engine_table(engines))
         for item in (item for slug, rows in parity.items() if slug in entries for item in rows):
             if item["status"] != "PASS" or not args.unhealthy:
                 print(f"  {item['status']}  {item['label']}: {item['detail']}")
@@ -747,6 +825,8 @@ def main(argv: list[str]) -> int:
                 print("no unhealthy repositories")
             else:
                 print("no repositories registered (district add)")
-    if failed or any(e["assessment"] == "attention" for e in entries.values()):
+    assessments = [*(e["assessment"] for e in entries.values()),
+                   *(e["assessment"] for e in engines.values())]
+    if failed or "attention" in assessments:
         return 1
-    return 2 if any(e["assessment"] == "unknown" for e in entries.values()) else 0
+    return 2 if "unknown" in assessments else 0

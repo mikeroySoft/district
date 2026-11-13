@@ -474,11 +474,11 @@ def preview_remote_registration(
             raise DistrictError(f"{slug} would share unit {host.unit_name(slug)} with {other}; rename one checkout's origin")
     current = host.repo_hosts(registered[slug], slug) if slug in registered else [requested]
     joining = requested not in current
-    if joining:
-        names = [*current, requested]
+    names = [*current, requested] if joining else current
+    if len(names) > 1:
         if blocked := host.claims_blockers(prospective, names):
             raise DistrictError(
-                f"{slug} already runs on {', '.join(current)}; a second host needs every host to coordinate "
+                f"{slug} runs on {', '.join(current)}; multiple hosts need every host to coordinate "
                 f"ticket claims, but {blocked}; nothing written"
             )
     table = host.repo_table(prospective, slug)
@@ -487,11 +487,11 @@ def preview_remote_registration(
         table.pop("host", None)
         table.setdefault("triage_host", current[0])
         table["hosts"] = names
-        host.sync_local_claims(prospective)
         print(f"{slug}: hosts {', '.join(names)} (triage on {table['triage_host']})")
     elif "hosts" not in table:
         table["host"] = requested
     table.setdefault("dashboard", {})["port"] = port
+    host.sync_local_claims(prospective)
     if lifted is not None:
         for name, value in lifted.items():
             if name != "dashboard":  # port already decided above
@@ -627,11 +627,11 @@ def main(argv: list[str]) -> int:
     current = host.repo_hosts(registered[slug], slug) if slug in registered else [args.host or "local"]
     wanted = args.host or current[0]
     joining = wanted not in current
-    if joining:
-        names = [*current, wanted]
+    names = [*current, wanted] if joining else current
+    if len(names) > 1:
         if blocked := host.claims_blockers(data, names):
             raise DistrictError(
-                f"{slug} already runs on {', '.join(current)}; a second host needs every host to coordinate "
+                f"{slug} already runs on {', '.join(current)}; multiple hosts need every host to coordinate "
                 f"ticket claims, but {blocked}; nothing written"
             )
     table = host.repo_table(data, slug)
@@ -640,7 +640,6 @@ def main(argv: list[str]) -> int:
         table.pop("host", None)
         table.setdefault("triage_host", current[0])
         table["hosts"] = names
-        host.sync_local_claims(data)
         print(f"{slug}: hosts {', '.join(names)} (triage on {table['triage_host']})")
     elif "hosts" in table:
         pass
@@ -648,6 +647,7 @@ def main(argv: list[str]) -> int:
         table.pop("host", None)
     elif args.host:
         table["host"] = args.host
+    host.sync_local_claims(data)
     port = dashboard_port(slug, existing, data)
     table.setdefault("dashboard", {})["port"] = port
     host.save(data)

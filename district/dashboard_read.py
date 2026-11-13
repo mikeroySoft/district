@@ -325,10 +325,10 @@ def _collection(raw: object) -> dict:
 
 def safe_fleet(fleet: dict) -> dict:
     """Bounded, allowlisted D01 semantics and project context; not another classifier."""
+    fleet = {slug: raw for slug, raw in _dict(fleet).items()
+             if _slug(slug) and isinstance(raw, dict)}
     result = {}
-    for slug, raw in islice(_dict(fleet).items(), MAX_FACTORIES):
-        if not _slug(slug) or not isinstance(raw, dict):
-            continue
+    for slug, raw in islice(fleet.items(), MAX_FACTORIES):
         table = _dict(raw.get("table"))
         port = _count(_dict(table.get("dashboard")).get("port"))
         result[slug] = {
