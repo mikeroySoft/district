@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -1563,10 +1564,20 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(host.engine(host.load(), "ultron")["sha"], OLD)
 
     def test_macos_local_darwin_skipped_alone(self):
-        # A darwin local (patched sys.platform) is the only host: skipped per host with no
-        # mutation, a partial summary, and a non-zero exit.
-        with mock.patch.object(apply.sys, "platform", "darwin"):
-            self.assertEqual(self.apply(upgrade=TARGET), 1, self.output.getvalue())
+        # A darwin local (patched sys.platform) is the only host: skipped per host with
+        # ZERO mutation (byte-identical config, unchanged mtime, no local-claim sync), a
+        # partial summary, and a non-zero exit.
+        host.save(self.data)
+        config = host.path()
+        before = hashlib.sha256(config.read_bytes()).hexdigest()
+        before_mtime = config.stat().st_mtime_ns
+        synced = mock.Mock()
+        args = argparse.Namespace(slug=None, reset=None, upgrade=TARGET, allow_downgrade=False)
+        with mock.patch.object(apply.sys, "platform", "darwin"), \
+                mock.patch.object(host, "sync_remote_config", synced), \
+                mock.patch.object(host, "sync_local_claims") as local_sync:
+            self.assertEqual(apply._run(args, install_state.ApplyRun("", "", OLD)), 1,
+                             self.output.getvalue())
         output = self.output.getvalue()
         self.assertIn("unsupported_platform", output)
         self.assertIn("local", output)
@@ -1578,6 +1589,10 @@ class OneInstallTest(unittest.TestCase):
         self.backend.start.assert_not_called()
         self.assertEqual(self.installs(), [])
         self.assertEqual(host.engine(host.load(), "local")["sha"], OLD)
+        self.assertEqual(hashlib.sha256(config.read_bytes()).hexdigest(), before)
+        self.assertEqual(config.stat().st_mtime_ns, before_mtime)
+        synced.assert_not_called()
+        local_sync.assert_not_called()
 
     def test_macos_local_darwin_skipped_with_remote_linux_host(self):
         # A darwin local is skipped per host; a remote Linux host is NOT skipped and is
@@ -1636,6 +1651,94 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(self.apply(), 0)
         self.backend.resume_timer.assert_not_called()
         self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+
+    def test_fleet_engine_change_skips_darwin_before_any_write(self):
+        # F2: a factory_ref-driven fleet change skips a darwin host before writing or
+        # syncing its engine target; the Linux host still moves. The remote-config sync is
+        # never called and no engine target is recorded for the darwin host.
+        self.data["hosts"] = {"ultron": {"ssh": "factory@ultron", "platform": "macos",
+                                         "engine": {"sha": OLD, "ref": "main"}}}
+        host.save(self.data)
+        local_ctx = (self.run_cmd, self.backend, self.data["repo"])
+        ultron_ctx = (self.run_cmd, self.backend, {})
+        synced = mock.Mock()
+        skipped: dict[str, bool] = {}
+        with mock.patch.object(host, "sync_remote_config", synced):
+            result = apply.reconcile_fleet_engine(
+                self.data, None, {"local": local_ctx, "ultron": ultron_ctx}, skipped=skipped)
+        self.assertEqual(result, "applied", self.output.getvalue())
+        self.assertEqual(set(skipped), {"ultron"})
+        self.assertTrue(self.installs())  # Linux host moved
+        self.assertEqual(host.engine(self.data, "local")["sha"], TARGET)
+        ultron = host.engine(self.data, "ultron")
+        self.assertEqual(ultron["sha"], OLD)  # darwin unchanged
+        self.assertNotIn("target", ultron)  # no engine target written/synced
+        synced.assert_not_called()
+
+    def test_recovery_interrupt_during_verification_still_restores_saved_timers(self):
+        # F3: a signal during the receipt/verify checks must still restore the durable
+        # saved set before honoring the interrupt (restore runs before the checks escape).
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"] = {"sha": OLD, "paused_timers": ["factory-widgets.timer"]}
+        self.active.clear()  # widgets stopped by the crash, pending restore
+        with mock.patch.object(apply, "_verify_engine", side_effect=SystemExit(143)):
+            with self.assertRaises(SystemExit) as raised:
+                self.apply()
+        self.assertEqual(raised.exception.code, 143)
+        self.assertEqual(self.active, {"factory-widgets.timer"})  # restored before honoring
+        resumed = [call.args[0] for call in self.backend.resume_timer.call_args_list]
+        self.assertEqual(resumed, ["factory-widgets.timer"])
+        self.assertEqual(host.engine(host.load(), "local").get("paused_timers"), [])
+
+    def test_restoration_recheck_remote_error_does_not_abandon_later_timers(self):
+        # F4: host.RemoteHostError from the post-interrupt is_active recheck subclasses
+        # RuntimeError, not OSError; it must not escape the sweep and abandon later timers.
+        self.data["defaults"]["engine"] = {
+            "sha": OLD, "paused_timers": ["factory-a.timer", "factory-b.timer"]}
+        resumes, rechecked = [], []
+
+        def resume(name, **kwargs):
+            resumes.append(name)
+            if len(resumes) == 1:
+                raise SystemExit(143)  # the signal lands during the first resume
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        def is_active(name, **kwargs):
+            if not rechecked:
+                rechecked.append(name)
+                raise host.RemoteHostError("ultron", "ssh query failed")
+            return "active"
+
+        self.backend.resume_timer.side_effect = resume
+        self.backend.is_active.side_effect = is_active
+        with self.assertRaises(SystemExit) as raised:
+            apply._restore_engine_timers(self.data, "local", self.run_cmd, self.backend,
+                                         install_state.ApplyRun("", "", OLD))
+        self.assertEqual(raised.exception.code, 143)
+        self.assertEqual(set(resumes), {"factory-a.timer", "factory-b.timer"})  # none abandoned
+        self.assertEqual(host.engine(host.load(), "local").get("paused_timers"), [])
+
+    def test_linux_failure_still_shows_darwin_skip_row_and_partial(self):
+        # F5: a propagated DistrictError on the Linux host must not swallow the per-host
+        # darwin skip row (emitted when decided) or the partial summary.
+        self.data["hosts"] = {"ultron": {"ssh": "factory@ultron", "platform": "macos",
+                                         "engine": {"sha": OLD, "ref": "main"}}}
+        self.data["repo"]["acme/ios"] = {"path": str(self.other_repo), "host": "ultron"}
+        real_apply_host = apply._apply_host
+
+        def failing(data, host_name, *args, **kwargs):
+            if host_name == "local":
+                raise host.DistrictError("drain timed out on local")
+            return real_apply_host(data, host_name, *args, **kwargs)
+
+        with mock.patch.object(host, "remote_runner"), \
+                mock.patch.object(apply, "_apply_host", side_effect=failing):
+            with self.assertRaises(host.DistrictError):
+                self.apply(upgrade=TARGET)
+        output = self.output.getvalue()
+        self.assertRegex(output, r"acme/ios\b.*unsupported_platform")  # skip row before failure
+        self.assertIn("partial:", output)
+        self.assertIn("ultron", output)
 
 if __name__ == "__main__":
     unittest.main()

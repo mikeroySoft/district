@@ -2378,11 +2378,11 @@ class ApplyTest(DistrictCase):
     def test_apply_reports_fleet_engine_remote_failure_as_a_held_row(self) -> None:
         """#134 round 4: a host dropping inside the fleet engine step is an `engine fleet … held`
         row with exit 1, and every host still gets its repos applied."""
-        def drop(*_args):
+        def drop(*_args, **_kw):
             raise host.RemoteHostError("ultron", "ssh: connect to host ultron.example port 22: Connection refused")
 
         code, out, _, reconciled, applied = self.fleet_apply(
-            lambda data, name: (f"run-{name}", f"backend-{name}"), reconcile=drop)
+            lambda data, name, **_kw: (f"run-{name}", f"backend-{name}"), reconcile=drop)
 
         self.assertEqual(code, 1, out)
         reconciled.assert_called_once()

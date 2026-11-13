@@ -225,12 +225,14 @@ Non-interactive: `--exclusive a,b --no-edit --check …`.
    rolls moved hosts back. Restore exactly the paused timers in a `finally` on
    every exit path — success, failure, drain timeout, exception, SIGTERM,
    SIGINT — attempting every saved timer even if a signal interrupts
-   restoration; timers inactive before apply stay inactive. If restoration fails
-   or the tool cannot be verified, keep the factory paused, retain named
+   restoration; timers inactive before apply stay inactive. When the engine
+   cannot be verified (no readable receipt, no recorded revision), still restore
+   the saved timers — bring the factory back up — then fail the apply. Only if
+   restoration itself fails keep the factory paused, retaining named
    paused/recovery intent for the next apply (which completes a pending install
-   even while a drain is already open), fail the apply, and do not restart
-   dashboards. Restart dashboards only after a verified change and successful
-   restoration, then continue repo reconciliation at step 3.
+   even while a drain is already open); either way do not restart dashboards.
+   Restart dashboards only after a verified change and successful restoration,
+   then continue repo reconciliation at step 3.
 2. Supply-chain policy → **host `[install].env`**, not global package-manager
    config: `NPM_CONFIG_MIN_RELEASE_AGE=<days>` (duration → whole days, minimum
    1), `UV_EXCLUDE_NEWER=<age as relative uv duration>` (ISO 8601, whole hours →

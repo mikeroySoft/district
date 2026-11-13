@@ -57,6 +57,14 @@ def _host_platform(data: dict, name: str) -> str:
     return (data.get("hosts", {}).get(name, {}) or {}).get("platform") or "linux"
 
 
+def _skip_row(name: str, targets: dict[str, dict]) -> None:
+    """Per-host unsupported_platform skip row, emitted when the exclusion is decided."""
+    note = (f"skipped unsupported_platform: macOS host {name}; engine pause-and-drain "
+            f"is Linux/systemd only, skipped pending {ISSUE_199}")
+    for slug in targets or [None]:
+        print(f"{slug}  {note}" if slug else f"engine:{name}  {note}")
+
+
 def _progress(message: str) -> None:
     try:
         print(message, flush=True)
@@ -437,7 +445,7 @@ def _restore_engine_timers(data: dict, name: str, runner, backend, record, *, de
                 interrupt = exc
                 try:
                     restored = backend.is_active(timer, timeout=SMOKE_TIMEOUT) == "active"
-                except (OSError, subprocess.TimeoutExpired, SystemExit, KeyboardInterrupt):
+                except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, SystemExit, KeyboardInterrupt):
                     restored = False
                 if restored:
                     _progress(f"engine:{name} restart {timer} ActiveState=active (interrupted)")
@@ -714,6 +722,18 @@ def _recover_engine(data: dict, name: str, runner, backend, repos: dict, record)
             # A held drain restores timers at window close, not mid-recovery.
             _restore_engine_timers(data, name, runner, backend, record, deadline=deadline)
         _finish_dashboards(data, name, runner, repos, backend, deadline=deadline, record=record)
+    except DistrictError:
+        raise
+    except (SystemExit, KeyboardInterrupt):
+        # A signal during the receipt/verify checks must still bring a paused factory
+        # back up: the durable saved set is restored before the interrupt is honored.
+        paused = (host.engine(data, name) or {}).get("paused_timers", [])
+        if paused and not draining:
+            try:
+                _restore_engine_timers(data, name, runner, backend, record, deadline=deadline)
+            except (DistrictError, OSError, subprocess.TimeoutExpired, host.RemoteHostError):
+                pass  # best effort; honor the interrupt regardless
+        raise
     except (OSError, subprocess.TimeoutExpired, host.RemoteHostError) as exc:
         print(f"engine:{name} recovery failed: {exc}; retaining recovery state")
         paused = (host.engine(data, name) or {}).get("paused_timers", [])
@@ -816,7 +836,7 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
 
 def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
                            contexts: dict[str, tuple], *, allow_downgrade: bool = False,
-                           ref: str | None = None) -> str:
+                           ref: str | None = None, skipped: dict | None = None) -> str:
     """Hold every changed host's upgrade window before moving any shared-repo engine."""
     record = record if record is not None else install_state.ApplyRun("", "", "")
     recovery_result = None
@@ -854,6 +874,8 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
         return "failed"
     pin = next(iter(resolved.values()))
     for name, (runner, _, _) in contexts.items():
+        if _host_platform(data, name) == "macos":
+            continue  # never write or sync a darwin host's engine target (#199)
         try:
             _save_engine(data, name, runner, target=pin[1], target_ref=pin[0], resolved_at=iso(now()))
         except subprocess.TimeoutExpired as exc:
@@ -871,18 +893,28 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
             _wait_drained(record, name, backend, repos,
                           deadline=record.drain_deadlines[name][0], runner=runner)
 
-    # Discover every changed host before admitting any engine install.
-    for name, (runner, backend, _) in contexts.items():
+    # Discover every changed host before admitting any engine install. A darwin host a
+    # change would pause is skipped per host (#199) before any window and dropped from the
+    # move; the fleet is never aborted for it.
+    for name, (runner, backend, _) in list(contexts.items()):
         try:
             tool, cli = host.factory_tool_paths(runner)
-            if (_engine_current(pin[1], tool, cli, runner, ref=pin[0])
-                    and not (host.engine(data, name) or {}).get("paused_timers")):
-                continue
-            timeout = record.drain_timeout if record and record.drain_timeout is not None else ENGINE_DRAIN_TIMEOUT
-            deadlines[name] = time.monotonic() + timeout
+            current = (_engine_current(pin[1], tool, cli, runner, ref=pin[0])
+                       and not (host.engine(data, name) or {}).get("paused_timers"))
         except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, DistrictError) as exc:
             print(f"engine fleet ({names}) held by {name}: {exc}; every host keeps its engine")
             return "failed"
+        if _host_platform(data, name) == "macos":
+            if not current and skipped is not None:
+                skipped[name] = True
+            del contexts[name]
+            continue
+        if current:
+            continue
+        timeout = record.drain_timeout if record and record.drain_timeout is not None else ENGINE_DRAIN_TIMEOUT
+        deadlines[name] = time.monotonic() + timeout
+    if not contexts:
+        return "unchanged"
     with ExitStack() as windows:
         for name, (runner, backend, repos) in contexts.items():
             if name not in deadlines:
@@ -1596,11 +1628,23 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         # factory_ref-driven engine change that would pause a darwin host is refused per
         # host at the pause entry (_paused_engine) instead.
         skipped_darwin: dict[str, dict[str, dict]] = {}
+        partial_printed: list[bool] = []
+
+        def emit_partial() -> None:
+            # Per-host skip rows print when each exclusion is decided; the partial summary
+            # runs here even on a failure path (F5) via the drain ExitStack unwind.
+            if skipped_darwin and not partial_printed:
+                partial_printed.append(True)
+                print(f"partial: {len(skipped_darwin)} host(s) skipped unsupported_platform "
+                      f"(district#199): {', '.join(skipped_darwin)}; {len(groups)} host(s) upgraded")
+        drains.callback(emit_partial)
         if args.upgrade or record.drain_requested:
             for name in dict.fromkeys([*fleet_hosts, *groups]):
                 if _host_platform(data, name) == "macos":
                     skipped_darwin[name] = groups.get(name, {})
             if skipped_darwin:
+                for name, host_targets in skipped_darwin.items():
+                    _skip_row(name, host_targets)
                 skip = set(skipped_darwin)
                 fleet = {slug: table for slug, table in fleet.items()
                          if not set(host.repo_hosts(table, slug)) <= skip}
@@ -1640,9 +1684,11 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                         pass
                 except (OSError, host.RemoteHostError, subprocess.TimeoutExpired) as exc:
                     raise DistrictError(f"drain preflight failed on {name}: {exc}; nothing applied") from exc
-        host.sync_local_claims(data)
+        if "local" not in skipped_darwin:
+            host.sync_local_claims(data)
         status, warnings = policy(data)
-        host.save(data)
+        if "local" not in skipped_darwin:
+            host.save(data)
         for name, (runner, _, _) in explicit_contexts.items():
             if name != "local":
                 host.sync_remote_config(data, name, runner)
@@ -1657,7 +1703,12 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
             for name in engine_hosts:
                 try:
                     if name not in contexts:
-                        run_cmd, backend = _host_context(data, name)
+                        # Defer syncing a darwin host whose engine a pending fleet change
+                        # would move (#199): reconcile_fleet_engine skips it before any write.
+                        skip_sync = (_host_platform(data, name) == "macos"
+                                     and bool(args.upgrade or data.get("defaults", {}).get("factory_ref")))
+                        run_cmd, backend = (_host_context(data, name, sync=False) if skip_sync
+                                            else _host_context(data, name))
                         contexts[name] = (run_cmd, backend, _host_repos(data, name))
                 except (host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
                     context_failures[name] = exc
@@ -1670,9 +1721,14 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                     options["ref"] = args.upgrade
                 if args.allow_downgrade:
                     options["allow_downgrade"] = True
-                fleet_result = reconcile_fleet_engine(data, record, contexts, **options)
+                fleet_skipped: dict[str, bool] = {}
+                fleet_result = reconcile_fleet_engine(data, record, contexts, skipped=fleet_skipped, **options)
                 if fleet_result == "failed":
                     code = 1
+                for name in fleet_skipped:
+                    skipped_darwin.setdefault(name, groups.get(name, {}))
+                    _skip_row(name, skipped_darwin[name])
+                    groups.pop(name, None)
             except (OSError, host.RemoteHostError, DistrictError, subprocess.TimeoutExpired) as exc:
                 fleet_result = "failed"
                 print(f"engine fleet ({', '.join(engine_hosts)}) held: {exc}; every host keeps its engine")
@@ -1717,17 +1773,8 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         if len(versions) > 1:
             print(f"versions differ across the fleet: {', '.join(str(v) for v in sorted(versions, key=str))}")
             code = 1
-        for name, host_targets in skipped_darwin.items():
-            # Visible per-host skip row(s): never silent, carried in the output table.
-            note = (f"skipped unsupported_platform: macOS host {name}; engine pause-and-drain "
-                    f"is Linux/systemd only, skipped pending {ISSUE_199}")
-            for slug in host_targets or [None]:
-                print(f"{slug}  {note}" if slug else f"engine:{name}  {note}")
+        emit_partial()
         if skipped_darwin:
-            # Partial result: at least one host skipped, exit non-zero (apply contract: any
-            # non-success/partial outcome is exit 1).
-            print(f"partial: {len(skipped_darwin)} host(s) skipped unsupported_platform "
-                  f"(district#199): {', '.join(skipped_darwin)}; {len(groups)} host(s) upgraded")
             code = max(code, 1)
     return 1 if record.completion_failed else code
 
