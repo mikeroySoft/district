@@ -260,8 +260,35 @@ class DistrictCase(unittest.TestCase):
         self.addCleanup(self.env.stop)
         self.enterContext(mock.patch.object(apply.syslog, "syslog"))
         self.assertTrue(host.path().is_relative_to(self.tmp), host.path())
+        release_sha = "0" * 40
+        release = [[{
+            "tag_name": "v0.2.0",
+            "draft": False,
+            "prerelease": False,
+            "published_at": "2026-01-01T00:00:00Z",
+        }]]
         self.stub("factory", ("doctor --json", json.dumps(DOCTOR)), ("dashboard --json", json.dumps(dashboard())))
-        self.stub("gh", ("repo view *", json.dumps({"isFork": False, "parent": None})))
+        self.stub(
+            "gh",
+            ("api --paginate --slurp repos/mikeroySoft/factory/releases?per_page=100", json.dumps(release)),
+            ("repo view *", json.dumps({"isFork": False, "parent": None})),
+        )
+        real_git = next(
+            candidate.resolve()
+            for directory in os.environ["PATH"].split(os.pathsep)
+            if (candidate := Path(directory) / "git").is_file()
+        )
+        git = self.bin / "git"
+        git.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            'if sys.argv[1:3] == ["ls-remote", "--exit-code"] '
+            'and any(ref.startswith("refs/tags/v0.2.0") for ref in sys.argv[3:]):\n'
+            f'    print("{release_sha}\\trefs/tags/v0.2.0")\n'
+            "    raise SystemExit(0)\n"
+            f"os.execv({str(real_git)!r}, [{str(real_git)!r}, *sys.argv[1:]])\n"
+        )
+        git.chmod(0o755)
         self.stub("systemctl", ("is-active *.service", "inactive\n"), ("is-active *", "active\n"))
         self.stub("uv")
         self.stub("ps")
@@ -524,7 +551,7 @@ class HostTest(DistrictCase):
         original = b'[defaults]\nfactory_ref = "old"\n'
         config.write_bytes(original)
         data = {"hosts": {"ultron": {"ssh": "factory@ultron.example"}},
-                "defaults": {"factory_ref": "main"}}
+                "defaults": {"factory_ref": "main", "factory_track_branch": True}}
         runner = host.remote_runner("ultron", data["hosts"]["ultron"])
         host.sync_remote_config(data, "ultron", runner)
         backups = list(config.parent.glob("config.toml.*.bak"))
@@ -637,6 +664,7 @@ class HostTest(DistrictCase):
                 # factory#526 reads these keys directly from each host's [repo."SLUG"] table
                 self.assertEqual(tables["acme/widgets"], {
                     "path": "/srv/widgets", "claim_ttl": "1h", "host_name": name, "triage_host": "local",
+                    "release_host": "local",
                 })
         self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/solo"], {"path": "/srv/solo"})
         self.assertNotIn("acme/solo", host.remote_config(data, "benito")["repo"])
@@ -648,23 +676,27 @@ class HostTest(DistrictCase):
         self.assertTrue(host.sync_local_claims(data))
         self.assertFalse(host.sync_local_claims(data))
         self.assertEqual(table, {"path": "/srv/widgets", "hosts": ["local", "ultron"], "triage_host": "ultron",
-                                 "claim_ttl": "1h", "host_name": "local"})
+                                 "claim_ttl": "1h", "host_name": "local", "release_host": "ultron"})
         self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/widgets"],
-                         {"path": "/srv/widgets", "claim_ttl": "1h", "host_name": "ultron", "triage_host": "ultron"})
+                         {"path": "/srv/widgets", "claim_ttl": "1h", "host_name": "ultron",
+                          "triage_host": "ultron", "release_host": "ultron"})
 
         table["hosts"] = ["ultron"]
         del table["triage_host"]
         self.assertTrue(host.sync_local_claims(data))
         self.assertNotIn("host_name", table)
+        self.assertNotIn("release_host", table)
         self.assertEqual(host.remote_config(data, "ultron")["repo"]["acme/widgets"],
                          {"path": "/srv/widgets", "claim_ttl": "1h"})
 
     def test_claims_probe_matches_factory_contract(self) -> None:
-        """factory#526: `factory claims --supported` prints exactly `host-claims 1`, exit 0, run with
+        """factory#722: `factory claims --supported` prints exactly `host-claims 1`, exit 0, run with
         ~/.local/bin first on PATH and a 10-second timeout; older engines exit 2 (unknown command)."""
         data = {"hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "linux"}}}
         cases = (("host-claims 1\n", 0, True), ("host-claims\n", 0, False), ("host-claims 10\n", 0, False),
-                 ("", 2, False), ("host-claims 1\n", 1, False))
+                 ("host-claims 1", 0, True), ("", 2, False), ("host-claims 1\n", 1, False),
+                 (" host-claims 1\n", 0, False), ("host-claims 1 \n", 0, False),
+                 ("host-claims 1\n\n", 0, False))
         for stdout, rc, expected in cases:
             with self.subTest(stdout=stdout, rc=rc):
                 with mock.patch.object(host, "run", return_value=subprocess.CompletedProcess([], rc, stdout, "")) as local:
@@ -739,6 +771,111 @@ class HostTest(DistrictCase):
             host.load()
 
 
+
+
+class MultiHostClaimsTest(DistrictCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.remote_home = self.fake_ssh("factory@ultron.example")["factory@ultron.example"]
+        self.root = self.repo(toml="")
+        self.registry = {
+            "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+            "repo": {"acme/widgets": {
+                "path": str(self.root), "hosts": ["local", "ultron"], "triage_host": "local",
+                "claim_ttl": "1h", "dashboard": {"port": 8765},
+            }},
+        }
+        # Both hosts execute this stub; select the probe result by their isolated HOME.
+        factory = self.bin / "factory"
+        factory.write_text(factory.read_text().replace(
+            "for pat, out, rc in",
+            'if args == "claims --supported":\n'
+            '    name = "ultron" if pathlib.Path.home().name == "remote-0" else "local"\n'
+            '    out, rc = json.loads((here / "claims.json").read_text())[name]\n'
+            '    sys.stdout.write(out)\n'
+            '    sys.exit(rc)\n'
+            "for pat, out, rc in",
+        ))
+        self.results = {name: ["host-claims 1\n", 0] for name in ("local", "ultron")}
+
+    def save_probe_results(self) -> None:
+        (self.bin / "claims.json").write_text(json.dumps(self.results))
+
+    def test_add_and_apply_refuse_any_unsupported_host_without_registry_writes(self) -> None:
+        for command in ("join", "readd", "bare", "preview", "apply"):
+            for name in ("local", "ultron"):
+                for stdout, rc in (("", 2), ("host-claims 10\n", 0), ("host-claims 1\n", 1)):
+                    with self.subTest(command=command, host=name, stdout=stdout, rc=rc):
+                        registry = json.loads(json.dumps(self.registry))
+                        if command == "join":
+                            table = registry["repo"]["acme/widgets"]
+                            table.pop("hosts")
+                            table.pop("triage_host")
+                        host.save(registry)
+                        before = host.path().read_bytes()
+                        self.results = {n: ["host-claims 1\n", 0] for n in ("local", "ultron")}
+                        self.results[name] = [stdout, rc]
+                        self.save_probe_results()
+                        argv = ("apply",) if command == "apply" else (
+                            "add", str(self.root), "--host", "ultron")
+                        if command == "bare":
+                            argv = ("add", str(self.root))
+                        elif command == "preview":
+                            argv = (*argv, "--dry-run")
+
+                        code, out = self.district(*argv)
+
+                        self.assertEqual(code, 1, out)
+                        self.assertIn(f"factory on {name}", out)
+                        self.assertIn("https://github.com/mikeroySoft/factory/issues/722", out)
+                        self.assertEqual(host.path().read_bytes(), before)
+                        self.assertFalse((self.remote_home / ".config/factory/config.toml").exists())
+                        self.assertEqual(self.calls("launchctl"), [])
+                        self.assertFalse(host.unit_dir().exists())
+
+    def assert_claim_config(self) -> None:
+        local = host.load()["repo"]["acme/widgets"]
+        remote = tomllib.loads(
+            (self.remote_home / ".config/factory/config.toml").read_text())["repo"]["acme/widgets"]
+        for name, table in (("local", local), ("ultron", remote)):
+            with self.subTest(host=name):
+                self.assertEqual({key: table[key] for key in (
+                    "host_name", "triage_host", "release_host", "claim_ttl",
+                )}, {"host_name": name, "triage_host": "local", "release_host": "local", "claim_ttl": "1h"})
+
+    def test_add_writes_claim_config_when_every_host_supports_claims(self) -> None:
+        table = self.registry["repo"]["acme/widgets"]
+        table.pop("hosts")
+        table.pop("triage_host")
+        host.save(self.registry)
+        self.save_probe_results()
+
+        code, out = self.district("add", str(self.root), "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        self.assert_claim_config()
+
+    def test_readd_repairs_local_release_host(self) -> None:
+        self.registry["repo"]["acme/widgets"]["release_host"] = "ultron"
+        host.save(self.registry)
+        self.save_probe_results()
+
+        code, out = self.district("add", str(self.root), "--host", "ultron")
+
+        self.assertEqual(code, 0, out)
+        self.assert_claim_config()
+
+    def test_apply_writes_claim_config_when_every_host_supports_claims(self) -> None:
+        host.save(self.registry)
+        self.save_probe_results()
+        # Engine reconciliation and unit convergence have their own tests. Keep the real
+        # claims probes, host contexts, registry persistence, and remote config sync.
+        with mock.patch.object(apply, "reconcile_fleet_engine", return_value="unchanged"), \
+                mock.patch.object(apply, "_apply_host", return_value=([], 0, (0, []))):
+            code, out = self.district("apply")
+
+        self.assertEqual(code, 0, out)
+        self.assert_claim_config()
 
 
 class AddTest(DistrictCase):
@@ -1130,7 +1267,7 @@ class AddTest(DistrictCase):
 
         self.assertEqual(code, 1, out)
         self.assertIn("acme/widgets already runs on local", out)
-        self.assertIn("https://github.com/mikeroySoft/factory/issues/526", out)
+        self.assertIn("https://github.com/mikeroySoft/factory/issues/722", out)
         self.assertEqual(host.load(), registry)
         self.assertEqual([c for c in self.calls("factory") if c != "claims --supported"], [])
 
@@ -2014,6 +2151,7 @@ class ApplyTest(DistrictCase):
         if engine:
             data["defaults"] = {
                 "factory_ref": "main",
+                "factory_track_branch": True,
                 "engine": {"ref": "main", "sha": old},
             }
         host.save(data)
@@ -2145,7 +2283,7 @@ class ApplyTest(DistrictCase):
     def test_apply_refuses_multi_host_repo_until_factory_supports_claims(self) -> None:
         repo = self.repo(toml="")
         host.save({
-            "defaults": {"factory_ref": "main"},
+            "defaults": {"factory_ref": "main", "factory_track_branch": True},
             "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local"}},
         })
@@ -2155,7 +2293,7 @@ class ApplyTest(DistrictCase):
 
         self.assertEqual(code, 1, out)
         self.assertIn("acme/widgets lists several hosts", out)
-        self.assertIn("https://github.com/mikeroySoft/factory/issues/526", out)
+        self.assertIn("https://github.com/mikeroySoft/factory/issues/722", out)
         self.assertEqual([c for c in self.calls("uv") if "install" in c], [])
         self.assertEqual([c for c in self.calls("factory") if c != "claims --supported"], [])
         self.assertFalse(any("factory install" in " ".join(call) for call in self.ssh_calls()))
@@ -2163,7 +2301,7 @@ class ApplyTest(DistrictCase):
     def test_apply_reports_unreachable_fleet_host_as_unreachable(self) -> None:
         repo = self.repo(toml="")
         host.save({
-            "defaults": {"factory_ref": "main"},
+            "defaults": {"factory_ref": "main", "factory_track_branch": True},
             "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local"}},
         })
@@ -2186,7 +2324,7 @@ class ApplyTest(DistrictCase):
         """#134 'single-host repos: no behavior change': `district apply SLUG` for a repo off the
         fleet neither probes, syncs, nor reconciles the engine on the fleet hosts, even with --upgrade."""
         host.save({
-            "defaults": {"factory_ref": "main"},
+            "defaults": {"factory_ref": "main", "factory_track_branch": True},
             "hosts": {name: {"ssh": f"factory@{name}.example", "platform": "macos"} for name in ("ultron", "benito")},
             "repo": {
                 "acme/widgets": {"path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron"},
@@ -2219,7 +2357,7 @@ class ApplyTest(DistrictCase):
         and `reconcile`, if given, is reconcile_fleet_engine's side effect."""
         repo = self.repo(toml="")
         host.save({
-            "defaults": {"factory_ref": "main"},
+            "defaults": {"factory_ref": "main", "factory_track_branch": True},
             "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
             "repo": {"acme/widgets": {"path": str(repo), "hosts": ["local", "ultron"], "triage_host": "local"}},
         })
@@ -2315,7 +2453,7 @@ class ApplyTest(DistrictCase):
 
         def run_fleet(ultron: tuple, benito: tuple):
             host.save({
-                "defaults": {"factory_ref": "main"},
+                "defaults": {"factory_ref": "main", "factory_track_branch": True},
                 "hosts": {
                     name: {"ssh": f"factory@{name}.example",
                            "engine": {"ref": "main", "sha": old}}
@@ -2416,9 +2554,6 @@ class ApplyTest(DistrictCase):
                 self.assertIn("every host keeps its engine", out)
 
 
-
-
-
     def test_upgrade_rejects_invalid_factory_extras_before_changes(self) -> None:
         self.register()
         data = host.load()
@@ -2487,8 +2622,9 @@ class StatusTest(DistrictCase):
         host.save({"repo": {"acme/widgets": table}})
         code, out = self.district("status")
         self.assertEqual(code, 2, out)  # Legacy snapshots lack execution telemetry.
-        self.assertIn("operating", out.splitlines()[0])
-        self.assertIn("execution", out.splitlines()[0])
+        repo_header = next(line for line in out.splitlines() if line.startswith("repo"))
+        self.assertIn("operating", repo_header)
+        self.assertIn("execution", repo_header)
         code, out = self.district("status", "--json")
         e = json.loads(out)["acme/widgets"]
         self.assertEqual((e["assessment"], e["execution_state"], e["metrics"], e["error"]), ("unknown", "unknown", None, None))
@@ -2503,6 +2639,38 @@ class StatusTest(DistrictCase):
     def test_empty_json_is_machine_readable(self) -> None:
         code, out = self.district("status", "--json")
         self.assertEqual((code, json.loads(out)), (0, {}))
+
+    def test_status_reports_release_drift_for_every_registered_host(self) -> None:
+        ultron, benito = "factory@ultron.example", "factory@benito.example"
+        homes = self.fake_ssh(ultron, benito)
+        (homes[benito] / ".local/share/uv/tools/factory/uv-receipt.toml").write_text(
+            '[tool]\nrequirements = [{name="factory", rev="' + "1" * 40 + '"}]\n')
+        host.save({"hosts": {
+            "ultron": {"ssh": ultron, "platform": "macos"},
+            "benito": {"ssh": benito, "platform": "macos"},
+        }})
+
+        code, out = self.district("status", "--json")
+
+        engines = json.loads(out)["engines"]
+        self.assertEqual(code, 1, out)
+        self.assertEqual(set(engines), {"ultron", "benito"})
+        self.assertEqual(engines["ultron"], {
+            "assessment": "normal",
+            "installed": {"sha": "0" * 40, "ref": "v0.2.0"},
+            "latest": {"tag": "v0.2.0", "sha": "0" * 40},
+            "error": None,
+        })
+        self.assertEqual(engines["benito"]["assessment"], "attention")
+        self.assertEqual(engines["benito"]["installed"], {"sha": "1" * 40, "ref": None})
+        self.assertIn(
+            "api --paginate --slurp repos/mikeroySoft/factory/releases?per_page=100",
+            self.calls("gh"),
+        )
+        text_code, text = self.district("status")
+        self.assertEqual(text_code, 1, text)
+        self.assertRegex(text, r"ultron\s+normal\s+000000000000 \(v0\.2\.0\)")
+        self.assertRegex(text, r"benito\s+attention\s+111111111111")
 
     def test_mixed_local_remote_and_unreachable_host(self) -> None:
         live, dead = "factory@ultron.example", "factory@dead.example"
@@ -2531,7 +2699,11 @@ class StatusTest(DistrictCase):
 
         entries = json.loads(out)
         self.assertEqual(code, 2, out)
-        self.assertEqual(set(entries), {"acme/local", "acme/remote", "acme/offline"})
+        self.assertEqual(set(entries), {"engines", "acme/local", "acme/remote", "acme/offline"})
+        self.assertEqual(set(entries["engines"]), {"local", "ultron", "dead"})
+        self.assertEqual(entries["engines"]["local"]["assessment"], "normal")
+        self.assertEqual(entries["engines"]["ultron"]["assessment"], "normal")
+        self.assertEqual(entries["engines"]["dead"]["assessment"], "unknown")
         self.assertEqual(entries["acme/local"]["host"], "local")
         self.assertEqual(entries["acme/remote"]["host"], "ultron")
         self.assertEqual(entries["acme/remote"]["host_state"], "reachable")
@@ -2606,10 +2778,15 @@ class StatusTest(DistrictCase):
         snap = mock.Mock(side_effect=lambda slug, table, timeout=None: {"slug": slug, "error": "down"})
         with mock.patch.object(status, "snapshot", snap):
             code, out = self.district("status", "--json", "--slug", "acme/b")
-            self.assertEqual(list(json.loads(out)), ["acme/b"], out)
+            report = json.loads(out)
+            self.assertEqual([key for key in report if key != "engines"], ["acme/b"], out)
+            self.assertEqual(set(report["engines"]), {"local"})
             self.assertEqual([c.args[0] for c in snap.call_args_list], ["acme/b"])
             code, out = self.district("status", "--slug", "acme/c", "--slug", "acme/a")
-        self.assertEqual([line.split()[0] for line in out.splitlines()[1:]], ["acme/c", "acme/a"])
+        self.assertEqual(
+            [line.split()[0] for line in out.splitlines() if line.startswith("acme/")],
+            ["acme/c", "acme/a"],
+        )
 
     def test_unhealthy_omits_healthy(self) -> None:
         self.three()
@@ -2617,9 +2794,11 @@ class StatusTest(DistrictCase):
         fake = lambda slug, sources, table: {**real(slug, sources, table), "assessment": "normal" if slug == "acme/a" else "attention"}  # noqa: E731
         with mock.patch.object(health, "classify", fake):
             code, out = self.district("status", "--json", "--unhealthy")
-            self.assertEqual((code, sorted(json.loads(out))), (1, ["acme/b", "acme/c"]))
+            report = json.loads(out)
+            self.assertEqual((code, sorted(set(report) - {"engines"})), (1, ["acme/b", "acme/c"]))
             code, out = self.district("status", "--unhealthy", "--slug", "acme/a")
-        self.assertEqual((code, out.strip()), (0, "no unhealthy repositories"))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(out.splitlines()[-1], "no unhealthy repositories")
 
     def test_unknown_slug_is_named(self) -> None:
         self.three()
@@ -2645,7 +2824,7 @@ class StatusTest(DistrictCase):
         report = json.loads(out)
         self.assertEqual(code, 1)
         self.assertEqual(report["host"], {"status": "FAIL", "label": "gh auth", "detail": "- The token in default is invalid."})
-        self.assertEqual(set(report) - {"host"}, {"acme/widgets", "acme/gadgets"})
+        self.assertEqual(set(report) - {"host", "engines"}, {"acme/widgets", "acme/gadgets"})
         self.assertEqual(self.calls("gh").count("auth status"), 4)
 
     def test_gh_auth_failure_survives_empty_and_filtered_fleets(self) -> None:
@@ -2671,11 +2850,12 @@ class StatusTest(DistrictCase):
                         if mode:
                             report = json.loads(out)
                             self.assertEqual(report["host"], {"status": "FAIL", "label": "gh auth", "detail": detail})
-                            self.assertEqual(set(report) - {"host"}, {"acme/b"} if filters == ["--slug", "acme/b"] else set())
+                            expected = {"acme/b"} if filters == ["--slug", "acme/b"] else set()
+                            self.assertEqual(set(report) - {"host", "engines"}, expected)
                         else:
                             self.assertEqual(out.splitlines()[0], f"  FAIL  gh auth: {detail}")
                             if "--unhealthy" in filters:
-                                self.assertEqual(out.splitlines()[1], "no unhealthy repositories")
+                                self.assertEqual(out.splitlines()[-1], "no unhealthy repositories")
                             elif not filters:
                                 self.assertEqual(out.splitlines()[1], "no repositories registered (district add)")
 
@@ -3210,6 +3390,11 @@ class DoctorTest(DistrictCase):
         self.assertIn({"status": "FAIL", "label": "factory", "detail": "not found on PATH"}, rows)
 
 
+def gql_search(nodes: list[dict]) -> str:
+    """One last page of a GraphQL `search` connection, as `gh api graphql` prints it."""
+    return json.dumps({"data": {"search": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}})
+
+
 GH_METRICS = [
     ("repo view *", json.dumps({"stargazerCount": 3, "forkCount": 1, "watchers": {"totalCount": 2}})),
     ("issue list * --state open *", json.dumps([
@@ -3219,14 +3404,14 @@ GH_METRICS = [
         {"labels": [{"name": "wontfix"}]},  # obsolete name: ignored
         {"labels": []},
     ])),
-    ("issue list * --state closed *", json.dumps([
-        {"createdAt": "2026-09-01T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": [{"name": "Bug"}]},
-        {"createdAt": "2026-09-02T00:00:00Z", "closedAt": "2026-09-02T12:00:00Z", "labels": []},
-        {"createdAt": "2026-09-02T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": []},
+    ("api graphql * q=repo:* is:issue is:closed closed:>=*", gql_search([
+        {"createdAt": "2026-09-01T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": {"nodes": [{"name": "Bug"}]}},
+        {"createdAt": "2026-09-02T00:00:00Z", "closedAt": "2026-09-02T12:00:00Z", "labels": {"nodes": []}},
+        {"createdAt": "2026-09-02T00:00:00Z", "closedAt": "2026-09-03T00:00:00Z", "labels": {"nodes": []}},
     ])),
     ("pr list * --state open *", json.dumps([{"number": 1}, {"number": 2}])),
-    ("pr list * --state merged *", json.dumps([{"headRefName": "agent/7", "mergedAt": "2026-09-01T00:00:00Z"},
-                                               {"headRefName": "feat/x", "mergedAt": "2026-09-02T00:00:00Z"}])),
+    ("api graphql * q=repo:* is:pr is:merged merged:>=*", gql_search([{"headRefName": "agent/7", "mergedAt": "2026-09-01T00:00:00Z"},
+                                                                      {"headRefName": "feat/x", "mergedAt": "2026-09-02T00:00:00Z"}])),
     ("api repos/*/traffic/views", '{"message":"Bad credentials","status":"401"}', 1),
     ("api repos/*/traffic/clones", json.dumps({"count": 40, "uniques": 9, "clones": []})),
 ]
@@ -3261,7 +3446,7 @@ class MetricsTest(DistrictCase):
         self.assertEqual(m["traffic"], {"views": "unavailable", "clones": {"count": 40, "uniques": 9}})
         self.assertRegex(m["collected_at"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
         self.assertRegex(m["head"], r"^[0-9a-f]{7,}$")
-        self.assertIn("--search closed:>=", " ".join(self.calls("gh")))
+        self.assertIn("is:issue is:closed closed:>=", " ".join(self.calls("gh")))
 
     def test_cache_honours_max_age(self) -> None:
         repo = self.committed_repo()
@@ -3280,6 +3465,52 @@ class MetricsTest(DistrictCase):
             self.assertEqual(self.district("metrics", "--max-age", "soon")[0], 1)
             self.assertEqual(metrics.read("acme/widgets")["loc"], 6)
             self.assertIsNone(metrics.read("acme/nothing"))
+
+    def test_search_bypasses_gh_cached_search_feature_detection(self) -> None:
+        # gh issue/pr list --search first runs a SearchType introspection query that gh caches for
+        # 24h, error bodies included: one exhausted GraphQL hour poisons every --search call for a
+        # day with "API rate limit already exceeded" while plenty of quota remains (Tank, Nov 2026).
+        repo = self.committed_repo()
+        poisoned = "GraphQL: API rate limit already exceeded for user ID 1.\n"
+        self.stub("gh", ("issue list * --search *", poisoned, 1), ("pr list * --search *", poisoned, 1), *GH_METRICS)
+        m = metrics.collect("acme/widgets", {"path": str(repo)})
+        self.assertEqual((m["closed_issues_30d"], m["closed_bugs_30d"], m["median_days_to_close"]), (3, 1, 1.0))
+        self.assertEqual((m["merged_prs_30d"], m["agent_prs_30d"]), (2, 1))
+        calls = self.calls("gh")
+        self.assertFalse([c for c in calls if "--search" in c], calls)
+        self.assertTrue([c for c in calls if c.startswith("api graphql") and "is:issue is:closed closed:>=" in c], calls)
+        self.assertTrue([c for c in calls if c.startswith("api graphql") and "is:pr is:merged merged:>=" in c], calls)
+
+    def test_search_follows_pages_up_to_the_limit(self) -> None:
+        def page(nodes: list[dict], cursor: str | None) -> str:
+            info = {"hasNextPage": cursor is not None, "endCursor": cursor}
+            return json.dumps({"data": {"search": {"pageInfo": info, "nodes": nodes}}})
+        pr = {"headRefName": "agent/1", "mergedAt": "2026-09-01T00:00:00Z"}
+        self.stub("gh", ("api graphql * endCursor=c1", page([pr], None)), ("api graphql *", page([pr] * 100, "c1")))
+        self.assertEqual(len(metrics.search("acme/widgets", "is:pr is:merged")), 101)
+        self.stub("gh", ("api graphql *", page([pr] * 100, "more")))
+        self.assertEqual(len(metrics.search("acme/widgets", "is:pr is:merged", limit=300)), 300)
+        self.assertEqual(len(self.calls("gh")), 2 + 3, "stops paging once the limit is reached")
+
+    def test_remote_factories_are_skipped_not_fatal(self) -> None:
+        # Tank's registry lists benito-app on Ultron at a macOS path; collecting it locally raised
+        # FileNotFoundError and aborted the run before the local factories' caches were written.
+        repo = self.committed_repo()
+        self.stub("gh", *GH_METRICS)
+        with mock.patch.dict(os.environ, {"XDG_CACHE_HOME": str(self.tmp / "cache")}):
+            host.save({
+                "hosts": {"ultron": {"ssh": "factory@ultron.example", "platform": "macos"}},
+                "repo": {
+                    "acme/widgets": {"path": str(repo), "dashboard": {"port": 8765}},
+                    "acme/benito-app": {"path": "/Users/mike/factories/benito-app", "hosts": ["ultron"]},
+                },
+            })
+            code, out = self.district("metrics", "--refresh")
+            self.assertEqual(code, 0, out)
+            self.assertEqual(metrics.read("acme/widgets")["loc"], 6)
+            self.assertIsNone(metrics.read("acme/benito-app"))
+            self.assertIn("acme/benito-app: skipped (runs on remote host ultron)", out)
+            self.assertFalse([c for c in self.calls("gh") if "benito-app" in c], "no GitHub calls for a skipped factory")
 
 
 def fleet_entry(loc: int | None, assessment: str = "unknown", upstream: str | None = None, **snap_kw) -> dict:

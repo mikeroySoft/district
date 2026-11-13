@@ -2,7 +2,8 @@
 
 Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
-clone_dir / factory_repo / factory_ref (`latest-odd`, tag, or branch) /
+clone_dir / factory_repo / factory_ref (`latest-release`, `latest-odd`, tag, or branch) /
+factory_track_branch (explicit opt-in for configured branches) /
 factory_extras / min_package_age / max_failed_passes,
 `[defaults.engine]` ref / sha / previous / installed_at (local engine state),
 `[hosts.*]` SSH / platform / root / Xcode version / engine (remote engine
@@ -224,10 +225,10 @@ def hosts(data: dict) -> dict[str, dict]:
     return configured
 
 
-CLAIMS_ISSUE = "https://github.com/mikeroySoft/factory/issues/526"
+CLAIMS_ISSUE = "https://github.com/mikeroySoft/factory/issues/722"
 # District-owned keys: never copied as-is into a host's factory config; claim_keys() sets the
-# factory#526 ones (host_name, triage_host) per host.
-HOST_KEYS = ("host", "hosts", "triage_host", "host_name")
+# Factory host coordination keys per host.
+HOST_KEYS = ("host", "hosts", "triage_host", "host_name", "release_host")
 CLAIMS_PROBE_TIMEOUT = 10
 CLAIMS_PROTOCOL = "host-claims 1"
 # Run a user-installed tool on a remote host the way its service units do: ~/.local/bin first.
@@ -241,10 +242,13 @@ def repo_hosts(table: dict, slug: str = "repo") -> list[str]:
                                or any(not isinstance(n, str) or not n for n in listed)
                                or len(set(listed)) != len(listed)):
         raise DistrictError(f"{slug}: hosts must be a non-empty array of distinct host names")
-    if listed is None or len(listed) == 1:
-        # factory#526 reads triage_host from [repo."SLUG"] directly: alone it would stop triage here
-        if "triage_host" in table:
-            raise DistrictError(f"{slug}: triage_host applies only when hosts lists several hosts")
+    # factory#526 reads triage_host from [repo."SLUG"] directly: on a District
+    # single-host assignment it would stop triage there. Factory host-claims 1
+    # may set triage_host, host_name, land_host, release_host, and claim_ttl
+    # with no District `hosts` list; those keys are not a host assignment.
+    assigned = listed if listed is not None else ([table["host"]] if "host" in table else None)
+    if assigned is not None and len(assigned) == 1 and "triage_host" in table:
+        raise DistrictError(f"{slug}: triage_host applies only when hosts lists several hosts")
     if listed is None:
         return [table.get("host", "local")]
     if "host" in table:
@@ -265,7 +269,7 @@ def multi_host(table: dict, slug: str = "repo") -> bool:
 
 
 def claims_supported(data: dict, name: str) -> bool:
-    """True when `name`'s installed factory coordinates ticket claims across hosts. factory#526's
+    """True when `name`'s installed factory coordinates ticket claims across hosts. factory#722's
     contract: `factory claims --supported` prints exactly `host-claims 1` and exits 0; engines
     without claims exit 2 (unknown command). A remote host that cannot be reached raises
     RemoteHostError: that says nothing about its engine."""
@@ -282,7 +286,7 @@ def claims_supported(data: dict, name: str) -> bool:
                 raise RemoteHostError(name, f"{' '.join(argv)} timed out after {CLAIMS_PROBE_TIMEOUT}s") from None
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return proc.returncode == 0 and proc.stdout.strip() == CLAIMS_PROTOCOL
+    return proc.returncode == 0 and proc.stdout.removesuffix("\n") == CLAIMS_PROTOCOL
 
 
 def claims_blockers(data: dict, names: list[str]) -> str | None:
@@ -293,7 +297,7 @@ def claims_blockers(data: dict, names: list[str]) -> str | None:
             if not claims_supported(data, name):
                 unsupported.append(name)
         except RemoteHostError as exc:
-            unreachable.append(str(exc))
+            unreachable.append(f"{exc} ({CLAIMS_ISSUE})")
     reasons = [f"the factory on {', '.join(unsupported)} does not coordinate ticket claims yet ({CLAIMS_ISSUE})"] \
         if unsupported else []
     return "; ".join(reasons + unreachable) or None
@@ -319,25 +323,31 @@ def is_remote(data: dict, slug: str) -> bool:
 
 
 def claim_keys(table: dict, name: str, slug: str = "repo") -> dict:
-    """factory#526 keys for host `name`'s `[repo."SLUG"]`: its own host_name and the triage host,
-    only when several hosts run the repo (a single host keeps claims off)."""
+    """Factory coordination keys for host `name`'s `[repo."SLUG"]`, only for multi-host repos."""
     if len(repo_hosts(table, slug)) > 1:
-        return {"host_name": name, "triage_host": table["triage_host"]}
+        return {"host_name": name, "triage_host": table["triage_host"], "release_host": table["triage_host"]}
     return {}
 
 
 def sync_local_claims(data: dict) -> bool:
-    """The controller's own factory config is this registry, which already holds triage_host, so
-    keep `host_name = "local"` in repos that run on local and other hosts. True when `data` changed."""
+    """Keep generated coordination keys in the controller's own Factory config (the registry).
+    True when `data` changed."""
     changed = False
     for slug, table in repos(data).items():
-        name = claim_keys(table, "local", slug).get("host_name") if "local" in repo_hosts(table, slug) else None
-        if table.get("host_name") != name:
-            if name:
-                table["host_name"] = name
-            else:
-                del table["host_name"]
-            changed = True
+        listed = repo_hosts(table, slug)
+        if len(listed) == 1 and "local" in listed:
+            # A single local host may already carry factory host-claims 1 keys
+            # with no District `hosts` list; do not strip them.
+            continue
+        keys = claim_keys(table, "local", slug) if "local" in listed else {}
+        for key in ("host_name", "release_host"):
+            value = keys.get(key)
+            if table.get(key) != value:
+                if value:
+                    table[key] = value
+                else:
+                    del table[key]
+                changed = True
     return changed
 
 
@@ -485,7 +495,7 @@ class RemotePath:
 
     def read_text(self, *, timeout: float = 10) -> str:
         script = "import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
-        proc = self.runner(["python3", "-c", script, str(self)], timeout=timeout)
+        proc = self.runner(["python3", "-c", script, str(self)], timeout=timeout, quiet=True)
         if proc.returncode:
             raise OSError(proc.stderr.strip() or f"cannot read {self}")
         return proc.stdout
@@ -598,7 +608,7 @@ class RemoteRunner:
                 "'tool_dir':tool_dir,'tool_bin':tool_bin,'path':os.environ.get('PATH',''),"
                 "'uid':os.getuid()}))"
             )
-            proc = self(["python3", "-c", script], timeout=timeout)
+            proc = self(["python3", "-c", script], timeout=timeout, quiet=True)
             if proc.returncode:
                 raise DistrictError(
                     f"{self.name}: cannot inspect remote host: "

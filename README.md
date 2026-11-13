@@ -42,7 +42,7 @@ only once.
 | `district apply [slug]` | Reconcile assigned local and remote hosts to the controller registry: the host's one Factory uv tool, units, labels, `factory doctor`, failure cap, package-age policy, and safe legacy-engine cleanup. Remote commands and config writes use bounded BatchMode SSH. Every engine replacement pauses only the Factory timers that were active, waits up to `--drain-timeout` (default 90min) for existing services to finish, installs and verifies the target, rolls back on failure, and restores the exact prior timer state on every exit. It never stops, kills, or starts a service while timers are paused. `--drain` remains accepted but is not required for this safe protocol. `--upgrade [REF]` requests an explicit target; `--allow-downgrade` permits an ancestor. `--reset SLUG` runs one pass by hand and re-enables a capped timer if it succeeds. |
 | `district drain --clear [--host NAME]` | Remove a local or remote host's drain flag while holding the operation lock. Use this for explicit operator recovery; expired flags already stop blocking Factory. |
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
-| `district status` | Fleet operations table across local and remote hosts. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. An unreachable host keeps its factories visible as unreachable with the last successful observation time and produces unknown exit 2, not fleet failure exit 1. Exit 1 remains operational attention or a failed controller `gh auth status` (printed once as a fleet-level `FAIL  gh auth` row); exit 0 means every factory classifies normal. `--json` dumps the classification, evidence, and metrics keyed by slug, plus a top-level `host` row when gh auth fails. `--slug OWNER/REPO` (repeatable) collects and prints only those slugs; `--unhealthy` prints only slugs not classified normal. |
+| `district status` | Fleet operations and per-host engine release drift, including registered hosts without repositories. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. Exit 1 means operational attention, an engine not at the latest stable release, or failed controller `gh auth status`; exit 2 means unknown observation or release identity when no row needs attention. Exit 0 means every observation is normal. `--json` adds a top-level `engines` map beside classifications and metrics keyed by slug, plus `host` when gh auth fails. `--slug OWNER/REPO` (repeatable) limits repository collection and output; `--unhealthy` prints only non-normal repository rows. Both retain all-host engine status. |
 | `district doctor` | Check District's own host prerequisites, rerun each factory's scheduler toolchain preflight, and check declared toolchain profiles. `--json`. |
 | `district report` | Print a read-only Markdown fleet review across every host; each repository section names its host and unreachable last-seen state. The install section comes from the persisted install-state record. |
 | `district metrics [slug]` | Per-factory `git`/`gh` metrics from the hourly cache. `--refresh`, `--max-age`. |
@@ -241,10 +241,14 @@ is required. The chosen SHA (`target`), `target_ref`, and `resolved_at` are
 recorded beside the installed `sha` in `[defaults.engine]` locally.
 A resolved target alone does not establish installed identity; before the first
 successful upgrade, a missing installed SHA/ref is reported as `unknown`.
-`latest-odd` selects the highest odd-patch semver tag, including prereleases;
-a tag or branch such as `"v0.4.7"` or `"main"` selects that remote ref. A
-selected tag commit must itself be green. For a branch, District walks up to 50
-remote commits back to the newest commit whose GitHub checks are complete and
+`latest-release` selects the latest published, non-prerelease, non-draft GitHub
+release on `factory_repo`. `latest-odd` selects the highest odd-patch semver tag,
+including prereleases. A tag such as `"v0.4.7"` selects that remote tag.
+To track any branch, explicitly set both `factory_ref = "main"` (or another
+branch) and `factory_track_branch = true`; an unmarked branch policy fails
+without changing the engine. A selected tag commit must itself be green.
+For an opted-in branch, District walks up to 50 remote commits back to the
+newest commit whose GitHub checks are complete and
 green. Remote hosts record that target under `[hosts.NAME.engine]`; their
 filtered config receives the same target under `[defaults.engine]`.
 Resolution, ancestry, target persistence, receipt, and dashboard completion timeouts
@@ -303,11 +307,23 @@ ticket observations are explicitly `unknown`. Rollback exits nonzero and prints
 `--drain` additionally retains the existing extended postchecks (Factory help,
 isolated import, dashboards, watch dry-run, and a temporary previous-engine probe).
 
-`district apply --upgrade [REF]` uses the configured `factory_ref`, or `main`
-when no ref is supplied. It resolves only against the remote repository, never a
-local checkout. Installing an ancestor is refused with both revisions named
-unless `--allow-downgrade` is present. Without `factory_ref`, ordinary apply
-leaves a verified installed engine unchanged.
+`district apply --upgrade` with no REF selects the latest published stable
+Factory release, regardless of `factory_ref`. Drafts and prereleases are excluded;
+unavailable releases fail the upgrade without falling back to a branch.
+`--upgrade main` (or another explicit branch) opts into the newest CI-green
+commit on that branch for this invocation. Tags and full SHAs remain explicit
+targets. Resolution uses only the remote `factory_repo`, never a local checkout.
+Installing an ancestor is refused with both revisions named unless
+`--allow-downgrade` is present. Without `factory_ref`, ordinary apply leaves a
+verified installed engine unchanged.
+
+`district status` also checks each registered host's installed engine against
+the latest stable release, including hosts without assigned repositories.
+Release drift names the host, installed SHA or tag, and latest tag, and exits 1;
+unknown release or installed identity exits 2 unless another row needs attention.
+`--json` includes these host observations in a top-level `engines` map;
+repo runtime failures remain visible independently. Host metadata is excluded from
+the public dashboard's repository projection limit.
 
 `install-state` obtains ahead/behind counts from GitHub compare, or reports
 `unknown` when that bounded lookup is unavailable. Installed identity and counts
@@ -350,11 +366,13 @@ Set either `host` or `hosts`, not both. With more than one host,
 `triage_host` is required and must be one of them; with one host it is
 refused. It is the only host that triages, and `district status` reads the
 repo's state from it. Each host's Factory config carries that host's
-`host_name` and the `triage_host` directly in its `[repo."SLUG"]` table, as
-factory#526 reads them. On the controller that config is this registry, which
-already holds `triage_host`, so `district add` and `district apply` keep
-`host_name = "local"` there. Other keys such as `claim_ttl` set in the
-registry's `[repo."SLUG"]` reach every host.
+`host_name`, `triage_host`, and `release_host = <triage_host>` directly in its
+`[repo."SLUG"]` table. The triage host also owns releases
+([factory#723](https://github.com/mikeroySoft/factory/issues/723)).
+On the controller that config is this registry, so `district add` and
+`district apply` keep `host_name = "local"` and the matching `release_host`
+there. Other keys such as `claim_ttl` set in the registry's `[repo."SLUG"]`
+reach every host.
 `district add --host NAME` on a repo already registered
 on another host appends `NAME` to `hosts`, keeping the first host as
 `triage_host`; a bare `district add` leaves the repo's hosts alone.
@@ -363,12 +381,15 @@ nothing, while any of them is running a pass unless you pass `--wait`.
 `district doctor` checks a repo's `toolchain` on every host that runs it.
 
 Several hosts on one repo need Factory's host claims
-([factory#526](https://github.com/mikeroySoft/factory/issues/526)) so two hosts
-never work the same ticket. Until `factory claims --supported` prints exactly `host-claims 1` and exits
-0 on every listed host (run with `~/.local/bin` first on `PATH` and a
-10-second timeout), `district add` refuses to add a second host and
-`district apply` refuses to apply a repo that shares a host with any
-multi-host repo, both with a link to that issue. A host that can't be reached
+([factory#722](https://github.com/mikeroySoft/factory/issues/722)) so two hosts
+never work the same ticket. Before every multi-host `district add` or
+`district apply`, `factory claims --supported` must print exactly
+`host-claims 1` (with an optional final newline) and exit 0 on every listed
+host (run with `~/.local/bin` first on `PATH` and a 10-second timeout).
+No version sniffing: a missing command, different output, or non-zero exit
+refuses the operation without changing the registry, naming the failing
+host and linking factory#722. Apply also enforces this when the selected
+repo shares a host with any multi-host repo. A host that can't be reached
 is reported as unreachable, not as lacking support. Applying a repo whose hosts
 run no multi-host repo never contacts the fleet hosts.
 

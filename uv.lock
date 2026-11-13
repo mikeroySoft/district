@@ -8,7 +8,7 @@ exclude-newer-span = "PT24H"
 
 [[package]]
 name = "district"
-version = "0.1.8"
+version = "0.1.11"
 source = { editable = "." }
 dependencies = [
     { name = "packaging" },

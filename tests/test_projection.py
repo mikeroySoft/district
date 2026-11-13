@@ -9,6 +9,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import threading
@@ -66,6 +67,25 @@ class ProjectionTest(unittest.TestCase):
         self.repo.mkdir()
         self.table = {"path": str(self.repo), "dashboard": {"port": 8765}}
         host.save({"repo": {SLUG: self.table}})
+        sha = "a" * 40
+        tool, _ = host.factory_tool_paths()
+        tool.mkdir(parents=True)
+        (tool / "uv-receipt.toml").write_text(
+            f'[[tool.requirements]]\nname = "factory"\nrev = "{sha}"\n')
+
+        def release_transport(argv, **kwargs):
+            if argv[:2] == ["gh", "api"] and any("/releases?" in arg for arg in argv):
+                value = json.dumps([[{"tag_name": "v0.4.7", "draft": False,
+                                      "prerelease": False, "published_at": STAMP}]])
+            elif argv[:2] == ["git", "ls-remote"]:
+                value = f"{sha}\trefs/tags/v0.4.7\n"
+            else:
+                if argv[:2] == ["factory", "dashboard"]:
+                    return host.run(argv, **kwargs)
+                raise AssertionError(f"unexpected release command: {argv}")
+            return subprocess.CompletedProcess(argv, 0, value, "")
+
+        self.enterContext(mock.patch.object(status, "run", side_effect=release_transport))
 
     def observe(self, sources=None, *, snap=None, error=None, at=AT):
         """Only transport/time are controlled; CLI dispatch, registry and semantics run."""
@@ -96,7 +116,8 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(sources, before)
         self.assertEqual(text_code, json_code)
         raw = fleet[SLUG]
-        headings, values = [re.split(r" {2,}", line.strip()) for line in output.getvalue().splitlines()]
+        headings, values = [re.split(r" {2,}", line.strip())
+                            for line in output.getvalue().splitlines()[-2:]]
         row = dict(zip(headings, values))
         self.assertEqual(row["repo"], SLUG)
         for column, key in (("assessment", "assessment"), ("operating", "operating_state"),

@@ -255,7 +255,9 @@ def collect(*, data: dict | None = None, releases: dict | None = None,
     if not isinstance(configured_ref, str) or not configured_ref:
         configured_ref = factory_ref if isinstance(factory_ref, str) and factory_ref else UNKNOWN
     policy_ref = factory_ref if isinstance(factory_ref, str) else configured_ref
-    if policy_ref == "latest-odd":
+    if policy_ref == "latest-release":
+        policy = "latest-release"
+    elif policy_ref == "latest-odd":
         policy = "latest-odd-tag"
     elif isinstance(policy_ref, str) and PINNED_REF.fullmatch(policy_ref):
         policy = "pinned"

@@ -50,7 +50,7 @@ class OneInstallTest(unittest.TestCase):
         self.other_repo = self.root / "other"
         self.other_repo.mkdir()
         self.data = {
-            "defaults": {"factory_repo": REPO, "factory_ref": "main",
+            "defaults": {"factory_repo": REPO, "factory_ref": "main", "factory_track_branch": True,
                          "factory_source": str(self.checkout),
                          "engine": {"sha": OLD, "ref": "main"}},
             "repo": {"acme/widgets": {"path": str(self.repo)}},
@@ -188,10 +188,15 @@ class OneInstallTest(unittest.TestCase):
         if argv[:4] == ["git", "remote", "get-url", "origin"]:
             out = REPO + "\n"
         elif argv[:2] == ["git", "ls-remote"]:
-            out = f"{self.tip}\trefs/heads/main\n"
+            out = f"{TARGET}\trefs/tags/v0.4.7\n{self.tip}\trefs/heads/main\n"
         elif argv[:2] == ["gh", "api"]:
             endpoint = next((arg for arg in argv[2:] if arg.startswith("repos/")), "")
-            if "check-runs" in endpoint:
+            if "/releases?" in endpoint:
+                out = json.dumps([[{
+                    "tag_name": "v0.4.7", "draft": False, "prerelease": False,
+                    "published_at": "2026-01-01T00:00:00Z",
+                }]])
+            elif "check-runs" in endpoint:
                 conclusion = "failure" if TIP in endpoint else "success"
                 out = json.dumps({"total_count": 1, "check_runs": [
                     {"status": "completed", "conclusion": conclusion}]})
@@ -292,7 +297,7 @@ class OneInstallTest(unittest.TestCase):
                         self.events.clear()
                         self.output.truncate(0)
                         self.output.seek(0)
-                        self.assertEqual(self.apply(upgrade="HEAD" if upgrade else None), 0, self.output.getvalue())
+                        self.assertEqual(self.apply(upgrade="main" if upgrade else None), 0, self.output.getvalue())
                         output = self.output.getvalue()
                         self.assertIn("acme/widgets  0.4.7", output)
                         self.assertNotIn("FAIL", output)
@@ -531,7 +536,7 @@ class OneInstallTest(unittest.TestCase):
         self.backend.start.assert_not_called()
 
     def test_upgrade_uses_remote_ref_not_stale_checkout_head(self):
-        self.assertEqual(self.apply(upgrade="HEAD"), 0)
+        self.assertEqual(self.apply(upgrade="main"), 0)
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], TARGET)
         self.assertFalse(any(kwargs.get("cwd") == self.checkout for _, kwargs in self.calls))
         self.assertFalse(any(argv[:2] in (["git", "archive"], ["git", "rev-parse"]) for argv, _ in self.calls))
@@ -716,6 +721,7 @@ class OneInstallTest(unittest.TestCase):
                 remote_config.write_bytes(remote_original)
                 original = (
                     f'# controller original\n[defaults]\nfactory_repo = "{REPO}"\nfactory_ref = "main"\n'
+                    'factory_track_branch = true\n'
                     f'factory_source = "{self.checkout}"\n'
                     '[hosts.remote]\nssh = "fake@remote"\nplatform = "linux"\n'
                     f'factory_source = "{self.checkout}"\n'
@@ -827,7 +833,7 @@ class OneInstallTest(unittest.TestCase):
                         install_state, "load_releases", return_value=install_state.unknown_releases()), mock.patch.object(
                         install_state, "tool_versions", return_value={"district": "test", "factory": "test"}), mock.patch.object(
                         Path, "open", new=open_without_checkout):
-                    self.assertEqual(apply.main(["--upgrade"] if explicit else []), 0)
+                    self.assertEqual(apply.main(["--upgrade", "main"] if explicit else []), 0)
                     for config, before in ((host.path(), original), (remote_config, remote_original)):
                         backups = list(config.parent.glob("config.toml.*.bak"))
                         self.assertIn(before, [backup.read_bytes() for backup in backups])
@@ -837,13 +843,13 @@ class OneInstallTest(unittest.TestCase):
                     self.assertEqual(len(installed), 1)
                     self.assertTrue(legacy.exists(), "remote historical folder is still referenced")
                     self.tip, self.compare_status = OLD, "behind"
-                    self.assertEqual(apply.main(["--upgrade"]), 1)
+                    self.assertEqual(apply.main(["--upgrade", "main"]), 1)
                     self.assertIn(TARGET, self.output.getvalue())
                     self.assertIn(OLD, self.output.getvalue())
                     self.assertEqual(len(installed), 1, "ancestor must not install without override")
                     self.tip, self.compare_status = TARGET, "ahead"
                     reference.unlink()
-                    self.assertEqual(apply.main(["--upgrade"]), 0)
+                    self.assertEqual(apply.main(["--upgrade", "main"]), 0)
                     self.assertFalse(legacy.exists(), "unreferenced historical folder must be removed remotely")
                     self.assertEqual(len(installed), 1)
                 self.assertFalse(any(parts[:2] in (["git", "archive"], ["git", "rev-parse"]) for parts in commands))
@@ -914,7 +920,7 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(host.engine(host.load(), "local")["sha"], TARGET)
         self.assertFalse(host.engine(host.load(), "local").get("install_pending"))
         self.assertEqual(interrupted["defaults"]["engine"]["install_pending"],
-                         {"target": TARGET, "previous": OLD, "ref": "main"})
+                         {"target": TARGET, "previous": OLD, "ref": "v0.4.7"})
         self.assertEqual(len(self.installs()), 1)
         self.backend.pause_timer.assert_not_called()
         self.backend.resume_timer.assert_not_called()

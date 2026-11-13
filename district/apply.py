@@ -120,6 +120,59 @@ def latest_odd_tag(output: str) -> tuple[str, str] | None:
     return tag, candidates[tag][1]
 
 
+def latest_factory_release(origin: str, run_cmd) -> tuple[str, str]:
+    """Return the newest published stable GitHub release and its immutable tag commit."""
+    slug = github_slug(origin) if isinstance(origin, str) else None
+    if slug is None:
+        raise OSError(f"{origin}: factory_repo must name a GitHub repository")
+    proc = run_cmd(["gh", "api", "--paginate", "--slurp",
+                    f"repos/{slug}/releases?per_page=100"], timeout=SMOKE_TIMEOUT)
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or "release lookup failed")
+    pages = json.loads(proc.stdout)
+    if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
+        raise ValueError("invalid GitHub release list")
+    releases = [release for page in pages for release in page
+                if isinstance(release, dict) and release.get("draft") is False
+                and release.get("prerelease") is False
+                and isinstance(release.get("published_at"), str) and release["published_at"]
+                and isinstance(release.get("tag_name"), str) and release["tag_name"]]
+    if not releases:
+        raise OSError(f"no published non-prerelease Factory release on {origin}")
+    tag = max(releases, key=lambda release: release["published_at"])["tag_name"]
+    sha, _ = _remote_engine_ref(tag, run_cmd, origin, allow_branch=False)
+    return tag, sha
+
+
+def _remote_engine_ref(ref: str, run_cmd, origin: str, *, allow_branch: bool) -> tuple[str, bool]:
+    proc = run_cmd(["git", "ls-remote", "--exit-code", origin,
+                    f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"],
+                   timeout=SMOKE_TIMEOUT)
+    if proc.returncode:
+        raise OSError(proc.stderr.strip() or "ls-remote failed")
+    refs = {parts[1]: parts[0].lower() for line in proc.stdout.splitlines()
+            if len(parts := line.split()) == 2 and SHA.fullmatch(parts[0].lower())}
+    for candidate in (f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"):
+        if candidate in refs:
+            branch = candidate.startswith("refs/heads/")
+            if branch and not allow_branch:
+                raise DistrictError(
+                    f"{ref}: branch tracking requires --upgrade {ref} or "
+                    "[defaults].factory_track_branch = true")
+            return refs[candidate], branch
+    raise OSError("remote ref did not resolve to one commit")
+
+
+def _engine_policy(data: dict, ref: str | None = None) -> tuple[str | None, bool]:
+    if ref == "HEAD":
+        return "latest-release", False
+    if ref is not None:
+        return ref, True
+    defaults = data.get("defaults", {})
+    track = defaults.get("factory_track_branch", False)
+    if not isinstance(track, bool):
+        raise DistrictError("[defaults].factory_track_branch must be a boolean")
+    return defaults.get("factory_ref"), track
 
 
 def _ci_state(source_cmd, slug: str, sha: str) -> str:
@@ -146,7 +199,7 @@ def _ci_state(source_cmd, slug: str, sha: str) -> str:
 
 
 def _resolve_engine(ref: str, run_cmd, origin: str, pin: tuple[str, str] | None = None,
-                    *, verify_ci: bool = True) -> tuple[str, str, str, str]:
+                    *, verify_ci: bool = True, allow_branch: bool = True) -> tuple[str, str, str, str]:
     """Resolve only remote refs; branches follow their newest green commit, tags do not walk."""
     slug = github_slug(origin) if isinstance(origin, str) else None
     if slug is None:
@@ -154,6 +207,8 @@ def _resolve_engine(ref: str, run_cmd, origin: str, pin: tuple[str, str] | None 
     branch = False
     if pin is not None:
         resolved_ref, sha = pin
+    elif ref == "latest-release":
+        resolved_ref, sha = latest_factory_release(origin, run_cmd)
     elif SHA.fullmatch(ref):
         proc = run_cmd(["gh", "api", f"repos/{slug}/commits/{ref}"], timeout=SMOKE_TIMEOUT)
         payload = json.loads(proc.stdout) if proc.returncode == 0 else None
@@ -169,20 +224,8 @@ def _resolve_engine(ref: str, run_cmd, origin: str, pin: tuple[str, str] | None 
             raise OSError(f"no odd-patch tag on {origin}")
         resolved_ref, sha = target
     else:
-        proc = run_cmd(["git", "ls-remote", "--exit-code", origin,
-                        f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"],
-                       timeout=SMOKE_TIMEOUT)
-        if proc.returncode:
-            raise OSError(proc.stderr.strip() or "ls-remote failed")
-        refs = {parts[1]: parts[0].lower() for line in proc.stdout.splitlines()
-                if len(parts := line.split()) == 2 and SHA.fullmatch(parts[0].lower())}
-        for candidate in (f"refs/tags/{ref}^{{}}", f"refs/tags/{ref}", f"refs/heads/{ref}"):
-            if candidate in refs:
-                resolved_ref, sha = ref, refs[candidate]
-                branch = candidate.startswith("refs/heads/")
-                break
-        else:
-            raise OSError("remote ref did not resolve to one commit")
+        sha, branch = _remote_engine_ref(ref, run_cmd, origin, allow_branch=allow_branch)
+        resolved_ref = ref
     if verify_ci:
         state = _ci_state(run_cmd, slug, sha)
         if state != "success" and branch:
@@ -623,8 +666,9 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
         if recovery is not None:
             return recovery
     explicit_ref = ref is not None
-    if ref is None:
-        ref = pin[0] if pin is not None else data.get("defaults", {}).get("factory_ref")
+    ref, allow_branch = _engine_policy(data, ref)
+    if pin is not None:
+        ref = pin[0]
     if ref is None and pin is None:
         if record:
             record.clear_deferred(engine_target)
@@ -634,7 +678,11 @@ def reconcile_engine(data: dict, record: install_state.ApplyRun | None = None, *
     factory_extras(data)
     origin = host.default(data, "factory_repo")
     try:
-        origin, slug, resolved_ref, sha = _resolve_engine(ref, run_cmd, origin, pin, verify_ci=verify_ci)
+        origin, slug, resolved_ref, sha = _resolve_engine(
+            ref, run_cmd, origin, pin, verify_ci=verify_ci, allow_branch=allow_branch)
+    except DistrictError as exc:
+        print(f"{engine_target} {ref} unresolved: {exc}; keeping installed engine")
+        return "failed"
     except subprocess.TimeoutExpired as exc:
         print(f"{engine_target} {ref} unresolved: {exc}; keeping installed engine")
         return "failed"
@@ -702,9 +750,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
             recovery_result = recovered
     if recovery_result:
         return recovery_result
-    ref = ref if ref is not None else data.get("defaults", {}).get("factory_ref")
-    if ref == "HEAD":
-        ref = data.get("defaults", {}).get("factory_ref", "main")
+    ref, allow_branch = _engine_policy(data, ref)
     if ref is None:
         return "unchanged"
     names = ", ".join(contexts)
@@ -712,7 +758,7 @@ def reconcile_fleet_engine(data: dict, record: install_state.ApplyRun | None,
     resolved, previous = {}, {}
     for name, (runner, backend, _) in contexts.items():
         try:
-            _, slug, resolved_ref, sha = _resolve_engine(ref, runner, origin)
+            _, slug, resolved_ref, sha = _resolve_engine(ref, runner, origin, allow_branch=allow_branch)
             tool, _ = host.factory_tool_paths(runner)
             receipt = _receipt_sha(tool, runner)
             stored = installed_engine_commit(data, name)
@@ -1021,9 +1067,9 @@ def restart_dashboards(repos: dict[str, dict], backend=None, *, deadline: float 
 def upgrade(data: dict, ref: str | None = None, record: install_state.ApplyRun | None = None, *,
             backend=None, host_name: str = "local", repos: dict[str, dict] | None = None,
             run_cmd=None, allow_downgrade: bool = False) -> str:
-    """Explicit upgrades use the same remote target and verified uv tool as plain apply."""
-    if ref in (None, "HEAD"):
-        ref = data.get("defaults", {}).get("factory_ref", "main")
+    """Bare upgrades select a release; an explicit ref opts into a branch if it names one."""
+    if ref is None:
+        ref = "HEAD"
     return reconcile_engine(data, record, backend=backend, host_name=host_name, repos=repos,
                             run_cmd=run_cmd, ref=ref, allow_downgrade=allow_downgrade)
 
@@ -1453,9 +1499,7 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
         explicit_contexts = {}
         if record.drain_requested:
             # Wait before policy, migrations, unit changes or any install is applied.
-            ref = args.upgrade or data.get("defaults", {}).get("factory_ref")
-            if ref == "HEAD":
-                ref = data.get("defaults", {}).get("factory_ref", "main")
+            ref, allow_branch = _engine_policy(data, args.upgrade)
             for name in dict.fromkeys([*fleet_hosts, *groups]):
                 try:
                     runner, backend = _host_context(data, name, sync=False)
@@ -1466,7 +1510,8 @@ def _run(args: argparse.Namespace, record: install_state.ApplyRun) -> int:
                     if not recovering:
                         if ref is None:
                             continue
-                        _, _, _, sha = _resolve_engine(ref, runner, host.default(data, "factory_repo"))
+                        _, _, _, sha = _resolve_engine(
+                            ref, runner, host.default(data, "factory_repo"), allow_branch=allow_branch)
                         tool, cli = host.factory_tool_paths(runner)
                         if _engine_current(sha, tool, cli, runner, ref=ref):
                             continue
@@ -1586,7 +1631,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district apply", description=__doc__.split("\n", 1)[0])
     parser.add_argument("slug", nargs="?", help="one repo (owner/name or basename); default all")
     parser.add_argument("--upgrade", nargs="?", const="HEAD", metavar="REF",
-                        help="install the newest green remote REF (default factory_ref, or main)")
+                        help="install the latest published stable Factory release, or an explicit tag/branch/SHA")
     parser.add_argument("--allow-downgrade", action="store_true",
                         help="allow a target that is an ancestor of the installed engine")
     parser.add_argument("--reset", metavar="SLUG", help="run one pass by hand and re-enable the timer if it succeeds")
