@@ -243,10 +243,13 @@ def repo_hosts(table: dict, slug: str = "repo") -> list[str]:
                                or any(not isinstance(n, str) or not n for n in listed)
                                or len(set(listed)) != len(listed)):
         raise DistrictError(f"{slug}: hosts must be a non-empty array of distinct host names")
-    if listed is None or len(listed) == 1:
-        # factory#526 reads triage_host from [repo."SLUG"] directly: alone it would stop triage here
-        if "triage_host" in table:
-            raise DistrictError(f"{slug}: triage_host applies only when hosts lists several hosts")
+    # factory#526 reads triage_host from [repo."SLUG"] directly: on a District
+    # single-host assignment it would stop triage there. Factory host-claims 1
+    # may set triage_host, host_name, land_host, release_host, and claim_ttl
+    # with no District `hosts` list; those keys are not a host assignment.
+    assigned = listed if listed is not None else ([table["host"]] if "host" in table else None)
+    if assigned is not None and len(assigned) == 1 and "triage_host" in table:
+        raise DistrictError(f"{slug}: triage_host applies only when hosts lists several hosts")
     if listed is None:
         return [table.get("host", "local")]
     if "host" in table:
@@ -332,7 +335,12 @@ def sync_local_claims(data: dict) -> bool:
     True when `data` changed."""
     changed = False
     for slug, table in repos(data).items():
-        keys = claim_keys(table, "local", slug) if "local" in repo_hosts(table, slug) else {}
+        listed = repo_hosts(table, slug)
+        if len(listed) == 1 and "local" in listed:
+            # A single local host may already carry factory host-claims 1 keys
+            # with no District `hosts` list; do not strip them.
+            continue
+        keys = claim_keys(table, "local", slug) if "local" in listed else {}
         for key in ("host_name", "release_host"):
             value = keys.get(key)
             if table.get(key) != value:

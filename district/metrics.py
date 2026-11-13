@@ -212,7 +212,7 @@ def main(argv: list[str]) -> int:
             print(f"district metrics: another metrics operation is running ({path})", file=sys.stderr)
             return 1
         max_age = hours(args.max_age, "--max-age")
-        out, code = {}, 0
+        out, failures, successes = {}, 0, 0
         data = host.load()
         for slug, table in host.select(data, args.slug).items():
             try:
@@ -225,6 +225,8 @@ def main(argv: list[str]) -> int:
             except DistrictError as exc:
                 print(f"{slug}: {exc}", file=sys.stderr)
                 out[slug] = {"error": str(exc)}
-                code = 1
+                failures += 1
+            else:
+                successes += 1
         print(json.dumps(out, indent=2))
-        return code
+        return 1 if failures and not successes else 0
