@@ -655,6 +655,15 @@ def add_job_health(data: dict, entries: dict[str, dict], timeout: float) -> None
                         "Fleet job coverage is incomplete or does not match the host registry.")
             elif gap["unreachable"] and item["assessment"] != "attention":
                 item["assessment"] = "unknown"
+            elif gap["code"] == "timestamp_unparseable" and item["assessment"] == "normal":
+                # A present-but-unparseable run timestamp is an incomplete observation of a run that
+                # actually happened, not healthy evidence: degrade to the contract's "unknown" so the
+                # repo/host surfaces under --unhealthy. (pass_history_unavailable is deliberately NOT
+                # degraded: a healthy dashboard snapshot stays normal when native history is merely
+                # unreadable.) The marker keeps the lenient default `district status` exit unchanged
+                # while --unhealthy turns it into a non-zero exit.
+                item["assessment"] = "unknown"
+                item["_incomplete_history"] = True
     for slug, sources in sources_by_slug.items():
         item = entries[slug]
         classified = health.classify(slug, sources, {})
@@ -804,6 +813,8 @@ def main(argv: list[str]) -> int:
     engines = engine_releases(registry)
     if args.unhealthy:
         entries = {slug: e for slug, e in entries.items() if e["assessment"] != "normal"}
+    # Pop the internal incomplete-history marker before output so it never leaks into --json.
+    incomplete = {slug: e.pop("_incomplete_history", False) for slug, e in entries.items()}
     if args.json:
         extra = {**({"host": gh} if failed else {}), **({"engines": engines} if engines else {})}
         for slug, rows in parity.items():
@@ -825,8 +836,13 @@ def main(argv: list[str]) -> int:
                 print("no unhealthy repositories")
             else:
                 print("no repositories registered (district add)")
-    assessments = [*(e["assessment"] for e in entries.values()),
-                   *(e["assessment"] for e in engines.values())]
+    assessments = [e["assessment"] for e in engines.values()]
+    for slug, e in entries.items():
+        # A gap-only "unknown" surfaces under --unhealthy (non-zero exit) but must not change the
+        # lenient default `district status` exit, which stays unchanged for these history gaps.
+        if not args.unhealthy and incomplete[slug] and e["assessment"] == "unknown":
+            continue
+        assessments.append(e["assessment"])
     if failed or "attention" in assessments:
         return 1
     return 2 if "unknown" in assessments else 0

@@ -2,8 +2,9 @@
 
 import json
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
-from district import host
+from district import health, host
 from tests.test_district import DistrictCase
 
 
@@ -127,3 +128,50 @@ class TestSystemdJobHealth(DistrictCase):
         )
         self.assertTrue(any(g["code"] == "timestamp_unparseable"
                             for g in entry["pass_history_errors"]))
+
+    def test_ambiguous_zone_failure_is_a_gap_not_a_mistimed_alert(self):
+        # Reviewer fixture: a failed run stamped 17:00 CST. CST is ambiguous (US/China/Cuba), so it
+        # must surface as a timestamp_unparseable gap, never a guessed instant that mistimes alerts.
+        entry = self.configure(
+            [],
+            "ExecMainStatus=1\nResult=exit-code\nExecMainStartTimestamp=Fri 2026-11-04 17:00:00 CST\n"
+            "ExecMainExitTimestamp=Fri 2026-11-04 17:00:00 CST\nActiveState=inactive\n",
+            "UnitFileState=enabled\nActiveState=active\nLastTriggerUSec=Fri 2026-11-04 17:00:00 CST\n",
+        )
+        self.assertTrue(any(g["code"] == "timestamp_unparseable"
+                            for g in entry["pass_history_errors"]))
+        self.assertEqual(entry["failure_streaks"], [])
+
+    def test_history_gap_degrades_assessment_only_under_unhealthy(self):
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        ran = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+        wall = ran.strftime("%Y-%m-%d %H:%M:%S")
+        self.stub("journalctl", ("*", ""))
+        self.stub(
+            "systemctl",
+            ("list-units *", "factory-widgets.service loaded inactive dead\n"),
+            ("list-unit-files *", "factory-widgets.service enabled\n"),
+            ("show factory-widgets.service *",
+             f"ExecMainStatus=1\nResult=exit-code\nExecMainStartTimestamp=Fri {wall} XYZ\n"
+             f"ExecMainExitTimestamp=Fri {wall} XYZ\nActiveState=inactive\n"),
+            ("show factory-widgets.timer *",
+             f"UnitFileState=enabled\nActiveState=active\nLastTriggerUSec=Fri {wall} XYZ\n"),
+        )
+        # Force an otherwise-healthy snapshot so the only defect is the history gap.
+        real = health.classify
+        normal = lambda slug, sources, table: {**real(slug, sources, table), "assessment": "normal"}  # noqa: E731
+        with mock.patch.object(health, "classify", normal):
+            default_code, default_out = self.district("status", "--json")
+            unhealthy_code, unhealthy_out = self.district("status", "--json", "--unhealthy")
+        entry = json.loads(default_out)["acme/widgets"]
+        # Incomplete native observation is not 'normal': the assessment degrades to unknown...
+        self.assertEqual(entry["assessment"], "unknown")
+        self.assertTrue(any(g["code"] == "timestamp_unparseable" for g in entry["pass_history_errors"]))
+        self.assertNotIn("_incomplete_history", entry)  # internal marker never leaks into --json
+        # ...the repo surfaces under --unhealthy with a non-zero exit...
+        unhealthy = json.loads(unhealthy_out)
+        self.assertEqual(unhealthy["acme/widgets"]["assessment"], "unknown")
+        self.assertNotEqual(unhealthy_code, 0)
+        # ...but the lenient default `district status` exit stays 0 (unchanged) for these gaps.
+        self.assertEqual(default_code, 0, default_out)

@@ -19,14 +19,16 @@ UNIT_FAILED = "be02cf6855d2428ba40df7e9d022f03d"
 STAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})")
 END = re.compile(r"===\s*end\s+rc=(-?\d+)\b")
 
-# Zone abbreviations email.utils cannot resolve, as fixed minutes east of UTC. Ambiguous
-# abbreviations (IST, CST, BST, ...) are omitted so a genuinely unresolvable stamp surfaces as a
-# gap instead of a guessed instant.
+# Zone abbreviations resolved to fixed minutes east of UTC. Only UNAMBIGUOUS tokens appear here;
+# ambiguous abbreviations (CST = US/China/Cuba, CDT, IST, BST, ...) are omitted so an unresolvable
+# stamp becomes a timestamp_unparseable gap, never a guessed instant. US zones are the District
+# fleet's own zones (Pacific Tank/Ultron); numeric offsets are parsed in _zone_minutes.
 TZ_OFFSETS = {
-    "UTC": 0, "GMT": 0, "WET": 0, "WEST": 60, "CET": 60, "CEST": 120, "EET": 120, "EEST": 180,
-    "MSK": 180, "GST": 240, "PKT": 300, "ICT": 420, "WIB": 420, "HKT": 480, "SGT": 480,
-    "AWST": 480, "JST": 540, "KST": 540, "ACST": 570, "AEST": 600, "ACDT": 630, "AEDT": 660,
-    "NZST": 720, "NZDT": 780,
+    "Z": 0, "UTC": 0, "GMT": 0, "WET": 0, "WEST": 60, "CET": 60, "CEST": 120, "EET": 120,
+    "EEST": 180, "MSK": 180, "GST": 240, "PKT": 300, "ICT": 420, "WIB": 420, "HKT": 480,
+    "SGT": 480, "AWST": 480, "JST": 540, "KST": 540, "ACST": 570, "AEST": 600, "ACDT": 630,
+    "AEDT": 660, "NZST": 720, "NZDT": 780,
+    "EST": -300, "EDT": -240, "MST": -420, "MDT": -360, "PST": -480, "PDT": -420,
 }
 # A real error worth surfacing over benign "0 failed"/"triage OK" pass summaries.
 HARD_ERROR = re.compile(r"\w*(?:error|exception)\b|traceback|\bfatal\b|\bpanic\b", re.I)
@@ -113,10 +115,27 @@ class PassResult:
     error: str | None = None
 
 
+def _zone_minutes(zone: str | None) -> int | None:
+    """Resolve a zone token to fixed minutes east of UTC, or None if ambiguous/unknown.
+
+    Numeric offsets are parsed explicitly (email.utils misreads them: ``-03`` as ``-00:03``,
+    ``+09`` as ``+00:09``). Alphabetic abbreviations resolve ONLY through TZ_OFFSETS, so
+    ambiguous tokens (CST, IST, BST, ...) return None and surface as a gap.
+    """
+    if not zone:
+        return None
+    token = zone.strip()
+    sign_offset = re.fullmatch(r"([+-])(\d{2})(?::?(\d{2}))?", token)
+    if sign_offset:
+        magnitude = int(sign_offset[2]) * 60 + int(sign_offset[3] or 0)
+        return -magnitude if sign_offset[1] == "-" else magnitude
+    return TZ_OFFSETS.get(token.upper())
+
+
 def _zoned(parsed: datetime, zone: str | None) -> str | None:
-    if parsed.tzinfo:
-        return parsed.isoformat()
-    minutes = TZ_OFFSETS.get(zone.upper()) if zone else None
+    # Always re-resolve from the zone token; never trust the tzinfo email.utils infers for an
+    # abbreviation, which silently mis-reads ambiguous (CST) and short numeric (-03) zones.
+    minutes = _zone_minutes(zone)
     if minutes is None:
         return None
     return parsed.replace(tzinfo=timezone(timedelta(minutes=minutes))).isoformat()
@@ -132,18 +151,19 @@ def _stamp(line: str) -> str | None:
     native = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\S+)", line)
     if native:
         try:
-            day = datetime.fromisoformat(native[1]).strftime("%d %b %Y")
-            parsed = parsedate_to_datetime(f"{day} {native[2]} {native[3]}")
-        except (ValueError, TypeError):
+            parsed = datetime.fromisoformat(f"{native[1]} {native[2]}")
+        except ValueError:
             return None
         return _zoned(parsed, native[3])
     # launchd shell jobs commonly use `date`, including CET/JST/PST rather than ISO.
     plain = re.search(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(\S+)\s+\d{4}", line)
+    if not plain:
+        return None
     try:
-        parsed = parsedate_to_datetime(plain[0] if plain else line)
+        parsed = parsedate_to_datetime(plain[0])
     except (ValueError, TypeError):
         return None
-    return _zoned(parsed, plain[1] if plain else None)
+    return _zoned(parsed, plain[1])
 
 
 def _error(line: str) -> bool:
