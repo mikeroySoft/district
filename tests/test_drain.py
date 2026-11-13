@@ -195,7 +195,15 @@ class DrainTest(unittest.TestCase):
                         }
                 runner, _, _ = case.timeout_remote("none")
                 with mock.patch.object(host, "remote_runner", return_value=runner):
-                    self.assertEqual(self.run_apply(case), 0)
+                    if placement == "local":
+                        self.assertEqual(self.run_apply(case), 0)
+                    else:
+                        # macOS pause-and-drain is unsupported pending #199: an explicit
+                        # --drain skips each darwin host per host with no mutation and a
+                        # non-zero (partial) exit, continuing on any Linux host.
+                        self.assertEqual(self.run_apply(case), 1, case.output.getvalue())
+                        self.assertIn("unsupported_platform", case.output.getvalue())
+                        self.assertIn("remote", case.output.getvalue())
                 self.assertNotIn("drain", self.record())
                 self.assertNotIn("drains", self.record())
                 apply.postcheck.check.assert_not_called()
@@ -213,9 +221,10 @@ class DrainTest(unittest.TestCase):
     def test_remote_drain_writes_and_removes_flag_over_ssh(self):
         with self.case() as case:
             case.data["hosts"] = {
-                "remote": {"ssh": "unused", "platform": "macos", "engine": {"sha": fixtures.OLD, "ref": "main"}}}
+                "remote": {"ssh": "unused", "platform": "linux", "engine": {"sha": fixtures.OLD, "ref": "main"}}}
             case.data["repo"]["acme/widgets"]["host"] = "remote"
-            case.backend.configuration.return_value = {"platform": "macos", "executable": "launchctl"}
+            case.backend.configuration.return_value = {"platform": "linux", "unit_dir": str(host.unit_dir()),
+                                                       "executable": "systemctl"}
             case.busy = 2
             runner, _, commands = case.timeout_remote("none")
             original = runner.transport

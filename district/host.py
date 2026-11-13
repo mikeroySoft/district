@@ -164,8 +164,16 @@ def save(data: dict) -> None:
     if original is not None:
         p.with_name(_backup_name(p.name)).write_bytes(original)
     tmp = p.with_suffix(".toml.tmp")
-    tmp.write_text(tomli_w.dumps(data))
+    with open(tmp, "w") as handle:
+        handle.write(tomli_w.dumps(data))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, p)
+    dir_fd = os.open(p.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def default(data: dict, key: str):

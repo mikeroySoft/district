@@ -197,13 +197,21 @@ Non-interactive: `--exclusive a,b --no-edit --check …`.
    must itself be green. Record one immutable target per host; fleet hosts agree
    on the same target. Refuse an ancestor unless `--allow-downgrade` is supplied.
    Every engine replacement pauses the factory and never waits for an idle
-   window. Record which managed `factory-*.timer`s are active and stop only
-   those, leaving them enabled: Linux `systemctl --user stop`/`start`; macOS
-   unloads (`launchctl bootout`) an idle agent without `launchctl disable`, and
-   while a pass is running relies on the District drain flag the scheduled pass
-   consults — never `launchctl disable`/`enable`, never a kill. Open the host
-   drain flag, then wait up to `--drain-timeout` (default 90min, config
-   `drain_timeout`) for non-dashboard Factory services to finish on their own; a
+   window. The pause-and-drain protocol is **Linux/systemd only**: record which
+   managed `factory-*.timer`s are active and stop only those with
+   `systemctl --user stop`/`start`, leaving them enabled. **macOS/launchd is
+   unsupported and skipped per host pending #199
+   (https://github.com/mikeroySoft/district/issues/199):** an `--upgrade`,
+   engine-target, or explicit pause-and-drain apply SKIPS each darwin host (local
+   or a registered remote such as Ultron) with an explicit `unsupported_platform`
+   row and NO mutation at all (no drain flag, pause, install, or launchctl),
+   excludes it from the fleet pre-install checks and the drain peer set, and
+   continues normally on the Linux hosts. The run finishes with a `partial:`
+   summary naming the skipped host(s) and a non-zero exit; a darwin-only fleet
+   skips everything and exits non-zero. Write the active-before timer set durably
+   (fsync) before the
+   first stop. Open the host drain flag, then wait up to `--drain-timeout`
+   (default 90min) for non-dashboard Factory services to finish on their own; a
    timeout restores the timers, leaves the engine unchanged, and exits non-zero
    with the blocking units and tickets. Before writing any changed unit while
    drained, run the scheduler-toolchain preflight (every required

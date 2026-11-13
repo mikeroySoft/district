@@ -1280,7 +1280,7 @@ class OneInstallTest(unittest.TestCase):
             home=runner.path(str(home)) if runner else home, uid=501, raw_path=os.defpath)
         return backend, runner, agents
 
-    def test_binary_launchd_plists_discover_status_and_upgrade_through_apply(self):
+    def test_binary_launchd_plists_discover_status_and_refuse_engine_upgrade(self):
         for remote in (False, True):
             with self.subTest(remote=remote), contextlib.ExitStack() as stack:
                 self.install_receipt(OLD)
@@ -1309,26 +1309,25 @@ class OneInstallTest(unittest.TestCase):
                                      {"factory-aux.service", "factory-aux.timer", "factory-aux-worker.service"})
                 self.launchd_running = False
                 with self.subTest(apply=True):
-                    self.assertEqual(apply.reconcile_engine(
-                        self.data, backend=backend, run_cmd=runner or apply.run,
-                        host_name="remote" if remote else "local"), "applied", self.output.getvalue())
-                    self.assertEqual(len(self.installs()), 1)
-                    self.assertEqual(self.launchd_disabled, set())
+                    # macOS engine upgrades are unsupported pending #199: reconcile_engine
+                    # refuses with unsupported_platform and issues no launchctl mutation.
+                    with self.assertRaises(host.DistrictError) as raised:
+                        apply.reconcile_engine(
+                            self.data, backend=backend, run_cmd=runner or apply.run,
+                            host_name="remote" if remote else "local")
+                    self.assertIn("unsupported_platform", str(raised.exception))
+                    self.assertIn("issues/199", str(raised.exception))
+                    self.assertEqual(self.installs(), [])
                     operations = [argv[1] for argv, _ in self.launchd_calls]
-                    self.assertNotIn("disable", operations, "launchd pause must never disable")
-                    self.assertNotIn("enable", operations, "launchd resume must never enable")
-                    self.assertNotIn("kill", operations, "launchd pause must never kill a pass")
-                    # An idle timer is paused by unloading it (bootout) without disabling,
-                    # so its plist stays enabled for the restored schedule.
-                    paused = [argv[-1] for argv, _ in self.launchd_calls if argv[1] == "bootout"]
-                    self.assertIn("gui/501/factory-aux", paused)
-                    self.assertTrue(all(0 < kwargs["timeout"] <= 30 for argv, kwargs in self.launchd_calls
-                                        if argv[1] == "bootout"))
-                    self.assertEqual(host.engine(host.load(), "remote" if remote else "local")["sha"], TARGET)
+                    for forbidden in ("disable", "enable", "kill", "bootout"):
+                        self.assertNotIn(forbidden, operations,
+                                         f"macOS engine refusal must never {forbidden}")
+                    self.assertEqual(self.launchd_disabled, set())
+                    self.assertEqual(host.engine(host.load(), "remote" if remote else "local")["sha"], OLD)
                 for path in agents.glob("*.plist"):
                     path.unlink()
 
-    def test_malformed_launchd_plist_status_is_tolerant_and_apply_fails_named(self):
+    def test_malformed_launchd_plist_status_is_tolerant_and_macos_apply_refuses(self):
         for remote in (False, True):
             with self.subTest(remote=remote), contextlib.ExitStack() as stack:
                 self.install_receipt(OLD)
@@ -1346,11 +1345,17 @@ class OneInstallTest(unittest.TestCase):
                     self.assertEqual(status.active_state, "active")
                 self.launchd_running = False
                 with self.subTest(apply=True):
-                    self.assertEqual(self.apply(), 1, self.output.getvalue())
+                    # macOS engine upgrades are refused pending #199 before the engine
+                    # step touches units; a remote darwin host fails the row (exit 1),
+                    # a local darwin host fails the apply outright.
+                    if remote:
+                        self.assertEqual(self.apply(), 1, self.output.getvalue())
+                        self.assertIn("unsupported_platform", self.output.getvalue())
+                    else:
+                        with self.assertRaises(host.DistrictError) as raised:
+                            self.apply()
+                        self.assertIn("unsupported_platform", str(raised.exception))
                     self.assertEqual(self.installs(), [])
-                    self.assertIn("factory-broken.plist", self.output.getvalue())
-                    self.assertIn("engine", self.output.getvalue())
-                (agents / "factory-broken.plist").unlink()
 
 
     def test_registered_launchd_plist_bytes_reconcile_full_repo_drift(self):
@@ -1512,6 +1517,125 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(host.engine(self.data, "local")["sha"], TARGET)
         self.assertEqual(host.engine(self.data, "remote")["sha"], OLD)
         self.assertEqual(self.active, {"factory-widgets.timer"})
+
+    def test_macos_engine_mixed_fleet_skips_darwin_and_upgrades_linux(self):
+        # Mixed fleet: the Linux host (local) upgrades normally — engine installed, its
+        # active timer paused then restored — while the darwin host (remote Ultron) is
+        # skipped per host with an unsupported_platform row and NO mutation at all; the
+        # run ends with a partial summary and a non-zero exit.
+        self.data["hosts"] = {"ultron": {"ssh": "factory@ultron", "platform": "macos",
+                                         "engine": {"sha": OLD, "ref": "main"}}}
+        self.data["repo"]["acme/ios"] = {"path": str(self.other_repo), "host": "ultron"}
+        with mock.patch.object(host, "remote_runner") as remote_runner:
+            self.assertEqual(self.apply(upgrade=TARGET), 1, self.output.getvalue())
+            remote_runner.assert_not_called()  # darwin host never contacted => untouched
+        output = self.output.getvalue()
+        self.assertIn("unsupported_platform", output)
+        self.assertIn("ultron", output)
+        self.assertIn("https://github.com/mikeroySoft/district/issues/199", output)
+        self.assertIn("partial:", output)
+        self.assertRegex(output, r"acme/ios\b.*unsupported_platform")  # per-host skip row
+        self.assertTrue(self.installs())  # Linux host upgraded
+        self.assertEqual(host.engine(host.load(), "local")["sha"], TARGET)
+        self.backend.pause_timer.assert_called()
+        self.backend.resume_timer.assert_called()
+        self.assertEqual(self.active, {"factory-widgets.timer"})  # paused then restored
+        self.assertEqual(host.engine(host.load(), "ultron")["sha"], OLD)  # darwin unchanged
+
+    def test_macos_engine_darwin_only_fleet_skips_everything(self):
+        # Darwin-only fleet: nothing is mutated, a partial summary is printed, exit is
+        # non-zero.
+        self.data["hosts"] = {"ultron": {"ssh": "factory@ultron", "platform": "macos",
+                                         "engine": {"sha": OLD, "ref": "main"}}}
+        self.data["repo"] = {"acme/ios": {"path": str(self.other_repo), "host": "ultron"}}
+        with mock.patch.object(host, "remote_runner") as remote_runner:
+            self.assertEqual(self.apply(upgrade=TARGET), 1, self.output.getvalue())
+            remote_runner.assert_not_called()
+        output = self.output.getvalue()
+        self.assertIn("unsupported_platform", output)
+        self.assertIn("ultron", output)
+        self.assertIn("partial:", output)
+        self.assertEqual(self.installs(), [])
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
+        self.backend.stop.assert_not_called()
+        self.backend.start.assert_not_called()
+        self.assertEqual(host.engine(host.load(), "ultron")["sha"], OLD)
+
+    def test_macos_local_darwin_skipped_alone(self):
+        # A darwin local (patched sys.platform) is the only host: skipped per host with no
+        # mutation, a partial summary, and a non-zero exit.
+        with mock.patch.object(apply.sys, "platform", "darwin"):
+            self.assertEqual(self.apply(upgrade=TARGET), 1, self.output.getvalue())
+        output = self.output.getvalue()
+        self.assertIn("unsupported_platform", output)
+        self.assertIn("local", output)
+        self.assertIn("https://github.com/mikeroySoft/district/issues/199", output)
+        self.assertIn("partial:", output)
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
+        self.backend.stop.assert_not_called()
+        self.backend.start.assert_not_called()
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(host.engine(host.load(), "local")["sha"], OLD)
+
+    def test_macos_local_darwin_skipped_with_remote_linux_host(self):
+        # A darwin local is skipped per host; a remote Linux host is NOT skipped and is
+        # reached (the old fleet-wide refusal would have blocked it).
+        self.install_receipt(TARGET)
+        self.data["defaults"]["engine"]["sha"] = TARGET
+        other = self.root / "remote-repo"
+        other.mkdir()
+        self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                         "engine": {"sha": TARGET, "ref": "main"}}}
+        self.data["repo"]["acme/other"] = {"path": str(other), "host": "remote"}
+        self.backend.definitions_changed.return_value = False
+        runner, _, _ = self.timeout_remote("none")
+        with mock.patch.object(apply.sys, "platform", "darwin"), \
+                mock.patch.object(host, "remote_runner", return_value=runner) as remote_runner:
+            self.assertEqual(self.apply(upgrade=TARGET), 1, self.output.getvalue())
+            remote_runner.assert_called()  # the Linux host is reached, not blocked
+        output = self.output.getvalue()
+        self.assertIn("unsupported_platform", output)
+        self.assertIn("local", output)
+        self.assertIn("partial:", output)
+        self.assertIn("factory-widgets.timer", self.active)  # local darwin timer untouched
+        self.assertEqual(host.engine(host.load(), "local")["sha"], TARGET)
+
+    def test_crash_recovery_restores_only_saved_timers_and_leaves_inactive_untouched(self):
+        # SIGKILL between stop and resume leaves the durable paused set with no readable
+        # receipt, target, or recorded SHA. A new apply restores exactly the saved
+        # active-before timers and never starts a timer that was inactive before.
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"] = {"paused_timers": ["factory-widgets.timer"]}
+        self.active.clear()  # widgets stopped by the crash; factory-dormant.timer inactive before
+        (self.tool / "uv-receipt.toml").unlink()
+        self.assertEqual(self.apply(), 1)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        resumed = [call.args[0] for call in self.backend.resume_timer.call_args_list]
+        self.assertEqual(resumed, ["factory-widgets.timer"])
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+
+    def test_recovery_without_readable_receipt_or_recorded_revision_names_paused_timers(self):
+        # Restored from origin/main, adapted: recovery with no receipt/target/SHA now
+        # restores the named paused timers (instead of leaving them stopped) and fails.
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"] = {"paused_timers": ["factory-widgets.timer"]}
+        self.active.clear()
+        (self.tool / "uv-receipt.toml").unlink()
+        self.assertEqual(self.apply(), 1)
+        self.assertRegex(self.output.getvalue(),
+                         r"engine:local restart factory-widgets\.timer ActiveState=active")
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+        self.assertEqual(self.installs(), [])
+        # A second apply has nothing to recover and does not restore again.
+        self.data = host.load()
+        self.install_receipt(TARGET)
+        self.backend.resume_timer.reset_mock()
+        self.assertEqual(self.apply(), 0)
+        self.backend.resume_timer.assert_not_called()
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,5 @@
 """Engine scheduling must pause without killing a running launchd pass."""
 import os
-import plistlib
 import subprocess
 import tempfile
 import unittest
@@ -11,57 +10,18 @@ from district import host, service
 
 
 class EngineWindowTest(unittest.TestCase):
-    def test_launchd_pause_unloads_idle_without_disable_and_never_kills_running(self):
+    def test_launchd_pause_and_resume_fail_closed_without_disable_or_bootout(self):
+        # macOS pause-and-drain is unsupported pending #199: pause/resume never issue
+        # launchctl disable/enable/bootout from the engine path; they fail closed.
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with mock.patch.dict(os.environ, {
-                "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
-                "XDG_DATA_HOME": str(root / "data"), "UV_TOOL_DIR": str(root / "tools"),
-                "UV_TOOL_BIN_DIR": str(root / "bin"),
-            }):
-                state = {"loaded": True, "running": True}
-                ops = []
-
-                def run(argv, **kwargs):
-                    operation = argv[1]
-                    ops.append(operation)
-                    self.assertNotIn(operation, ("disable", "enable", "kill"),
-                                     f"launchd pause/resume must never {operation}")
-                    if operation == "bootout":
-                        self.assertTrue(not state["running"], "bootout would kill a running pass")
-                        state["loaded"] = False
-                    elif operation == "bootstrap":
-                        state["loaded"] = True
-                    elif operation == "print-disabled":
-                        return subprocess.CompletedProcess(argv, 0, "", "")
-                    elif operation == "print":
-                        if not state["loaded"]:
-                            return subprocess.CompletedProcess(argv, 3, "", "not loaded")
-                        body = "state = running\npid = 42\n" if state["running"] else "state = exited\nlast exit code = 0\n"
-                        return subprocess.CompletedProcess(argv, 0, body, "")
-                    return subprocess.CompletedProcess(argv, 0, "", "")
-
-                backend = service.LaunchdBackend(run, home=root, uid=501, raw_path=os.defpath)
-                backend.agent_dir.mkdir(parents=True)
-                (backend.agent_dir / "factory-widgets.plist").write_bytes(plistlib.dumps({
-                    "Label": "factory-widgets", "StartInterval": 600,
-                    "ProgramArguments": [str(root / "tools/factory/bin/python"), "-P", "-m", "factory", "dispatch"],
-                }))
-                # A pass is in flight: pausing must not bootout (which would kill it) and
-                # must not disable; the District drain flag the pass consults gates new work.
-                self.assertEqual(backend.is_active("factory-widgets.service"), "activating")
-                backend.pause_timer("factory-widgets.timer", timeout=1)
-                self.assertNotIn("bootout", ops)
-                self.assertEqual(backend.status("factory-widgets.service").main_pid, 42)
-                # The pass finishes; now pausing unloads the agent without disabling it.
-                state["running"] = False
-                backend.pause_timer("factory-widgets.timer", timeout=1)
-                self.assertIn("bootout", ops)
-                self.assertEqual(backend.is_active("factory-widgets.timer"), "inactive")
-                # Resume reloads the agent; the plist was never disabled.
-                backend.resume_timer("factory-widgets.timer")
-                self.assertIn("bootstrap", ops)
-                self.assertEqual(backend.is_active("factory-widgets.timer"), "active")
+            run = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+            backend = service.LaunchdBackend(run, home=Path(directory), uid=501, raw_path=os.defpath)
+            for method in (backend.pause_timer, backend.resume_timer):
+                with self.assertRaises(NotImplementedError) as raised:
+                    method("factory-widgets.timer", timeout=1)
+                self.assertIn("unsupported_platform", str(raised.exception))
+                self.assertIn("issues/199", str(raised.exception))
+            run.assert_not_called()
 
     def test_discovery_includes_auxiliary_and_loaded_unregistered_services(self):
         with tempfile.TemporaryDirectory() as directory:

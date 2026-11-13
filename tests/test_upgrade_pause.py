@@ -459,6 +459,88 @@ class UpgradePauseTest(unittest.TestCase):
             self.assertEqual(case.active, {self.timer})
             self.assertEqual(host.engine(host.load(), "local")["sha"], fixtures.TARGET)
 
+    def test_active_set_is_written_durably_before_the_first_stop(self):
+        with self.case() as case:
+            second = "factory-second.timer"
+            case.active = {self.timer, second}
+            case.backend.factory_units.return_value = {self.worker, self.timer, second}
+            seen_before_first_stop = []
+            base_pause = case.backend.pause_timer.side_effect
+
+            def pause(name, **kwargs):
+                if not seen_before_first_stop:
+                    # Read the on-disk config BEFORE the first stop: the full active set
+                    # must already be durably recorded.
+                    saved = (host.engine(host.load(), "local") or {}).get("paused_timers", [])
+                    seen_before_first_stop.append(sorted(saved))
+                return base_pause(name, **kwargs)
+
+            case.backend.pause_timer.side_effect = pause
+            code, _ = self.run_apply(case)
+            self.assertEqual(code, 0, case.output.getvalue())
+            self.assertEqual(seen_before_first_stop, [sorted([self.timer, second])])
+            self.assertEqual(case.active, {self.timer, second})
+
+    def test_restoration_interrupt_before_first_resume_still_resumes_every_timer(self):
+        with self.case() as case:
+            second = "factory-second.timer"
+            case.active = {self.timer, second}
+            case.backend.factory_units.return_value = {self.worker, self.timer, second}
+            base_resume = case.backend.resume_timer.side_effect
+            calls = []
+
+            def resume(name, **kwargs):
+                calls.append(name)
+                if len(calls) == 1:
+                    # The signal lands BEFORE the first resume takes effect: the timer is
+                    # not yet active, so the sweep must retry it, not skip it.
+                    raise SystemExit(143)
+                return base_resume(name, **kwargs)
+
+            case.backend.resume_timer.side_effect = resume
+            with self.assertRaises(SystemExit) as raised:
+                self.run_apply(case)
+            self.assertEqual(raised.exception.code, 143)
+            self.assertEqual(case.active, {self.timer, second})
+            self.assertEqual(host.engine(host.load(), "local").get("paused_timers"), [])
+
+    def test_paused_unit_write_error_is_per_repo_and_does_not_abort_other_repos(self):
+        with self.case(changed=True) as case:
+            case.data["repo"]["acme/other"] = {"path": str(case.other_repo)}
+            attempted = []
+
+            def write(slug, output, backend, runner):
+                attempted.append(slug)
+                if slug == "acme/widgets":
+                    raise host.DistrictError("daemon-reload failed")
+
+            with mock.patch.object(apply, "_write_paused_units", side_effect=write):
+                code, _ = self.run_apply(case)
+            self.assertEqual(code, 1, case.output.getvalue())
+            self.assertEqual(sorted(attempted), ["acme/other", "acme/widgets"])
+            self.assertIn("paused unit write failed", case.output.getvalue())
+            self.assertEqual(case.active, {self.timer})
+            self.assertEqual(host.engine(host.load(), "local")["sha"], fixtures.TARGET)
+
+    def test_unchanged_busy_set_is_journaled_once_not_every_poll(self):
+        with self.case() as case:
+            clock = [0.0]
+            polls = [0]
+
+            def active(name, **kwargs):
+                if name == self.worker:
+                    polls[0] += 1
+                    return "active" if polls[0] <= 4 else "inactive"
+                return "active" if name in case.active else "inactive"
+
+            case.backend.is_active.side_effect = active
+            case.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+            with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+                code, _ = self.run_apply(case, timeout=10)
+            self.assertEqual(code, 0, case.output.getvalue())
+            waiting = [line for line in case.output.getvalue().splitlines() if "drain waiting" in line]
+            self.assertEqual(len(waiting), 1, waiting)
+
 
 
 if __name__ == "__main__":

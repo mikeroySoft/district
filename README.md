@@ -280,11 +280,16 @@ waits up to `--drain-timeout` (default 90 minutes) for existing Factory services
 to finish. It logs progress while waiting. The deadline is
 configurable; expiry aborts replacement and proceeds directly to timer restoration.
 `--drain` is no longer required to make an engine replacement safe.
-Timers stay enabled throughout. On Linux District stops and starts the timer
-unit; on macOS it unloads an idle launchd agent with `launchctl bootout` (never
-`launchctl disable`, which persists), and while a pass is in flight it leaves the
-agent loaded and relies on the District drain flag the scheduled pass consults,
-so a running pass is never killed.
+Timers stay enabled throughout. The pause-and-drain protocol is Linux/systemd
+only: District stops and starts the timer unit, and writes the active-before
+timer set durably (fsync) before the first stop. macOS/launchd is unsupported
+and skipped per host pending [#199](https://github.com/mikeroySoft/district/issues/199):
+an `--upgrade`, engine-target, or explicit pause-and-drain apply skips each
+darwin host (local or a registered remote) with an explicit `unsupported_platform`
+row and no mutation at all (no drain flag, pause, install, or launchctl), excludes
+it from the fleet pre-install checks and the drain peer set, and continues on the
+Linux hosts. The run ends with a `partial:` summary naming the skipped host(s) and
+a non-zero exit; a darwin-only fleet skips everything and exits non-zero.
 
 While those timers are paused, District never stops, kills, or starts a service.
 Linux unit reconciliation uses `factory install --print`; District writes the
