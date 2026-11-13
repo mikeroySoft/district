@@ -8,8 +8,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 
 from district import host
 
@@ -19,43 +18,35 @@ UNIT_FAILED = "be02cf6855d2428ba40df7e9d022f03d"
 STAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})")
 END = re.compile(r"===\s*end\s+rc=(-?\d+)\b")
 
-# Zone abbreviations resolved to fixed minutes east of UTC. Only UNAMBIGUOUS tokens appear here;
-# ambiguous abbreviations (CST = US/China/Cuba, CDT, IST, BST, ...) are omitted so an unresolvable
-# stamp becomes a timestamp_unparseable gap, never a guessed instant. US zones are the District
-# fleet's own zones (Pacific Tank/Ultron); numeric offsets are parsed in _zone_minutes.
-TZ_OFFSETS = {
-    "Z": 0, "UTC": 0, "GMT": 0, "WET": 0, "WEST": 60, "CET": 60, "CEST": 120, "EET": 120,
-    "EEST": 180, "MSK": 180, "GST": 240, "PKT": 300, "ICT": 420, "WIB": 420, "HKT": 480,
-    "SGT": 480, "AWST": 480, "JST": 540, "KST": 540, "ACST": 570, "AEST": 600, "ACDT": 630,
-    "AEDT": 660, "NZST": 720, "NZDT": 780,
-    "EST": -300, "EDT": -240, "MST": -420, "MDT": -360, "PST": -480, "PDT": -420,
-}
 # A real error worth surfacing over benign "0 failed"/"triage OK" pass summaries.
 HARD_ERROR = re.compile(r"\w*(?:error|exception)\b|traceback|\bfatal\b|\bpanic\b", re.I)
 BENIGN = re.compile(r"\b(?:0|no)\s+(?:failed|failures?|errors?)\b|\btriage ok\b", re.I)
 
-# Read paths and launchctl on the owning host, never on the controller.
+# Read paths on the owning host, never on the controller. This collector trusts only UTC evidence:
+# the systemd user journal (`__REALTIME_TIMESTAMP`) and launchd pass logs whose markers carry an
+# ISO-8601 timestamp. Native pass-history parsing from human-zoned launchd/systemctl timestamps is
+# out of scope here and rebuilt on UTC-only inputs in district#204; launchd runs that District can
+# only observe through such local-zone stamps surface as `launchd_history_unsupported`, never as a
+# guessed instant or as healthy evidence.
 # ponytail: inspect the last 4 MiB per log; rotated/older history is not evidence.
 LAUNCHD_LOGS = """\
-import json, os, pathlib, plistlib, re, subprocess, sys
+import json, pathlib, plistlib, subprocess, sys
 expected = json.loads(sys.argv[1])
 home = pathlib.Path.home()
-domain = 'gui/' + str(os.getuid())
 def command(*args):
     try:
         p = subprocess.run(['launchctl', *args], capture_output=True, text=True)
         return p.returncode, p.stdout, p.stderr
     except OSError as exc:
         return 127, '', str(exc)
-rc, disabled, error = command('print-disabled', domain)
 jobs = {}
-errors = [error or disabled] if rc else []
+errors = []
 for plist in (home / 'Library/LaunchAgents').glob('*.plist'):
     try:
         doc = plistlib.loads(plist.read_bytes())
         label = doc.get('Label', plist.stem)
         if 'factory' in label or 'factory' in str(doc.get('ProgramArguments', [])):
-            jobs[label] = (doc, plist.stat().st_mtime)
+            jobs[label] = doc
     except (OSError, ValueError) as exc:
         errors.append(str(plist) + ': ' + str(exc))
 rc, listing, error = command('list')
@@ -65,23 +56,23 @@ else:
     for line in listing.splitlines():
         fields = line.split()
         if len(fields) == 3 and 'factory' in fields[-1]:
-            jobs.setdefault(fields[-1], ({}, None))
+            jobs.setdefault(fields[-1], {})
 for label in expected:
     if not any(label == actual or actual.endswith('.' + label) for actual in jobs):
-        jobs[label] = ({}, None)
+        jobs[label] = {}
 result = []
-for label, (doc, installed) in jobs.items():
+for label, doc in jobs.items():
     root = doc.get('WorkingDirectory') or next(
         (root for stem, root in expected.items() if label == stem or label.endswith('.' + stem)), '')
     paths = [doc[key] for key in ('StandardOutPath', 'StandardErrorPath') if isinstance(doc.get(key), str)]
     error_path = doc.get('StandardErrorPath')
     if not paths:
-        logs = pathlib.Path(root).expanduser() / '.factory/logs'
+        logdir = pathlib.Path(root).expanduser() / '.factory/logs'
         stem = next((stem for stem in expected if label == stem or label.endswith('.' + stem)), label)
-        paths = [str(logs / (stem + '.stdout.log')), str(logs / (stem + '.stderr.log')),
+        paths = [str(logdir / (stem + '.stdout.log')), str(logdir / (stem + '.stderr.log')),
                  str(home / 'Library/Logs' / (stem + '.log'))]
         error_path = paths[1]
-    logs, mtimes, gaps = {}, {}, []
+    logs, gaps = {}, []
     for name in dict.fromkeys(paths):
         try:
             with pathlib.Path(name).expanduser().open('rb') as stream:
@@ -90,20 +81,12 @@ for label, (doc, installed) in jobs.items():
                 if size > 4 * 1024 * 1024:
                     stream.readline()
                 logs[name] = stream.read().decode(errors='replace')
-                mtimes[name] = os.fstat(stream.fileno()).st_mtime
         except FileNotFoundError:
             continue
         except OSError as exc:
             gaps.append(str(exc))
-    rc, status, error = command('print', domain + '/' + label)
-    if rc:
-        gaps.append(error or 'launchctl print unavailable: ' + label)
-    held = re.search(r'^\\s*["\\x27]?' + re.escape(label) + r'["\\x27]?\\s*=>\\s*(?:true|disabled)\\b', disabled, re.M)
-    result.append({'label': label, 'root': root, 'logs': logs, 'mtimes': mtimes,
-                   'stderr': logs.get(error_path, ''), 'status': status,
-                   'enabled': not bool(held) and not doc.get('Disabled', False) and
-                              any(key in doc for key in ('StartInterval', 'StartCalendarInterval', 'KeepAlive')),
-                   'installed_at': installed, 'errors': gaps})
+    result.append({'label': label, 'root': root, 'logs': logs,
+                   'stderr': logs.get(error_path, ''), 'errors': gaps})
 print(json.dumps({'jobs': result, 'errors': errors}))
 """
 
@@ -115,32 +98,6 @@ class PassResult:
     error: str | None = None
 
 
-def _zone_minutes(zone: str | None) -> int | None:
-    """Resolve a zone token to fixed minutes east of UTC, or None if ambiguous/unknown.
-
-    Numeric offsets are parsed explicitly (email.utils misreads them: ``-03`` as ``-00:03``,
-    ``+09`` as ``+00:09``). Alphabetic abbreviations resolve ONLY through TZ_OFFSETS, so
-    ambiguous tokens (CST, IST, BST, ...) return None and surface as a gap.
-    """
-    if not zone:
-        return None
-    token = zone.strip()
-    sign_offset = re.fullmatch(r"([+-])(\d{2})(?::?(\d{2}))?", token)
-    if sign_offset:
-        magnitude = int(sign_offset[2]) * 60 + int(sign_offset[3] or 0)
-        return -magnitude if sign_offset[1] == "-" else magnitude
-    return TZ_OFFSETS.get(token.upper())
-
-
-def _zoned(parsed: datetime, zone: str | None) -> str | None:
-    # Always re-resolve from the zone token; never trust the tzinfo email.utils infers for an
-    # abbreviation, which silently mis-reads ambiguous (CST) and short numeric (-03) zones.
-    minutes = _zone_minutes(zone)
-    if minutes is None:
-        return None
-    return parsed.replace(tzinfo=timezone(timedelta(minutes=minutes))).isoformat()
-
-
 def _stamp(line: str) -> str | None:
     match = STAMP.search(line)
     if match:
@@ -148,22 +105,7 @@ def _stamp(line: str) -> str | None:
             return datetime.fromisoformat(match[0].replace("Z", "+00:00")).isoformat()
         except ValueError:
             pass
-    native = re.search(r"(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})\s+(\S+)", line)
-    if native:
-        try:
-            parsed = datetime.fromisoformat(f"{native[1]} {native[2]}")
-        except ValueError:
-            return None
-        return _zoned(parsed, native[3])
-    # launchd shell jobs commonly use `date`, including CET/JST/PST rather than ISO.
-    plain = re.search(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(\S+)\s+\d{4}", line)
-    if not plain:
-        return None
-    try:
-        parsed = parsedate_to_datetime(plain[0])
-    except (ValueError, TypeError):
-        return None
-    return _zoned(parsed, plain[1])
+    return None
 
 
 def _error(line: str) -> bool:
@@ -227,14 +169,7 @@ def threshold(data: dict, name: str) -> int:
 
 def describe(alert: dict) -> str:
     prefix = f"{alert['host']} {alert['repo'] or 'unregistered'} {alert['label']}: "
-    if alert["rule"] == "stalled":
-        detail = f"0 runs in last 2 h (0 failures); last run {alert['last_run_at'] or 'never'}"
-    elif alert["rule"] == "failure_rate":
-        detail = f"{alert['count']}/{alert['total']} runs failed in last 6 h"
-        if alert.get("undated_count"):
-            detail += f" (includes {alert['undated_count']} undated retained runs; window uncertain)"
-    else:
-        detail = f"last {alert['count']} factory passes failed; first failure {alert['first_failed_at'] or 'undated'}"
+    detail = f"last {alert['count']} factory passes failed; first failure {alert['first_failed_at']}"
     error = alert["first_error"] or alert["last_error"]
     return prefix + detail + (f"; {error}" if error else "")
 
@@ -267,44 +202,17 @@ def _launchd_history(payload: dict) -> list[PassResult]:
     return passes
 
 
-def _properties(text: str) -> dict[str, str]:
-    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
-
-
 def _systemd_job(runner, label: str, root: str, timeout: float) -> dict:
-    service = _properties(_output(runner, ["systemctl", "--user", "show", f"{label}.service",
-        "--property=ExecMainStatus,Result,ExecMainStartTimestamp,ExecMainExitTimestamp,ActiveState,ActiveEnterTimestamp"], timeout))
-    timer = _properties(_output(runner, ["systemctl", "--user", "show", f"{label}.timer",
-        "--property=UnitFileState,ActiveState,LastTriggerUSec,ActiveEnterTimestamp"], timeout))
     gaps = []
     try:
         text = _output(runner, ["journalctl", "--user", "-u", f"{label}.service", "--output=json",
                                "--no-pager", "-n", "10000"], timeout)
-        passes, pending_error = journal_passes(text, f"{label}.service")
+        passes, _ = journal_passes(text, f"{label}.service")
     except OSError as exc:
         code = "journalctl_unavailable" if isinstance(exc, FileNotFoundError) or "not found" in str(exc) else "pass_history_unavailable"
         gaps.append({"code": code, "error": str(exc)})
-        passes, pending_error = [], None
-    service_start = service.get("ExecMainStartTimestamp", "")
-    service_exit = service.get("ExecMainExitTimestamp", "")
-    trigger = timer.get("LastTriggerUSec", "")
-    last_run = _stamp(service_start) or _stamp(trigger)
-    completed = _stamp(service_exit) or last_run
-    # A present but unresolvable timestamp (unknown local-zone abbreviation) must surface as a gap,
-    # never be silently dropped into "no evidence".
-    for raw in (service_start, service_exit, trigger):
-        if re.search(r"\d{4}-\d{2}-\d{2}", raw) and _stamp(raw) is None:
-            gaps.append({"code": "timestamp_unparseable",
-                         "error": f"{label}: unparseable service timestamp {raw.strip()!r}"})
-            break
-    if (completed and "ExecMainStatus" in service and service.get("ActiveState") not in ("active", "activating")
-            and (not passes or not passes[-1].at or datetime.fromisoformat(completed) > datetime.fromisoformat(passes[-1].at))):
-        failed = service["ExecMainStatus"] != "0" or service.get("Result", "success") != "success"
-        passes.append(PassResult(failed, completed, pending_error or
-                                 f"ExecMainStatus={service['ExecMainStatus']} Result={service.get('Result', 'unknown')}"))
-    return {"label": label, "root": root, "passes": passes, "enabled": timer.get("UnitFileState") in ("enabled", "enabled-runtime"),
-            "last_run_at": last_run, "installed_at": _stamp(timer.get("ActiveEnterTimestamp", "")),
-            "errors": gaps, "running": service.get("ActiveState") in ("active", "activating")}
+        passes = []
+    return {"label": label, "root": root, "passes": passes, "errors": gaps}
 
 
 def _jobs(runner, platform: str, expected: dict[str, str], timeout: float) -> tuple[list[dict], list[dict]]:
@@ -313,24 +221,6 @@ def _jobs(runner, platform: str, expected: dict[str, str], timeout: float) -> tu
         jobs = payload["jobs"]
         for job in jobs:
             job["passes"] = _launchd_history(job)
-            dated = [p.at for p in job["passes"] if p.at]
-            job["last_run_at"] = dated[-1] if dated else None
-            if not job["last_run_at"] and job["passes"] and job["mtimes"]:
-                job["last_run_at"] = datetime.fromtimestamp(max(job["mtimes"].values()), timezone.utc).isoformat()
-            status = job["status"]
-            exit_code = re.search(r"last exit code\s*=\s*(-?\d+)", status)
-            runs = re.search(r"runs\s*=\s*(\d+)", status)
-            job["runs"] = int(runs[1]) if runs else None
-            # The manager is authoritative for the latest exit, never N invented exits.
-            if exit_code and (job["runs"] is None or job["runs"] > 0):
-                failed = int(exit_code[1]) != 0
-                if job["passes"]:
-                    job["passes"][-1] = replace(job["passes"][-1], failed=failed)
-                else:
-                    job["passes"] = [PassResult(failed, None, f"launchctl last exit code={exit_code[1]}")]
-            installed = job["installed_at"]
-            job["installed_at"] = datetime.fromtimestamp(installed, timezone.utc).isoformat() if installed else None
-            job["running"] = bool(re.search(r"^\s*state\s*=\s*running\s*$", status, re.M))
             job["errors"] = [{"code": "pass_history_unavailable", "error": error} for error in job["errors"]]
         return jobs, [{"code": "pass_history_unavailable", "error": error} for error in payload["errors"]]
     labels = set(expected)
@@ -350,32 +240,14 @@ def _jobs(runner, platform: str, expected: dict[str, str], timeout: float) -> tu
     return jobs, []
 
 
-def _alerts(job: dict, count: int, name: str, slug: str | None, at: datetime) -> list[dict]:
+def _alerts(job: dict, count: int, name: str, slug: str | None) -> list[dict]:
     passes = job["passes"]
-    base = {"host": name, "repo": slug, "label": job["label"], "last_run_at": job.get("last_run_at")}
-
-    def alert(rule, items, total, window):
-        failed = [item for item in items if item.failed]
-        return {**base, "rule": rule, "count": len(failed), "total": total, "window_hours": window,
-                "first_failed_at": failed[0].at if failed else None,
-                "last_failed_at": failed[-1].at if failed else None,
-                "first_error": failed[0].error if failed else None,
-                "last_error": failed[-1].error if failed else None}
-
-    alerts = []
     recent = passes[-count:]
-    if len(recent) == count and all(item.failed for item in recent):
-        alerts.append(alert("failure_streak", recent, count, None))
-    start = at - timedelta(hours=6)
-    window = [p for p in passes if p.at is None or start <= datetime.fromisoformat(p.at) <= at]
-    if window and sum(p.failed for p in window) > len(window) / 2:
-        rate = alert("failure_rate", window, len(window), 6)
-        rate["undated_count"] = sum(p.at is None for p in window)
-        alerts.append(rate)
-    last = job.get("last_run_at") or (passes[-1].at if passes else job.get("installed_at"))
-    if job.get("enabled") and not job.get("running") and last and at - datetime.fromisoformat(last) >= timedelta(hours=2):
-        alerts.append(alert("stalled", [], 0, 2))
-    return alerts
+    if len(recent) != count or not all(item.failed and item.at for item in recent):
+        return []
+    return [{"host": name, "repo": slug, "label": job["label"], "rule": "failure_streak",
+             "count": count, "first_failed_at": recent[0].at, "last_failed_at": recent[-1].at,
+             "first_error": recent[0].error, "last_error": recent[-1].error}]
 
 
 def collect(data: dict, *, skip: set[str] | None = None, timeout: float = 10) -> tuple[list[dict], list[dict]]:
@@ -418,10 +290,13 @@ def collect(data: dict, *, skip: set[str] | None = None, timeout: float = 10) ->
                     gap("unrecognized_factory_job", f"{name} {label}: factory job is not assigned to a registered repository", label=label)
                 for error in job["errors"]:
                     gap(error["code"], error["error"], slug, label)
-                undated = sum(p.at is None for p in job["passes"])
-                if undated:
-                    gap("undated_history", f"{name} {label}: {undated} undated runs retained; six-hour timing uncertain", slug, label)
-                alerts.extend(_alerts(job, counts[name], name, slug, datetime.now(timezone.utc)))
+                if platform == "macos" and job["passes"] and all(p.at is None for p in job["passes"]):
+                    # The only runs District can see here are launchd stamps it cannot resolve to UTC.
+                    # Surface the gap honestly (district#204) instead of inventing an instant or health.
+                    gap("launchd_history_unsupported",
+                        f"{name} {label}: native pass history not yet supported for launchd hosts (see district#204)",
+                        slug, label)
+                alerts.extend(_alerts(job, counts[name], name, slug))
         except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, ValueError, TypeError, KeyError, OverflowError) as exc:
             gap("pass_history_unavailable", str(exc), unreachable=isinstance(exc, host.RemoteHostError))
         return alerts, gaps

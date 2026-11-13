@@ -58,80 +58,36 @@ class TestJobHealth(DistrictCase):
                  "MESSAGE": "Failed" if code else "Finished"},
             ])
         self.stub("journalctl", ("*", "\n".join(map(json.dumps, records))))
-        when = at + timedelta(minutes=10 * len(codes))
         self.stub("systemctl", ("list-units *", "factory-widgets.service loaded inactive dead\n"),
-                  ("show factory-widgets.service *", f"Id=factory-widgets.service\nExecMainStatus={codes[-1] if codes else 0}\nResult={'exit-code' if codes and codes[-1] else 'success'}\nExecMainStartTimestamp={when.isoformat()}\n"),
-                  ("show factory-widgets.timer *", f"Id=factory-widgets.timer\nUnitFileState={'enabled' if enabled else 'disabled'}\nLastTriggerUSec={when.isoformat()}\n"))
+                  ("*", "", 0))
         return data
 
     def entry(self):
         code, out = self.district("status", "--json")
         return code, json.loads(out)["acme/widgets"]
 
-    def test_launchd_plain_date_three_dispatch_failures_alert(self):
-        self.launchd([1, 1, 1])
-        code, entry = self.entry()
-        self.assertEqual(code, 1, entry)
-        alert = entry["failure_streaks"][0]
-        self.assertEqual((alert["host"], alert["label"], alert["count"]),
-                         ("ultron", "com.mikeroysoft.factory-widgets", 3))
-        self.assertIn(ERROR, alert["first_error"])
-        self.assertEqual(entry["assessment"], "attention")
-        _, out = self.district("status")
-        for text in ("ultron", alert["label"], "3", ERROR):
-            self.assertIn(text, out)
-        _, out = self.district("doctor", "--json")
-        self.assertTrue(any(row["status"] == "FAIL" and ERROR in row["detail"]
-                            for row in json.loads(out)["rows"]))
-
-    def test_healthy_launchd_has_no_alert(self):
-        self.launchd([0, 0, 0])
+    def test_healthy_systemd_has_no_alert(self):
+        self.systemd([0, 0, 0])
         _, entry = self.entry()
         self.assertEqual(entry["failure_streaks"], [])
 
-    def test_undated_runs_are_counted_and_timing_gap_is_visible(self):
-        self.launchd([1, 1, 1], dated=False)
-        code, entry = self.entry()
-        self.assertEqual(code, 1, entry)
-        self.assertEqual(entry["failure_streaks"][0]["count"], 3)
-        self.assertIn("undated", str(entry["pass_history_errors"]))
-
-    def test_systemd_three_failed_exec_status_runs_alert(self):
+    def test_systemd_three_failed_journal_runs_alert_with_first_error(self):
         self.systemd([1, 1, 1])
         code, entry = self.entry()
         self.assertEqual(code, 1, entry)
         self.assertEqual(entry["failure_streaks"][0]["count"], 3)
         self.assertIn(ERROR, entry["failure_streaks"][0]["first_error"])
 
-    def test_healthy_systemd_has_no_alert(self):
-        self.systemd([0, 0, 0])
-        _, entry = self.entry()
-        self.assertEqual(entry["failure_streaks"], [])
-
-    def test_more_than_half_failed_in_six_hours_even_after_success(self):
-        for backend in (self.launchd, self.systemd):
-            with self.subTest(backend=backend.__name__):
-                backend([1, 0, 1, 1, 0])
-                code, entry = self.entry()
-                self.assertEqual(code, 1, entry)
-                rate = next(a for a in entry["failure_streaks"] if a["rule"] == "failure_rate")
-                self.assertEqual((rate["count"], rate["total"], rate["window_hours"]), (3, 5, 6))
-
-    def test_half_failed_and_old_failures_do_not_trigger_rate(self):
-        self.systemd([1, 0])
-        self.assertEqual(self.entry()[1]["failure_streaks"], [])
-        self.systemd([1, 0, 1, 1, 0], age=7, enabled=False)
-        self.assertEqual(self.entry()[1]["failure_streaks"], [])
-
-    def test_enabled_but_stalled_job_alerts_on_both_backends(self):
-        for backend in (self.launchd, self.systemd):
-            with self.subTest(backend=backend.__name__):
-                backend([0], age=3)
-                code, entry = self.entry()
-                self.assertEqual(code, 1, entry)
-                stalled = next(a for a in entry["failure_streaks"] if a["rule"] == "stalled")
-                self.assertEqual(stalled["window_hours"], 2)
-                self.assertEqual(stalled["count"], 0)
+    def test_exact_job_label_wins_over_shared_working_directory(self):
+        data = self.systemd([1, 1, 1])
+        data["repo"]["acme/other"] = dict(data["repo"]["acme/widgets"])
+        host.save(data)
+        code, out = self.district("status", "--json")
+        self.assertEqual(code, 1, out)
+        fleet = json.loads(out)
+        self.assertNotIn("host:local", fleet)
+        self.assertEqual(fleet["acme/widgets"]["failure_streaks"][0]["count"], 3)
+        self.assertEqual(fleet["acme/other"]["failure_streaks"], [])
 
     def test_unassigned_host_and_unrecognized_job_are_findings(self):
         self.launchd([1, 1, 1], assigned=False, label="factory-orphan")
@@ -140,7 +96,6 @@ class TestJobHealth(DistrictCase):
         self.assertIn("host_without_repos", out)
         self.assertIn("unrecognized_factory_job", out)
         self.assertIn("factory-orphan", out)
-        self.assertIn(ERROR, out)
 
     def test_missing_journalctl_is_named_in_status_and_health(self):
         self.systemd([0])
@@ -162,49 +117,15 @@ class TestJobHealth(DistrictCase):
         _, entry = self.entry()
         self.assertIn("journalctl_unavailable", str(entry["findings"]))
 
-    def test_systemd_native_timestamp_detects_stall_without_journal_history(self):
-        self.systemd([0])
-        when = (datetime.now(timezone.utc) - timedelta(hours=3)).strftime("%a %Y-%m-%d %H:%M:%S UTC")
-        self.stub("journalctl", ("*", ""))
-        self.stub("systemctl", ("show factory-widgets.service *",
-                               f"ExecMainStatus=0\nResult=success\nExecMainStartTimestamp={when}\n"),
-                  ("show factory-widgets.timer *", f"UnitFileState=enabled\nLastTriggerUSec={when}\n"))
-        code, entry = self.entry()
-        self.assertEqual(code, 1, entry)
-        self.assertEqual(entry["failure_streaks"][0]["rule"], "stalled")
-
-    def test_manager_exit_does_not_invent_historical_runs(self):
-        self.launchd([])
-        self.stub("launchctl", ("print */com.mikeroysoft.factory-widgets",
-                               "state = exited\nruns = 300\nlast exit code = 1\n"))
-        _, entry = self.entry()
-        self.assertFalse(any(a["rule"] == "failure_streak" for a in entry["failure_streaks"]))
-        rate = next(a for a in entry["failure_streaks"] if a["rule"] == "failure_rate")
-        self.assertEqual((rate["count"], rate["total"], rate["undated_count"]), (1, 1, 1))
-
-    def test_disabled_or_running_launchd_does_not_stall(self):
-        self.launchd([0], age=3)
-        for state, disabled in (("exited", "true"), ("running", "false")):
-            with self.subTest(state=state):
-                self.stub("launchctl", ("print-disabled *", f'"com.mikeroysoft.factory-widgets" => {disabled}'),
-                          ("print */com.mikeroysoft.factory-widgets",
-                           f"state = {state}\nruns = 1\nlast exit code = 0\n"))
-                self.assertEqual(self.entry()[1]["failure_streaks"], [])
-
-    def test_streak_and_rate_share_one_finding_with_both_evidence_windows(self):
+    def test_launchd_native_history_reports_not_yet_supported(self):
+        # Native launchd run timestamps (the shell's local-zone `date` format) are out of scope and
+        # tracked in district#204. They must surface as an explicit gap, never a streak, and the repo
+        # must not be reported healthy on the strength of that absent, unresolvable evidence.
         self.launchd([1, 1, 1])
-        _, entry = self.entry()
-        findings = [f for f in entry["findings"] if f["condition_code"] == "runtime.dispatcher_failed"]
-        self.assertEqual(len(findings), 1)
-        self.assertEqual(len(findings[0]["evidence"]), 2)
-
-    def test_exact_job_label_wins_over_shared_working_directory(self):
-        data = self.systemd([1, 1, 1])
-        data["repo"]["acme/other"] = dict(data["repo"]["acme/widgets"])
-        host.save(data)
-        code, out = self.district("status", "--json")
-        self.assertEqual(code, 1, out)
-        fleet = json.loads(out)
-        self.assertNotIn("host:local", fleet)
-        self.assertEqual(fleet["acme/widgets"]["failure_streaks"][0]["count"], 3)
-        self.assertEqual(fleet["acme/other"]["failure_streaks"], [])
+        code, entry = self.entry()
+        self.assertEqual(entry["failure_streaks"], [], entry)
+        self.assertNotEqual(entry["assessment"], "normal", entry)
+        self.assertTrue(any(gap["code"] == "launchd_history_unsupported"
+                            for gap in entry["pass_history_errors"]), entry)
+        _, out = self.district("status")
+        self.assertIn("not yet supported for launchd hosts (see district#204)", out)

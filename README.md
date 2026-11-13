@@ -77,18 +77,14 @@ registry `disabled_at` holds. Deferred rows keep their existing handling.
 ## Job health
 
 `district status` and `district report` raise operational attention (exit 1),
-and `district doctor` reports `FAIL`, when any of these holds
-**on the same host and job**:
+and `district doctor` reports `FAIL`, when a factory's last N recorded service
+passes **on the same host and job** all failed. `[defaults].failed_pass_streak`
+overrides the threshold (default 3); remote `[hosts.NAME.defaults]` overrides
+apply.
 
-- The last 3 recorded service passes failed. `[defaults].failed_pass_streak`
-  can override this threshold; remote `[hosts.NAME.defaults]` overrides apply.
-- More than half the recorded runs in the last 6 hours failed.
-- An enabled scheduled job has not run for 2 hours and is not currently running.
-  A never-run job uses its installation/activation time when available.
-
-These are read-only alerts, separate from `max_failed_passes` and apply's timer
-failure cap. A successful latest run clears the streak, but not an unhealthy
-six-hour failure rate. Nonzero service/dispatch exits count as failures even
+This is a read-only alert, separate from `max_failed_passes` and apply's timer
+failure cap. One success among the last N passes clears the streak; fewer than N
+completions does not alert. Nonzero service/dispatch exits count as failures even
 when triage or watch succeeded. A manager's latest exit is never expanded into
 multiple runs, and repeated status polls never create history.
 
@@ -99,39 +95,33 @@ are matched by the `factory-REPO` suffix or an unambiguous working directory.
 `--slug` limits repository output, not host discovery. Unreachable hosts retain
 unknown exit 2 when there is no other operational attention.
 
-Linux reads the systemd user journal plus `ExecMainStatus`, `Result`, timer
-enablement, and last-start/trigger timestamps. macOS reads `launchctl print`
-(`last exit code`, `runs`, running state), disabled-job state (`true` or
-`disabled`, matched to the exact label), and the actual plist's stdout/stderr
-logs. If no log paths are declared, it tries conventional
-`.factory/logs/factory-REPO.{stdout,stderr}.log` and
-`~/Library/Logs/factory-REPO.log` paths. macOS needs no journalctl. A dashboard
-or history read that cannot launch journalctl produces `journalctl_unavailable`
-rather than a traceback escaping District.
+Linux reads retained systemd user-journal unit completion results, including
+failures before Factory can import. macOS reads the launchd plist's stdout/stderr
+pass logs, or conventional `.factory/logs/factory-REPO.{stdout,stderr}.log` and
+`~/Library/Logs/factory-REPO.log` paths when no plist log paths are declared.
+macOS needs no journalctl. A dashboard or history read that cannot launch
+journalctl produces `journalctl_unavailable` rather than a traceback escaping
+District.
 
-Pass logs use `=== end rc=CODE` markers. Opening/end markers may carry ISO-8601
-timestamps or the shell's plain `date` format. Local-timezone abbreviations in
-`date` output and `systemctl show` timestamps (UTC, CET, JST, and similar) are
-resolved to fixed UTC offsets; a present but unresolvable timestamp becomes a
-`timestamp_unparseable` gap rather than silently dropping the run. Undated
-completions still count toward streaks and the failure-rate sample; the rate
-explicitly marks its window uncertain and reports the undated count rather
-than silently discarding runs. Log mtime supplies last-run timing only for an
-actual undated log completion. A manager-only exit does not inherit an old
-log/plist timestamp; installation time is used only for a never-run job.
-Missing timing is not proof of a stall.
-Reads are bounded to the latest 10,000 journal records or 4 MiB per log;
-rotated-away history is not evidence.
+Pass logs need `=== end rc=CODE` markers and an ISO-8601 timestamp with timezone
+on the pass's opening marker or end line. Streaks are computed only from UTC
+evidence: journal `__REALTIME_TIMESTAMP` and ISO-8601 pass-log stamps. Native
+pass-history parsing from human-zoned launchd/`systemctl show` timestamps
+(local-timezone abbreviations, plain `date` output, timer activation) and the
+failure-rate and stall checks built on it are **not supported here**; they are
+tracked in [district#204](https://github.com/mikeroySoft/district/issues/204)
+and rebuilt on UTC-only inputs. Until then, launchd runs District can observe
+only through such local-zone stamps surface as a `launchd_history_unsupported`
+gap, never a streak and never healthy evidence. Reads are bounded to the latest
+10,000 journal records or 4 MiB per log; rotated-away history is not evidence.
 
-`status --json` retains the per-repo `failure_streaks` list for job-health
-alerts. Each alert includes `host`, `repo` (null for an unregistered job),
-`label`, `rule` (`failure_streak`, `failure_rate`, or `stalled`), `count`
-(failures), `total`, `window_hours`, `first_failed_at`, `last_failed_at`,
-`last_run_at`, and nullable `first_error`/`last_error`. Rate alerts also include
-`undated_count`. The table names the host, label, failure count, window, and
+`status --json` includes the per-repo `failure_streaks` list. Each alert
+includes `host`, `repo` (null for an unregistered job), `label`, `rule`
+(`failure_streak`), `count`, `first_failed_at`, `last_failed_at`, and nullable
+`first_error`/`last_error`. The table names the host, label, failure count, and
 first real error line; benign `0 failed`/`triage OK` summaries never displace an
-actual error. `pass_history_errors` includes host, repo, label, code,
-error, and unreachable state; read errors are not failed job runs.
+actual error. `pass_history_errors` includes host, repo, label, code, error, and
+unreachable state; read errors are not failed job runs.
 
 ## Ownership
 

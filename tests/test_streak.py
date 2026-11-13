@@ -282,25 +282,3 @@ class TestErrorHeuristic(unittest.TestCase):
         text = "\n".join(map(json.dumps, records))
         passes, _ = streak.journal_passes(text, "factory-widgets.service")
         self.assertEqual(passes[0].error, "AttributeError: dispatch crashed")
-
-
-class TestZoneParsing(unittest.TestCase):
-    def test_numeric_offsets_are_parsed_explicitly(self):
-        # email.utils misreads these (-03 as -00:03, +09 as +00:09); _stamp must not.
-        cases = {
-            "2026-11-04 17:00:00 -03": "2026-11-04T17:00:00-03:00",
-            "2026-11-04 17:00:00 +0530": "2026-11-04T17:00:00+05:30",
-            "2026-11-04 17:00:00 +05:30": "2026-11-04T17:00:00+05:30",
-            "2026-11-04 17:00:00 +09": "2026-11-04T17:00:00+09:00",
-            "2026-11-04 17:00:00 Z": "2026-11-04T17:00:00+00:00",
-            "2026-11-04 17:00:00 UTC": "2026-11-04T17:00:00+00:00",
-            "2026-11-04 17:00:00 CET": "2026-11-04T17:00:00+01:00",
-            "2026-11-04 17:00:00 PST": "2026-11-04T17:00:00-08:00",
-        }
-        for line, expected in cases.items():
-            self.assertEqual(streak._stamp(line), expected, line)
-
-    def test_ambiguous_zone_abbreviations_are_rejected(self):
-        # Ambiguous abbreviations must not silently mis-resolve; they become an unparseable gap.
-        for zone in ("CST", "CDT", "IST", "BST", "AST", "XYZ"):
-            self.assertIsNone(streak._stamp(f"2026-11-04 17:00:00 {zone}"), zone)
