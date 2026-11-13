@@ -4,7 +4,7 @@ Factory reads `[defaults.*]` and `[repo."owner/name".*]` (host-owned
 tables only); District keeps its own keys beside them: `[defaults]`
 clone_dir / factory_repo / factory_ref (`latest-release`, `latest-odd`, tag, or branch) /
 factory_track_branch (explicit opt-in for configured branches) /
-factory_extras / engine_idle_timeout / min_package_age / max_failed_passes,
+factory_extras / min_package_age / max_failed_passes,
 `[defaults.engine]` ref / sha / previous / installed_at (local engine state),
 `[hosts.*]` SSH / platform / root / Xcode version / engine (remote engine
 state), and per repo `path`, `host`, `toolchain`, `disabled_at`,
@@ -37,7 +37,6 @@ DEFAULTS = {
     "clone_dir": "~/dev",
     "factory_repo": "https://github.com/mikeroySoft/factory",
     "factory_extras": [],
-    "engine_idle_timeout": "30min",
     "min_package_age": "24h",
     "max_failed_passes": 10,
     "failed_pass_streak": 6,
@@ -165,8 +164,16 @@ def save(data: dict) -> None:
     if original is not None:
         p.with_name(_backup_name(p.name)).write_bytes(original)
     tmp = p.with_suffix(".toml.tmp")
-    tmp.write_text(tomli_w.dumps(data))
+    with open(tmp, "w") as handle:
+        handle.write(tomli_w.dumps(data))
+        handle.flush()
+        os.fsync(handle.fileno())
     os.replace(tmp, p)
+    dir_fd = os.open(p.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def default(data: dict, key: str):

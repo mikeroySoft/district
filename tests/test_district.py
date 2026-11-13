@@ -258,6 +258,7 @@ class DistrictCase(unittest.TestCase):
         })
         self.env.start()
         self.addCleanup(self.env.stop)
+        self.enterContext(mock.patch.object(apply.syslog, "syslog"))
         self.assertTrue(host.path().is_relative_to(self.tmp), host.path())
         release_sha = "0" * 40
         release = [[{
@@ -298,7 +299,10 @@ class DistrictCase(unittest.TestCase):
         factory.unlink()
         factory.symlink_to(tool / "bin/factory")
         (tool / "uv-receipt.toml").write_text(
-            f'[tool]\nrequirements = [{{name="factory", rev="{release_sha}"}}]\n')
+            '[tool]\nrequirements = [{name="factory", rev="' + "0" * 40 + '"}]\n')
+        metadata = tool / "lib/python3.12/site-packages/factory-0.2.0.dist-info/METADATA"
+        metadata.parent.mkdir(parents=True)
+        metadata.write_text("Name: factory\nVersion: 0.2.0\n")
 
     def stub(self, name: str, *cases: tuple[str, str] | tuple[str, str, int]) -> None:
         exe = self.bin / name
@@ -355,6 +359,9 @@ class DistrictCase(unittest.TestCase):
             wrapper.chmod(0o755)
             (tool_bin.parent / "uv-receipt.toml").write_text(
                 '[tool]\nrequirements = [{name="factory", rev="' + "0" * 40 + '"}]\n')
+            metadata = tool_bin.parent / "lib/python3.12/site-packages/factory-0.2.0.dist-info/METADATA"
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text("Name: factory\nVersion: 0.2.0\n")
             cli_dir = home / ".local/bin"
             cli_dir.mkdir(parents=True)
             (cli_dir / "factory").symlink_to(wrapper)
@@ -2130,8 +2137,7 @@ class ApplyTest(DistrictCase):
         self.assertFalse(any(call.startswith("disable ") for call in self.calls("systemctl")))
 
     def timer_state_apply(self, states: dict[str, str], *, engine: bool = False,
-                          install_starts_timer: bool = True, handland: str = "",
-                          services: dict[str, str] | None = None):
+                          install_starts_timer: bool = True, handland: str = ""):
         """Apply changed units through a stateful backend and verified fake uv tool."""
         root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=self.tmp)))
         repos = {}
@@ -2146,7 +2152,6 @@ class ApplyTest(DistrictCase):
             data["defaults"] = {
                 "factory_ref": "main",
                 "factory_track_branch": True,
-                "engine_idle_timeout": "1s",
                 "engine": {"ref": "main", "sha": old},
             }
         host.save(data)
@@ -2155,14 +2160,15 @@ class ApplyTest(DistrictCase):
         receipt_path.write_text(f'[tool]\nrequirements = [{{name="factory", rev="{old}"}}]\n')
 
         backend = mock.Mock()
-        backend.configuration.return_value = {"platform": "linux", "executable": "systemctl"}
-        services = services or {}
+        backend.configuration.return_value = {
+            "platform": "linux", "executable": "systemctl", "unit_dir": str(host.unit_dir()),
+        }
         backend.factory_units.return_value = {
             f"factory-{Path(table['path']).name}{suffix}"
             for table in repos.values() for suffix in (".service", ".timer")
-        } | set(services)
+        }
         backend.definitions_changed.return_value = True
-        backend.is_active.side_effect = lambda name, **_: services.get(name, states.get(name, "inactive"))
+        backend.is_active.side_effect = lambda name, **_: states.get(name, "inactive")
         backend.status.return_value = mock.Mock(loaded=False, unit_file_state="enabled")
         backend.enable.side_effect = lambda name, enabled=True, **_: (
             states.update({name: "active" if enabled else "inactive"})
@@ -2261,19 +2267,6 @@ class ApplyTest(DistrictCase):
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], "a" * 40)
         self.assertEqual(receipt["reenabled"], ["factory-alpha.timer"])
 
-    def test_engine_swap_defers_while_a_factory_service_is_busy(self) -> None:
-        for state in ("active", "activating", "deactivating"):
-            with self.subTest(state=state):
-                states = {"factory-alpha.timer": "active", "factory-beta.timer": "inactive"}
-                worker = "factory-unregistered-worker.service"
-                receipt, _, commands, _ = self.timer_state_apply(
-                    states, engine=True, services={worker: state}, install_starts_timer=False)
-
-                self.assertFalse(any(argv[:3] == ["uv", "tool", "install"] for argv in commands))
-                self.assertEqual(host.load()["defaults"]["engine"]["sha"], "b" * 40)
-                self.assertEqual(receipt["deferred"][0]["target"], "engine")
-                self.assertIn(worker, receipt["deferred"][0]["reason"])
-                self.assertEqual(states, {"factory-alpha.timer": "active", "factory-beta.timer": "inactive"})
 
     def test_active_handland_unit_does_not_block_engine_swap(self) -> None:
         for state in ("active", "activating", "deactivating"):
@@ -2385,11 +2378,11 @@ class ApplyTest(DistrictCase):
     def test_apply_reports_fleet_engine_remote_failure_as_a_held_row(self) -> None:
         """#134 round 4: a host dropping inside the fleet engine step is an `engine fleet … held`
         row with exit 1, and every host still gets its repos applied."""
-        def drop(*_args):
+        def drop(*_args, **_kw):
             raise host.RemoteHostError("ultron", "ssh: connect to host ultron.example port 22: Connection refused")
 
         code, out, _, reconciled, applied = self.fleet_apply(
-            lambda data, name: (f"run-{name}", f"backend-{name}"), reconcile=drop)
+            lambda data, name, **_kw: (f"run-{name}", f"backend-{name}"), reconcile=drop)
 
         self.assertEqual(code, 1, out)
         reconciled.assert_called_once()
@@ -2401,12 +2394,11 @@ class ApplyTest(DistrictCase):
     OLD, NEW = "0" * 40, "a" * 40
 
     def run_fleet(self, ultron_spec: tuple, benito_spec: tuple):
-        """reconcile_fleet_engine over fake ultron/benito; a spec is (resolves, install_rc[, ci_rc[, busy[, drop]]]),
-        where ssh to that host exits 255 on any command containing `drop`."""
+        """Run fleet reconciliation; specs are (resolved SHA, install rc[, CI rc[, drop match]])."""
         old, new = self.OLD, self.NEW
 
         def runner(name: str, resolves: str, install_rc: int, log: list[str],
-                   ci_rc: int = 0, busy: bool = False, drop: str | None = None) -> host.RemoteRunner:
+                   ci_rc: int = 0, drop: str | None = None) -> host.RemoteRunner:
             installed = [old]
             def transport(argv, **_kwargs):
                 command = remote_command(argv)
@@ -2416,6 +2408,17 @@ class ApplyTest(DistrictCase):
                 log.append(command)
                 if drop and drop in command:
                     return subprocess.CompletedProcess(argv, 255, "", f"ssh: connect to host {name}.example port 22: Connection refused")
+                if "XDG_STATE_HOME" in command:
+                    return subprocess.CompletedProcess(argv, 0, str(self.tmp / name / "drain") + "\n", "")
+                if "factory-*.dist-info/METADATA" in command:
+                    return subprocess.CompletedProcess(
+                        argv, 0, json.dumps(["Name: factory\nVersion: 0.2.0\n"]), "")
+                if "factory --version" in command:
+                    return subprocess.CompletedProcess(argv, 0, "factory 0.2.0\n", "")
+                if "os.replace" in command or "unlink" in command:
+                    parts = shlex.split(command)
+                    return subprocess.run([sys.executable, *parts[1:]], capture_output=True, text=True,
+                                          input=_kwargs.get("input"), timeout=_kwargs.get("timeout"))
                 if "Path.home()" in command:
                     home = self.tmp / name
                     out = json.dumps({"home": str(home), "config_home": str(home / ".config"),
@@ -2450,7 +2453,7 @@ class ApplyTest(DistrictCase):
 
         def run_fleet(ultron: tuple, benito: tuple):
             host.save({
-                "defaults": {"factory_ref": "main", "factory_track_branch": True, "engine_idle_timeout": "30min"},
+                "defaults": {"factory_ref": "main", "factory_track_branch": True},
                 "hosts": {
                     name: {"ssh": f"factory@{name}.example",
                            "engine": {"ref": "main", "sha": old}}
@@ -2458,16 +2461,10 @@ class ApplyTest(DistrictCase):
                 },
                 "repo": {"acme/widgets": {"path": "/srv/widgets", "hosts": ["ultron", "benito"], "triage_host": "ultron"}},
             })
-            clock = [0.0]
-            def backend(busy: bool):
+            def backend():
                 unit = mock.Mock()
                 unit.configuration.return_value = {"platform": "linux"}
-                def active(name, **kwargs):
-                    if busy and name.endswith(".service"):
-                        clock[0] = 1800
-                        return "activating"
-                    return "inactive"
-                unit.is_active.side_effect = active
+                unit.is_active.return_value = "inactive"
                 unit.status.return_value = mock.Mock(loaded=False)
                 unit.factory_units.return_value = set()
                 unit.resume_timer.return_value = subprocess.CompletedProcess([], 0, "", "")
@@ -2477,12 +2474,12 @@ class ApplyTest(DistrictCase):
             data = host.load()
             contexts = {
                 name: (runner(name, spec[0], spec[1], logs[name], *spec[2:]),
-                       backend(spec[3] if len(spec) > 3 else False),
+                       backend(),
                        {"acme/widgets": data["repo"]["acme/widgets"]})
                 for name, spec in (("ultron", ultron), ("benito", benito))
             }
             out = io.StringIO()
-            with contextlib.redirect_stdout(out), mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+            with contextlib.redirect_stdout(out):
                 result = apply.reconcile_fleet_engine(data, None, contexts)
             installs = {name: [c.split("@")[-1].split()[0][:1] for c in log if c.startswith("uv tool install")]
                         for name, log in logs.items()}
@@ -2514,16 +2511,11 @@ class ApplyTest(DistrictCase):
             self.assertIn("held by benito (failed)", out)
             self.assertIn("rolled back ultron", out)
 
-    def test_multi_host_engine_checks_every_host_before_installing_any(self) -> None:
+    def test_multi_host_engine_checks_ci_on_every_host_before_installing_any(self) -> None:
         old, new = self.OLD, self.NEW
         with mock.patch.object(host, "sync_remote_config"):
-            result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, True))
-            self.assertEqual(result, "deferred", out)
-            self.assertEqual(installs, {"ultron": [], "benito": []})
-            self.assertEqual(engines, {"ultron": old, "benito": old})
-            self.assertIn("held by benito", out)
-
-            result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 1))
+            result, installs, engines, _ = self.run_fleet((new, 0), (new, 0, 1))
+            self.assertEqual(result, "failed")
             self.assertEqual(installs, {"ultron": [], "benito": []})
             self.assertEqual(engines, {"ultron": old, "benito": old})
 
@@ -2532,7 +2524,7 @@ class ApplyTest(DistrictCase):
         names benito as the blocker and puts ultron back instead of escaping with a traceback."""
         old, new = self.OLD, self.NEW
         with mock.patch.object(host, "sync_remote_config"):
-            result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, False, f"@{new}"))
+            result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, f"@{new}"))
         self.assertEqual(result, "failed", out)
         self.assertEqual(installs, {"ultron": ["a", "0"], "benito": ["a", "0"]})
         self.assertEqual(engines, {"ultron": old, "benito": old})
@@ -2542,7 +2534,7 @@ class ApplyTest(DistrictCase):
     def test_fleet_host_dropping_during_rollback_is_reported_stuck(self) -> None:
         old, new = self.OLD, self.NEW
         with mock.patch.object(host, "sync_remote_config"):
-            result, installs, engines, out = self.run_fleet((new, 0, 0, False, f"@{old}"), (new, 1))
+            result, installs, engines, out = self.run_fleet((new, 0, 0, f"@{old}"), (new, 1))
         self.assertEqual(result, "failed", out)
         self.assertEqual(engines, {"ultron": new, "benito": old})
         self.assertIn("held by benito (failed)", out)
@@ -2553,65 +2545,13 @@ class ApplyTest(DistrictCase):
         old, new = self.OLD, self.NEW
         for drop in ("git ls-remote", "gh api "):
             with self.subTest(drop=drop), mock.patch.object(host, "sync_remote_config"):
-                result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, False, drop))
+                result, installs, engines, out = self.run_fleet((new, 0), (new, 0, 0, drop))
                 self.assertEqual(result, "failed", out)
                 self.assertEqual(installs, {"ultron": [], "benito": []})
                 self.assertEqual(engines, {"ultron": old, "benito": old})
                 self.assertIn("benito", out)
                 self.assertIn("host benito unreachable", out)
                 self.assertIn("every host keeps its engine", out)
-
-
-
-    def test_upgrade_defers_when_factory_service_starts_during_timer_window(self) -> None:
-        old, new = "0" * 40, "a" * 40
-        self.register()
-        self.units("widgets")
-        data = host.load()
-        data["defaults"] = {
-            "factory_ref": "main",
-            "engine_idle_timeout": "1s",
-            "engine": {"ref": "main", "sha": old},
-        }
-        host.save(data)
-        tool, _ = host.factory_tool_paths()
-        (tool / "uv-receipt.toml").write_text(
-            f'[tool]\nrequirements = [{{name="factory", rev="{old}"}}]\n')
-        record = install_state.ApplyRun.start()
-        real_run = apply.run
-        backend = host.service_backend()
-        real_active = backend.is_active
-
-        def target_revision(argv, **kwargs):
-            if argv[:3] == ["git", "ls-remote", "--exit-code"]:
-                return subprocess.CompletedProcess(argv, 0, f"{new}\trefs/heads/main\n", "")
-            if argv[:4] == ["gh", "api", "--paginate", "--slurp"]:
-                checks = [{"total_count": 1, "check_runs": [
-                    {"status": "completed", "conclusion": "success"},
-                ]}]
-                return subprocess.CompletedProcess(argv, 0, json.dumps(checks), "")
-            if argv[:2] == ["gh", "api"] and "/compare/" in argv[2]:
-                return subprocess.CompletedProcess(argv, 0, '{"status":"ahead"}', "")
-            return real_run(argv, **kwargs)
-
-        def service_started_after_pause(name, **kwargs):
-            if (name == "factory-widgets.service"
-                    and (self.bin / "factory-widgets.timer.disabled").exists()):
-                return "active"
-            return real_active(name, **kwargs)
-
-        backend.is_active = mock.Mock(side_effect=service_started_after_pause)
-        with mock.patch.object(apply, "run", side_effect=target_revision):
-            result = apply.upgrade(host.load(), "main", record=record, backend=backend)
-
-        self.assertEqual(result, "deferred")
-        self.assertFalse(any(call.startswith("tool install ") for call in self.calls("uv")))
-        self.assertEqual(record.disabled, {"factory-widgets.timer"})
-        self.assertEqual(record.reenabled, {"factory-widgets.timer"})
-        self.assertFalse((self.bin / "factory-widgets.timer.disabled").exists())
-        engine = host.load()["defaults"]["engine"]
-        self.assertEqual(engine["target"], new)
-        self.assertEqual(engine["sha"], old)
 
 
     def test_upgrade_rejects_invalid_factory_extras_before_changes(self) -> None:

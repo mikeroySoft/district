@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -17,6 +18,7 @@ import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
+from xml.parsers.expat import ExpatError
 
 from district import apply, host, install_state, service
 from tests.remote_transport import remote_command
@@ -46,6 +48,8 @@ class OneInstallTest(unittest.TestCase):
         self.checkout.mkdir()
         self.repo = self.root / "widgets"
         self.repo.mkdir()
+        self.other_repo = self.root / "other"
+        self.other_repo.mkdir()
         self.data = {
             "defaults": {"factory_repo": REPO, "factory_ref": "main", "factory_track_branch": True,
                          "factory_source": str(self.checkout),
@@ -78,6 +82,7 @@ class OneInstallTest(unittest.TestCase):
         self.enterContext(mock.patch.object(host, "run", side_effect=self.run_cmd))
         self.enterContext(mock.patch.object(host, "service_backend", return_value=self.backend))
         self.enterContext(mock.patch.object(install_state, "timer_states", return_value={}))
+        self.enterContext(mock.patch.object(apply.syslog, "syslog"))
         self.sleep = self.enterContext(mock.patch.object(apply.time, "sleep"))
         self.install_receipt(OLD)
         self.output = self.enterContext(contextlib.redirect_stdout(io.StringIO()))
@@ -99,6 +104,9 @@ class OneInstallTest(unittest.TestCase):
         (self.tool / "uv-receipt.toml").write_text(
             f'[tool]\nrequirements = [{{name = "factory", git = "{REPO}?rev={sha}"}}]\n'
             f'entrypoints = [{{name = "factory", install-path = "{self.cli}", from = "factory"}}]\n')
+        metadata = self.tool / "lib/python3.12/site-packages/factory-0.4.7.dist-info/METADATA"
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        metadata.write_text("Metadata-Version: 2.4\nName: factory\nVersion: 0.4.7\n")
 
     def is_active(self, name, **kwargs):
         self.events.append(("state", name))
@@ -114,17 +122,21 @@ class OneInstallTest(unittest.TestCase):
         self.active.add(name) if enabled else self.active.discard(name)
         return subprocess.CompletedProcess([], 0, "", "")
 
-    def rendered(self):
+    def rendered(self, cwd=None):
         environment = {"PATH": str(self.cli.parent), "HOME": str(Path.home())}
+        owners = ([slug for slug, table in self.data["repo"].items()
+                   if Path(table["path"]) == Path(cwd)] if cwd is not None else ["acme/widgets"])
+        self.assertEqual(len(owners), 1, f"render cwd must identify one repo: {cwd}")
+        unit = host.unit_name(owners[0])
         if self.render_plist:
-            name = "factory-widgets.plist"
+            name = f"{unit}.plist"
             body = plistlib.dumps({
-                "Label": "factory-widgets",
+                "Label": unit,
                 "ProgramArguments": [self.render_executable, "-P", "-m", "factory", "dispatch"],
                 "EnvironmentVariables": environment,
             }).decode()
         else:
-            name = "factory-widgets.service"
+            name = f"{unit}.service"
             body = (
                 "[Service]\n"
                 f'Environment="PATH={environment["PATH"]}" "HOME={environment["HOME"]}"\n'
@@ -207,20 +219,22 @@ class OneInstallTest(unittest.TestCase):
                 code = 1 if self.bad_version and len(self.installs()) == 1 else 0
                 out = "factory 0.4.7\n"
             elif argv[1:] == ["install", "--print"]:
-                name, body = self.rendered()
+                name, body = self.rendered(kwargs.get("cwd"))
                 out = f"# {name}\n{body}\n"
             elif argv[1:] == ["install"]:
-                name, body = self.rendered()
+                name, body = self.rendered(kwargs.get("cwd"))
                 directory = (Path.home() / "Library/LaunchAgents") if name.endswith(".plist") else host.unit_dir()
                 directory.mkdir(parents=True, exist_ok=True)
                 (directory / name).write_text(body)
-                self.enable("factory-widgets.timer")
+                self.enable(f"{Path(name).stem}.timer")
             elif argv[1:] == ["doctor", "--json"]:
                 out = json.dumps({"rows": []})
             elif argv[1:] == ["dashboard", "--json"]:
                 out = json.dumps({"version": "0.4.7", "dispatcher": {"consecutive_failures": 0}})
             elif argv[1:] != ["init", "--labels-only"]:
                 self.fail(f"unexpected Factory command: {argv}")
+        elif argv == ["systemctl", "--user", "daemon-reload"]:
+            pass
         elif argv[:2] == ["git", "rev-parse"]:
             out = OLD + "\n"  # A stale checkout must never be used by --upgrade.
         elif argv[:2] not in (["git", "archive"], ["git", "status"]) and argv[0] != "tar":
@@ -356,7 +370,7 @@ class OneInstallTest(unittest.TestCase):
                 # Owners can touch read-only files; pin mtime to catch write-through locally too.
                 self.assertEqual(outside_python.stat().st_mtime, 1)
 
-    def tank_rendered(self):
+    def tank_rendered(self, cwd=None):
         body = (Path(__file__).parent / "fixtures/factory-district.service").read_text()
         return "factory-widgets.service", body.format(
             repo=self.repo, cli_bin=self.cli.parent, home=Path.home(), tool=self.tool)
@@ -372,14 +386,15 @@ class OneInstallTest(unittest.TestCase):
             {"acme/widgets": True})
         self.assertEqual(errors, {})
 
-    def test_tank_oneshot_apply_runs_factory_install(self):
+    def test_tank_oneshot_apply_writes_rendered_unit_without_factory_install(self):
         self.rendered = self.tank_rendered
         self.assertEqual(self.apply(), 0, self.output.getvalue())
-        self.assertIn(([str(self.cli), "install"], self.repo),
-                      [(argv, kwargs.get("cwd")) for argv, kwargs in self.calls])
+        self.assertNotIn([str(self.cli), "install"], [argv for argv, _ in self.calls])
+        self.assertEqual(
+            (host.unit_dir() / "factory-widgets.service").read_text(), self.tank_rendered()[1])
         self.assertNotIn("missing Factory argv", self.output.getvalue())
 
-    def test_tank_oneshot_rollback_runs_factory_install(self):
+    def test_tank_oneshot_rollback_writes_rendered_unit_without_factory_install(self):
         self.rendered = self.tank_rendered
         self.install_receipt(TARGET)
         self.data["defaults"]["engine"] = {"sha": TARGET, "ref": "main"}
@@ -389,8 +404,9 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(apply._run(args, install_state.ApplyRun("", "", TARGET)), 0,
                          self.output.getvalue())
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
-        self.assertIn(([str(self.cli), "install"], self.repo),
-                      [(argv, kwargs.get("cwd")) for argv, kwargs in self.calls])
+        self.assertNotIn([str(self.cli), "install"], [argv for argv, _ in self.calls])
+        self.assertEqual(
+            (host.unit_dir() / "factory-widgets.service").read_text(), self.tank_rendered()[1])
         self.assertNotIn("missing Factory argv", self.output.getvalue())
 
     def test_tank_oneshot_rejects_each_outside_execstart(self):
@@ -428,115 +444,6 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(apply._render_errors(f"# {name}\n{body}", self.tool, self.cli, None),
                          [f"{name}: missing Factory argv"])
 
-    def test_restore_verification_failure_names_paused_timers_and_retries_on_next_apply(self):
-        for fleet in (False, True):
-            for failure in ("unreadable-receipt", "mismatched-receipt", "cli-ownership", "version", "timeout"):
-                with self.subTest(fleet=fleet, failure=failure):
-                    self.data["repo"] = {"acme/widgets": {"path": str(self.repo)}}
-                    self.data.pop("hosts", None)
-                    if fleet:
-                        self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
-                                                        "engine": {"sha": OLD, "ref": "main"}}}
-                        self.data["repo"]["other/widgets"] = {"path": str(self.repo), "host": "remote"}
-                    receipt = self.tool / "uv-receipt.toml"
-                    if receipt.is_dir():
-                        receipt.rmdir()
-                    self.install_receipt(OLD)
-                    self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
-                    self.active = {"factory-widgets.timer"}
-                    self.calls.clear()
-                    self.backend.resume_timer.reset_mock()
-                    self.backend.definitions_changed.return_value = False
-                    self.output.truncate(0)
-                    self.output.seek(0)
-                    versions = []
-                    original_read = Path.read_text
-                    changed = []
-
-                    def read(path, *args, **kwargs):
-                        body = original_read(path, *args, **kwargs)
-                        if path == receipt and versions and not changed:
-                            changed.append(True)
-                            if failure == "mismatched-receipt":
-                                receipt.write_text(body.replace(TARGET, OLD))
-                            elif failure == "unreadable-receipt":
-                                receipt.unlink()
-                                receipt.mkdir()
-                            elif failure == "cli-ownership":
-                                legacy = self.root / "legacy-factory"
-                                legacy.touch()
-                                self.cli.unlink()
-                                self.cli.symlink_to(legacy)
-                        return body
-
-                    def runner(argv, **kwargs):
-                        if argv == [str(self.cli), "--version"] and self.installs():
-                            versions.append(argv)
-                            if len(versions) == 2:
-                                if failure == "version":
-                                    return subprocess.CompletedProcess(argv, 1, "", "broken CLI")
-                                if failure == "timeout":
-                                    self.assertGreater(kwargs["timeout"], 0)
-                                    raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-                        return self.run_cmd(argv, **kwargs)
-
-                    remote, _, _ = self.timeout_remote(None)
-                    with mock.patch.object(apply, "run", side_effect=runner), \
-                            mock.patch.object(host, "remote_runner", return_value=remote), \
-                            mock.patch.object(Path, "read_text", read):
-                        self.assertEqual(self.apply(), 1, self.output.getvalue())
-                    engine = host.engine(host.load(), "local")
-                    self.assertEqual(engine["paused_timers"], ["factory-widgets.timer"])
-                    self.assertNotIn("factory-widgets.timer", self.active)
-                    self.backend.resume_timer.assert_not_called()
-                    self.assertRegex(self.output.getvalue(), r"engine:local.*FAIL.*factory-widgets.timer")
-                    if receipt.is_dir():
-                        receipt.rmdir()
-                    self.install_receipt(TARGET)
-                    self.data = host.load()
-                    installs = len(self.installs())
-                    with mock.patch.object(host, "remote_runner", return_value=remote):
-                        self.assertEqual(self.apply(), 0, self.output.getvalue())
-                    self.assertEqual(len(self.installs()), installs)
-                    self.assertIn("factory-widgets.timer", self.active)
-                    self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
-
-    def test_recovery_without_readable_receipt_or_recorded_revision_names_paused_timers(self):
-        self.data["defaults"].pop("factory_ref")
-        self.data["defaults"]["engine"] = {"paused_timers": ["factory-widgets.timer"]}
-        self.active.clear()
-        (self.tool / "uv-receipt.toml").unlink()
-        self.assertEqual(self.apply(), 1)
-        self.assertRegex(self.output.getvalue(), r"engine:local.*FAIL.*factory-widgets.timer")
-        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], ["factory-widgets.timer"])
-        self.backend.resume_timer.assert_not_called()
-        self.data = host.load()
-        self.install_receipt(TARGET)
-        self.assertEqual(self.apply(), 0)
-        self.assertEqual(self.active, {"factory-widgets.timer"})
-        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
-        self.assertEqual(self.installs(), [])
-
-    def test_failed_offline_recovery_names_timers_until_engine_can_be_repaired(self):
-        self.data["defaults"].pop("factory_ref")
-        self.data["defaults"]["engine"].update(target=TARGET, paused_timers=["factory-widgets.timer"])
-        self.active.clear()
-        self.cli.unlink()
-
-        def offline(argv, **kwargs):
-            if argv[:3] == ["uv", "tool", "install"]:
-                return subprocess.CompletedProcess(argv, 1, "", "offline")
-            return self.run_cmd(argv, **kwargs)
-
-        with mock.patch.object(apply, "run", side_effect=offline):
-            self.assertEqual(self.apply(), 1)
-        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], ["factory-widgets.timer"])
-        self.backend.resume_timer.assert_not_called()
-        self.assertRegex(self.output.getvalue(), r"engine:local.*FAIL.*factory-widgets.timer")
-        self.data = host.load()
-        self.assertEqual(self.apply(), 0)
-        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
-        self.assertEqual(self.active, {"factory-widgets.timer"})
 
     def test_one_tool_and_rendered_units_reject_versioned_venvs(self):
         self.assertEqual(self.apply(), 0)
@@ -562,20 +469,6 @@ class OneInstallTest(unittest.TestCase):
                 self.assertEqual(self.apply(), 1, "a versioned engine must fail the repo row")
                 self.assertIn("factory-widgets" + (".plist" if plist else ".service"), self.output.getvalue())
 
-    def test_initial_busy_engine_defers_without_timer_changes(self):
-        self.service_states["factory-widgets.service"] = "activating"
-        record = install_state.ApplyRun("", "", OLD)
-
-        self.assertEqual(self.reconcile(record=record), "deferred", self.output.getvalue())
-
-        self.assertEqual(self.installs(), [])
-        self.assertIn("factory-widgets.service", record.deferred["engine"]["reason"])
-        self.assertEqual(record.disabled, set())
-        self.assertEqual(record.reenabled, set())
-        self.assertEqual(self.active, {"factory-widgets.timer"})
-        self.backend.pause_timer.assert_not_called()
-        self.backend.resume_timer.assert_not_called()
-        self.sleep.assert_not_called()
 
     def test_failed_verification_rolls_back_and_restores_exact_timers(self):
         for failure in ("receipt", "version"):
@@ -649,17 +542,6 @@ class OneInstallTest(unittest.TestCase):
         self.assertFalse(any(kwargs.get("cwd") == self.checkout for _, kwargs in self.calls))
         self.assertFalse(any(argv[:2] in (["git", "archive"], ["git", "rev-parse"]) for argv, _ in self.calls))
 
-    def test_initial_busy_timeout_defers_without_timer_changes(self):
-        self.data["defaults"]["engine_idle_timeout"] = "0s"
-        self.service_states["factory-widgets.service"] = "active"
-        record = install_state.ApplyRun("", "", OLD)
-        self.assertEqual(self.reconcile(record=record), "deferred")
-        self.assertEqual(self.installs(), [])
-        self.assertEqual(self.active, {"factory-widgets.timer"})
-        self.assertEqual(record.disabled, set())
-        self.assertEqual(record.reenabled, set())
-        self.backend.pause_timer.assert_not_called()
-        self.backend.resume_timer.assert_not_called()
 
     def test_downgrade_refusal_names_both_shas_and_override_installs(self):
         self.compare_status = "behind"
@@ -747,14 +629,6 @@ class OneInstallTest(unittest.TestCase):
                 self.assertEqual(self.active, {"factory-widgets.timer"})
                 self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
 
-    def test_busy_service_with_inactive_timer_still_defers_without_install(self):
-        self.active.clear()
-        self.service_states["factory-widgets.service"] = "deactivating"
-        self.data["defaults"]["engine_idle_timeout"] = "0s"
-        self.assertEqual(self.reconcile(), "deferred")
-        self.assertEqual(self.installs(), [])
-        self.backend.pause_timer.assert_not_called()
-        self.backend.resume_timer.assert_not_called()
 
     def test_restore_error_keeps_recovery_state_and_restores_other_timers(self):
         timers = ["factory-widgets.timer", "factory-other.timer"]
@@ -773,7 +647,7 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(self.installs(), [])
 
     def test_timer_only_render_cannot_converge(self):
-        self.rendered = lambda: ("factory-widgets.timer", "[Timer]\nOnUnitActiveSec=10min\n")
+        self.rendered = lambda cwd=None: ("factory-widgets.timer", "[Timer]\nOnUnitActiveSec=10min\n")
         self.assertEqual(self.apply(), 1)
 
     def test_crash_with_unverified_target_rolls_back_to_recorded_previous_sha(self):
@@ -809,26 +683,6 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(self.installs(), [])
         self.assertFalse(host.load()["defaults"]["engine"]["dashboards_pending"])
 
-    def test_fleet_broken_cli_defers_while_a_service_is_busy(self):
-        self.install_receipt(TARGET)
-        self.service_states["factory-widgets.service"] = "active"
-        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
-
-        def broken_until_reinstalled(argv, **kwargs):
-            if argv == [str(self.cli), "--version"] and not self.installs():
-                return subprocess.CompletedProcess(argv, 1, "", "interrupted install")
-            return self.run_cmd(argv, **kwargs)
-
-        context = (broken_until_reinstalled, self.backend, self.data["repo"])
-        record = install_state.ApplyRun("", "", OLD)
-        self.assertEqual(apply.reconcile_fleet_engine(
-            self.data, record, {"local": context, "remote": context}), "deferred")
-        self.assertEqual(self.installs(), [])
-        self.assertEqual(self.active, {"factory-widgets.timer"})
-        self.assertEqual(record.disabled, set())
-        self.assertEqual(record.reenabled, set())
-        self.backend.pause_timer.assert_not_called()
-        self.backend.resume_timer.assert_not_called()
 
     def test_unchanged_fleet_does_not_restart_dashboards_or_pause_timers(self):
         self.install_receipt(TARGET)
@@ -842,105 +696,6 @@ class OneInstallTest(unittest.TestCase):
         self.backend.pause_timer.assert_not_called()
         self.backend.resume_timer.assert_not_called()
 
-    def test_timer_window_rechecks_factory_services_after_pausing_timers(self):
-        worker = "factory-unregistered-worker.service"
-        self.backend.factory_units.return_value = {worker, "factory-widgets.timer"}
-        clock = [0.0]
-        self.data["defaults"]["engine_idle_timeout"] = "2s"
-        self.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
-        original_pause = self.backend.pause_timer.side_effect
-
-        def pause(name, **kwargs):
-            result = original_pause(name, **kwargs)
-            self.service_states[worker] = "active"
-            return result
-
-        self.backend.pause_timer.side_effect = pause
-        record = install_state.ApplyRun("", "", OLD)
-
-        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
-            self.assertEqual(self.reconcile(record=record), "deferred", self.output.getvalue())
-        self.assertEqual(self.installs(), [])
-        self.assertEqual(record.disabled, {"factory-widgets.timer"})
-        self.assertEqual(record.reenabled, record.disabled)
-        self.assertEqual(self.active, {"factory-widgets.timer"})
-
-    def test_fleet_busy_preflight_and_peer_window_prevent_all_installs(self):
-        worker = "factory-unregistered-worker.service"
-        timers = {"factory-widgets.timer", "factory-other.timer"}
-        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
-        self.backend.factory_units.return_value = {worker}
-        remote = mock.Mock()
-        remote.factory_units.return_value = set()
-        remote.is_active.side_effect = lambda name, **_: (
-            "active" if name == "factory-other.timer" and name in self.active else "inactive")
-        remote.resume_timer.side_effect = self.enable
-        remote_repos = {"acme/other": {"path": str(self.repo)}}
-        contexts = {
-            "local": (self.run_cmd, self.backend, self.data["repo"]),
-            "remote": (self.run_cmd, remote, remote_repos),
-        }
-
-        for phase in ("preflight", "peer-window"):
-            with self.subTest(phase=phase):
-                self.active = set(timers)
-                self.service_states[worker] = "active" if phase == "preflight" else "inactive"
-                record = install_state.ApplyRun("", "", OLD)
-
-                def pause_peer(name, **kwargs):
-                    result = self.enable(name, False, **kwargs)
-                    self.service_states[worker] = "active"
-                    return result
-
-                remote.pause_timer.side_effect = pause_peer
-                self.assertEqual(apply.reconcile_fleet_engine(
-                    self.data, record, contexts), "deferred", self.output.getvalue())
-                self.assertIn(worker, record.deferred["engine"]["reason"])
-                self.assertEqual(self.installs(), [])
-                self.assertEqual(host.engine(self.data, "local")["sha"], OLD)
-                self.assertEqual(host.engine(self.data, "remote")["sha"], OLD)
-                self.assertEqual(record.disabled, set() if phase == "preflight" else timers)
-                self.assertEqual(record.reenabled, record.disabled)
-                self.assertEqual(self.active, timers)
-
-    def test_fleet_rechecks_factory_service_before_each_host_install(self):
-        worker = "factory-unregistered-worker.service"
-        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
-        self.backend.factory_units.return_value = {worker, "factory-widgets.timer"}
-
-        def install_then_activate(argv, **kwargs):
-            result = self.run_cmd(argv, **kwargs)
-            if argv[:3] == ["uv", "tool", "install"] and f"@{TARGET}" in argv[5]:
-                self.service_states[worker] = "active"
-            return result
-
-        context = (install_then_activate, self.backend, self.data["repo"])
-        record = install_state.ApplyRun("", "", OLD)
-
-        self.assertEqual(apply.reconcile_fleet_engine(
-            self.data, record, {"local": context, "remote": context}), "failed")
-        self.assertEqual(len(self.installs()), 1)
-        self.assertIn(worker, record.deferred["engine:remote"]["reason"])
-        self.assertIn("FAIL could not roll back local", self.output.getvalue())
-        self.assertEqual(host.engine(self.data, "local")["sha"], TARGET)
-        self.assertEqual(host.engine(self.data, "remote")["sha"], OLD)
-        self.assertEqual(self.active, {"factory-widgets.timer"})
-
-    def test_registered_main_slug_ending_dashboard_still_blocks(self):
-        self.data["repo"] = {"acme/widgets-dashboard": {"path": str(self.repo)}}
-        main = "factory-widgets-dashboard.service"
-        self.backend.factory_units.return_value = {
-            main, "factory-widgets-dashboard-dashboard.service",
-        }
-        self.service_states[main] = "active"
-        self.active.add("factory-widgets-dashboard-dashboard.service")
-        record = install_state.ApplyRun("", "", OLD)
-
-        self.assertEqual(self.reconcile(record=record), "deferred")
-        self.assertIn(main, record.deferred["engine"]["reason"])
-        self.assertNotIn("factory-widgets-dashboard-dashboard.service",
-                         record.deferred["engine"]["reason"])
-        self.assertEqual(self.installs(), [])
 
     def test_configured_extras_are_preserved_on_target_and_rollback(self):
         self.data["defaults"]["factory_extras"] = ["atlas", "ops"]
@@ -951,32 +706,6 @@ class OneInstallTest(unittest.TestCase):
         self.assertEqual(host.load()["defaults"]["engine"]["sha"], OLD)
         self.assertEqual(self.active, {"factory-widgets.timer"})
 
-    def test_failed_install_and_rollback_with_missing_cli_fail_without_path_fallback(self):
-        def broken_install(argv, **kwargs):
-            if argv[:3] == ["uv", "tool", "install"]:
-                self.calls.append((list(argv), kwargs))
-                self.cli.unlink(missing_ok=True)
-                return subprocess.CompletedProcess(argv, 1, "", "install and rollback unavailable")
-            if argv[0] in ("factory", str(self.cli)):
-                raise FileNotFoundError(str(self.cli))
-            return self.run_cmd(argv, **kwargs)
-        with mock.patch.object(apply, "run", side_effect=broken_install):
-            self.assertEqual(self.apply(upgrade="main"), 1)
-        self.assertEqual(self.active, set(), "a broken tool must not resume dispatch")
-        self.assertEqual(host.load()["defaults"]["engine"]["paused_timers"], ["factory-widgets.timer"])
-        self.assertEqual(len(self.installs()), 2)
-        self.assertIn("acme/widgets", self.output.getvalue())
-        self.assertIn(OLD, self.output.getvalue())
-        self.assertIn(TARGET, self.output.getvalue())
-
-    def test_zero_remote_window_does_not_sync_recovery_when_no_timers_were_paused(self):
-        self.data["defaults"]["engine_idle_timeout"] = "0s"
-        self.data["hosts"] = {"remote": {"ssh": "fake", "platform": "linux", "engine": {"sha": OLD}}}
-        def transport(*args, **kwargs):
-            self.fail("expired window issued a remote command despite having no timer intents")
-        runner = host.RemoteRunner("remote", "fake", transport=transport)
-        with apply._engine_window(self.data, "remote", runner, self.backend, self.data["repo"], None) as ready:
-            self.assertFalse(ready)
 
     def test_stale_controller_and_remote_apply_migrate_bytes_and_clean_historical_engine(self):
         for explicit in (False, True):
@@ -1019,19 +748,22 @@ class OneInstallTest(unittest.TestCase):
 
                 def receipt(sha):
                     (remote_tool / "bin").mkdir(parents=True, exist_ok=True)
-                    factory = remote_tool / "bin/factory"
-                    if not factory.exists():
-                        factory.touch(mode=0o755)
+                    for name in ("factory", "python"):
+                        executable = remote_tool / "bin" / name
+                        if not executable.exists():
+                            executable.touch(mode=0o755)
                     remote_cli.parent.mkdir(parents=True, exist_ok=True)
                     for name in ("gh", "git", "uv", "python3"):
                         executable = remote_cli.parent / name
                         if not executable.exists():
                             executable.touch(mode=0o755)
                     remote_cli.unlink(missing_ok=True)
-                    remote_cli.symlink_to(factory)
+                    remote_cli.symlink_to(remote_tool / "bin/factory")
                     (remote_tool / "uv-receipt.toml").write_text(
                         f'[tool]\nrequirements = [{{name="factory", rev="{sha}"}}]\n')
-
+                    metadata = remote_tool / "lib/python3.12/site-packages/factory-0.4.7.dist-info/METADATA"
+                    metadata.parent.mkdir(parents=True, exist_ok=True)
+                    metadata.write_text("Metadata-Version: 2.4\nName: factory\nVersion: 0.4.7\n")
                 def transport(argv, **kwargs):
                     parts = shlex.split(remote_command(argv))
                     command_cwd = None
@@ -1079,6 +811,8 @@ class OneInstallTest(unittest.TestCase):
                         if parts[1:2] == ["install"]:
                             return subprocess.CompletedProcess(parts, 0, "", "")
                         return self.run_cmd(["factory", *parts[1:]], **kwargs)
+                    if parts == ["systemctl", "--user", "daemon-reload"]:
+                        return subprocess.CompletedProcess(parts, 0, "", "")
                     self.fail(f"unexpected remote command (checkout reads/archive forbidden): {parts}")
 
                 receipt(OLD)
@@ -1169,6 +903,8 @@ class OneInstallTest(unittest.TestCase):
     def test_no_policy_apply_recovers_interrupted_install_without_active_timers(self):
         self.data["defaults"].pop("factory_ref")
         self.active.clear()
+        self.backend.status.side_effect = lambda name, **_: service.ServiceStatus(
+            "loaded" if name.endswith(".timer") else "not-found", "inactive", "enabled")
 
         def crash(argv, **kwargs):
             if argv[:3] == ["uv", "tool", "install"]:
@@ -1233,21 +969,6 @@ class OneInstallTest(unittest.TestCase):
                     self.assertEqual(engine["sha"], OLD)
                     self.assertTrue(self.cli.exists())
 
-    def test_unverified_offline_recovery_keeps_timer_intents_and_dashboards_pending(self):
-        self.data["defaults"].pop("factory_ref")
-        self.data["defaults"]["engine"].update(
-            target=TARGET, paused_timers=["factory-widgets.timer"], dashboards_pending=True)
-        self.active.clear()
-        self.cli.unlink()
-        def offline(argv, **kwargs):
-            if argv[:3] == ["uv", "tool", "install"]:
-                return subprocess.CompletedProcess(argv, 1, "", "offline")
-            return self.run_cmd(argv, **kwargs)
-        self.assertEqual(self.reconcile(run_cmd=offline), "failed")
-        self.assertEqual(self.active, set())
-        self.assertEqual(host.engine(self.data, "local")["paused_timers"], ["factory-widgets.timer"])
-        self.assertTrue(host.engine(self.data, "local")["dashboards_pending"])
-        self.backend.start.assert_not_called()
 
     def test_no_policy_apply_rejects_legacy_cli_symlink_missing_cli_and_receipt(self):
         self.data["defaults"].pop("factory_ref")
@@ -1273,134 +994,6 @@ class OneInstallTest(unittest.TestCase):
                 self.assertFalse(any(argv[0] in ("factory", str(self.cli)) for argv, _ in self.calls))
                 self.assertEqual(self.installs(), [])
 
-    def test_deferred_first_upgrade_then_no_policy_reports_unknown_installed_state(self):
-        self.data["defaults"].pop("factory_ref")
-        self.data["defaults"].pop("engine")
-        self.data["defaults"]["engine_idle_timeout"] = "0s"
-        self.assertEqual(apply.upgrade(self.data, backend=self.backend), "deferred")
-        self.assertEqual(self.data["defaults"]["engine"]["target"], TARGET)
-        self.assertNotIn("sha", self.data["defaults"]["engine"])
-        self.assertEqual(self.apply(), 0)
-        self.assertIn("engine unknown (unknown)", self.output.getvalue())
-        self.assertEqual(self.installs(), [])
-
-    def test_idle_window_bounds_every_operation_by_one_deadline(self):
-        for exhausted_at in ("discovery", "timer", "pause", "service"):
-            with self.subTest(exhausted_at=exhausted_at):
-                self.data["defaults"]["engine_idle_timeout"] = "5s"
-                self.data["defaults"]["engine"].pop("paused_timers", None)
-                clock = [0.0]
-                observed = []
-
-                def operation(label, result, **kwargs):
-                    remaining = 5 - clock[0]
-                    self.assertGreater(remaining, 0, (label, observed))
-                    self.assertGreater(kwargs.get("timeout", 0), 0, (label, kwargs))
-                    self.assertLessEqual(kwargs["timeout"], remaining, (label, kwargs))
-                    observed.append(label)
-                    if label == exhausted_at:
-                        clock[0] = 5
-                    return result
-
-                def active(name, **kwargs):
-                    return operation("timer" if name.endswith(".timer") else "service",
-                                     "active" if name.endswith(".timer") else "inactive", **kwargs)
-
-
-                self.backend.factory_units.side_effect = lambda **kw: operation("discovery", set(), **kw)
-                self.backend.is_active.side_effect = active
-                self.backend.pause_timer.side_effect = lambda name, **kw: operation("pause", None, **kw)
-                with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
-                    with apply._engine_window(
-                            self.data, "local", self.run_cmd, self.backend,
-                            self.data["repo"], None) as ready:
-                        self.assertFalse(ready)
-                self.assertEqual(observed[-1], exhausted_at)
-                self.assertEqual(host.engine(self.data, "local").get("paused_timers", []), [])
-
-    def test_slow_service_probes_share_the_idle_deadline(self):
-        self.data["defaults"]["engine_idle_timeout"] = "5s"
-        self.backend.factory_units.return_value = {
-            "factory-first.service", "factory-second.service", "factory-widgets.timer",
-        }
-        clock = [0.0]
-        original_active = self.is_active
-
-        def slow_service(name, **kwargs):
-            if name.endswith(".service") and "factory-widgets.timer" not in self.active:
-                duration = 3
-                timeout = kwargs["timeout"]
-                clock[0] += min(duration, timeout)
-                if timeout <= duration:
-                    raise subprocess.TimeoutExpired(name, timeout)
-            return original_active(name, **kwargs)
-
-        self.backend.is_active.side_effect = slow_service
-        record = install_state.ApplyRun("", "", OLD)
-        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
-            result = self.reconcile(record=record)
-        self.assertLessEqual(clock[0], 5)
-        self.assertEqual(result, "deferred")
-        self.assertEqual(self.installs(), [])
-        self.assertEqual(host.engine(host.load(), "local")["sha"], OLD)
-        self.assertEqual(self.active, {"factory-widgets.timer"})
-        self.assertEqual(record.reenabled, record.disabled)
-
-    def test_remote_window_sync_and_restoration_stalls_are_bounded_and_recoverable(self):
-        self.data["hosts"] = {"remote": {"ssh": "fake"}}
-        self.data["defaults"]["engine_idle_timeout"] = "5s"
-        host.set_engine(self.data, "remote", {"sha": OLD})
-        clock = [0.0]
-        paused, resumed, deadlines = [], [], []
-        timers = ["factory-a.timer", "factory-b.timer"]
-        self.backend.factory_units.return_value = set(timers)
-        self.backend.is_active.side_effect = lambda name, **kw: "active" if name in timers else "inactive"
-        self.backend.pause_timer.side_effect = lambda name, **kw: paused.append(name)
-
-        def transport(argv, **kwargs):
-            timeout = kwargs.get("timeout")
-            self.assertIsNotNone(timeout, argv)
-            self.assertGreater(timeout, 0)
-            deadlines.append(timeout)
-            parts = shlex.split(remote_command(argv))
-            if parts[:2] == ["python3", "-c"] and parts[2] == host.REMOTE_DEADLINE:
-                parts = shlex.split(parts[-1])
-            if parts[0] == "fake-resume":
-                if parts[1] == timers[0]:
-                    clock[0] += timeout
-                    raise subprocess.TimeoutExpired(parts, timeout)
-                resumed.append(parts[1])
-                return subprocess.CompletedProcess(parts, 0, "", "")
-            if parts[:2] == ["python3", "-c"]:
-                if "read_bytes()" in parts[2] and paused and clock[0] < 5:
-                    self.assertLessEqual(timeout, 5 - clock[0])
-                    clock[0] = 5
-                    raise subprocess.TimeoutExpired(parts, timeout)
-                return subprocess.run([sys.executable, *parts[1:]], capture_output=True, text=True,
-                                      input=kwargs.get("input"), timeout=timeout)
-            return self.run_cmd(parts, **kwargs)
-
-        runner = host.RemoteRunner("remote", "fake", transport=transport)
-        runner._facts = {"home": str(Path.home()), "config_home": str(self.root / "remote-config"),
-                         "data_home": str(self.root / "remote-data"),
-                         "tool_dir": str(self.tool.parent), "tool_bin": str(self.cli.parent)}
-        self.backend.resume_timer.side_effect = lambda name, **kw: runner(["fake-resume", name], **kw)
-        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
-            with self.assertRaises(host.DistrictError):
-                with apply._engine_window(self.data, "remote", runner, self.backend, {}, None) as ready:
-                    self.assertFalse(ready)
-        self.assertEqual(paused, [timers[0]])
-        self.assertEqual(resumed, [timers[1]])
-        self.assertEqual(host.engine(host.load(), "remote")["paused_timers"], [timers[0]])
-        self.assertLess(clock[0], 40)
-        self.assertTrue(all(deadline <= 30 for deadline in deadlines))
-
-    def test_zero_idle_budget_issues_no_discovery_probe_or_pause(self):
-        self.data["defaults"]["engine_idle_timeout"] = "0s"
-        self.assertEqual(self.reconcile(), "deferred")
-        self.backend.factory_units.assert_not_called()
-        self.backend.is_active.assert_not_called()
-        self.backend.pause_timer.assert_not_called()
 
     def test_resolution_timeouts_fail_engine_but_finish_single_and_fleet_rows(self):
         for fleet in (False, True):
@@ -1418,7 +1011,7 @@ class OneInstallTest(unittest.TestCase):
                         self.data["repo"]["acme/widgets"]["triage_host"] = "local"
                     else:
                         self.data["repo"]["acme/widgets"].pop("triage_host", None)
-                    self.data["repo"]["acme/other"] = {"path": str(self.repo)}
+                    self.data["repo"]["acme/other"] = {"path": str(self.other_repo)}
 
                     def timeout(argv, **kwargs):
                         endpoint = " ".join(argv)
@@ -1547,8 +1140,10 @@ class OneInstallTest(unittest.TestCase):
                     self.data["defaults"]["factory_ref"] = "main"
                 self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
                                                 "engine": {"sha": TARGET, "dashboards_pending": True}}}
-                self.data["repo"] = {"acme/widgets": {"path": str(self.repo), "host": "remote"},
-                                     "acme/other": {"path": str(self.repo)}}
+                self.data["repo"] = {
+                    "acme/widgets": {"path": str(self.repo), "host": "remote"},
+                    "acme/other": {"path": str(self.other_repo)},
+                }
                 self.install_receipt(TARGET)
                 self.calls.clear()
                 self.output.truncate(0)
@@ -1572,7 +1167,9 @@ class OneInstallTest(unittest.TestCase):
                 self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
                                                 "engine": {"sha": OLD, "ref": "main"}}}
                 self.data["repo"] = {
-                    slug: {"path": str(self.repo), "host": "remote"} for slug in ("acme/widgets", "acme/other")}
+                    "acme/widgets": {"path": str(self.repo), "host": "remote"},
+                    "acme/other": {"path": str(self.other_repo), "host": "remote"},
+                }
                 self.install_receipt(OLD)
                 self.calls.clear()
                 self.output.truncate(0)
@@ -1596,8 +1193,10 @@ class OneInstallTest(unittest.TestCase):
                 self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
                 self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
                                                 "engine": {"sha": OLD, "ref": "main"}}}
-                self.data["repo"] = {"acme/widgets": {"path": str(self.repo), "host": "remote"},
-                                     "acme/other": {"path": str(self.repo)}}
+                self.data["repo"] = {
+                    "acme/widgets": {"path": str(self.repo), "host": "remote"},
+                    "acme/other": {"path": str(self.other_repo)},
+                }
                 self.active.clear()
                 self.install_receipt(OLD)
                 self.calls.clear()
@@ -1647,7 +1246,15 @@ class OneInstallTest(unittest.TestCase):
                 self.launchd_disabled.discard(label)
             else:
                 self.assertIn(operation, ("print", "print-disabled", "bootstrap", "kickstart", "bootout"))
-            output = ("state = running\npid = 42\n" if self.launchd_running else
+            running = self.launchd_running
+            if operation == "print":
+                try:
+                    document = plistlib.loads((agents / f"{label}.plist").read_bytes())
+                except (plistlib.InvalidFileException, ExpatError, ValueError):
+                    document = {}
+                scheduled = "StartInterval" in document or "StartCalendarInterval" in document
+                running = running and label not in self.launchd_disabled if scheduled else running
+            output = ("state = running\npid = 42\n" if running else
                       "state = exited\nlast exit code = 0\n")
             if operation == "print-disabled":
                 output = "\n".join(f'"{name}" => true' for name in self.launchd_disabled)
@@ -1674,8 +1281,7 @@ class OneInstallTest(unittest.TestCase):
             home=runner.path(str(home)) if runner else home, uid=501, raw_path=os.defpath)
         return backend, runner, agents
 
-    def test_binary_launchd_plists_discover_status_and_upgrade_through_apply(self):
-        self.data["defaults"]["engine_idle_timeout"] = "5s"
+    def test_binary_launchd_plists_discover_status_and_refuse_engine_upgrade(self):
         for remote in (False, True):
             with self.subTest(remote=remote), contextlib.ExitStack() as stack:
                 self.install_receipt(OLD)
@@ -1704,22 +1310,25 @@ class OneInstallTest(unittest.TestCase):
                                      {"factory-aux.service", "factory-aux.timer", "factory-aux-worker.service"})
                 self.launchd_running = False
                 with self.subTest(apply=True):
-                    self.assertEqual(apply.reconcile_engine(
-                        self.data, backend=backend, run_cmd=runner or apply.run,
-                        host_name="remote" if remote else "local"), "applied", self.output.getvalue())
-                    self.assertEqual(len(self.installs()), 1)
+                    # macOS engine upgrades are unsupported pending #199: reconcile_engine
+                    # refuses with unsupported_platform and issues no launchctl mutation.
+                    with self.assertRaises(host.DistrictError) as raised:
+                        apply.reconcile_engine(
+                            self.data, backend=backend, run_cmd=runner or apply.run,
+                            host_name="remote" if remote else "local")
+                    self.assertIn("unsupported_platform", str(raised.exception))
+                    self.assertIn("issues/199", str(raised.exception))
+                    self.assertEqual(self.installs(), [])
+                    operations = [argv[1] for argv, _ in self.launchd_calls]
+                    for forbidden in ("disable", "enable", "kill", "bootout"):
+                        self.assertNotIn(forbidden, operations,
+                                         f"macOS engine refusal must never {forbidden}")
                     self.assertEqual(self.launchd_disabled, set())
-                    mutations = [(argv[1], argv[-1]) for argv, _ in self.launchd_calls
-                                 if argv[1] in ("disable", "enable")]
-                    self.assertIn(("disable", "gui/501/factory-aux"), mutations)
-                    self.assertIn(("enable", "gui/501/factory-aux"), mutations)
-                    self.assertTrue(all(0 < kwargs["timeout"] <= 30 for argv, kwargs in self.launchd_calls
-                                        if argv[1] in ("disable", "enable")))
-                    self.assertEqual(host.engine(host.load(), "remote" if remote else "local")["sha"], TARGET)
+                    self.assertEqual(host.engine(host.load(), "remote" if remote else "local")["sha"], OLD)
                 for path in agents.glob("*.plist"):
                     path.unlink()
 
-    def test_malformed_launchd_plist_status_is_tolerant_and_apply_fails_named(self):
+    def test_malformed_launchd_plist_status_is_tolerant_and_macos_apply_refuses(self):
         for remote in (False, True):
             with self.subTest(remote=remote), contextlib.ExitStack() as stack:
                 self.install_receipt(OLD)
@@ -1737,66 +1346,18 @@ class OneInstallTest(unittest.TestCase):
                     self.assertEqual(status.active_state, "active")
                 self.launchd_running = False
                 with self.subTest(apply=True):
-                    self.assertEqual(self.apply(), 1, self.output.getvalue())
+                    # macOS engine upgrades are refused pending #199 before the engine
+                    # step touches units; a remote darwin host fails the row (exit 1),
+                    # a local darwin host fails the apply outright.
+                    if remote:
+                        self.assertEqual(self.apply(), 1, self.output.getvalue())
+                        self.assertIn("unsupported_platform", self.output.getvalue())
+                    else:
+                        with self.assertRaises(host.DistrictError) as raised:
+                            self.apply()
+                        self.assertIn("unsupported_platform", str(raised.exception))
                     self.assertEqual(self.installs(), [])
-                    self.assertIn("factory-broken.plist", self.output.getvalue())
-                    self.assertIn("engine", self.output.getvalue())
-                (agents / "factory-broken.plist").unlink()
 
-    def test_failed_target_rollback_rechecks_factory_services_and_original_deadline(self):
-        worker = "factory-unregistered-worker.service"
-        for blocked in ("service", "expired"):
-            with self.subTest(blocked=blocked):
-                self.install_receipt(OLD)
-                self.calls.clear()
-                self.events.clear()
-                self.output.seek(0)
-                self.output.truncate()
-                self.active = {"factory-widgets.timer"}
-                self.service_states.clear()
-                self.data["defaults"]["engine"] = {"sha": OLD, "ref": "main"}
-                self.data["defaults"]["engine_idle_timeout"] = "5s"
-                self.backend.factory_units.return_value = {
-                    worker, "factory-widgets.timer",
-                }
-                clock = [0.0]
-                failed = [False]
-
-                def fail_target(argv, **kwargs):
-                    if (argv[:3] == ["uv", "tool", "install"] and not failed[0]
-                            and f"@{TARGET}" in argv[5]):
-                        failed[0] = True
-                        self.calls.append((list(argv), kwargs))
-                        if blocked == "service":
-                            self.service_states[worker] = "active"
-                        else:
-                            clock[0] = 6.0
-                        return subprocess.CompletedProcess(
-                            argv, 1, "", "fake target install failure")
-                    return self.run_cmd(argv, **kwargs)
-
-                with mock.patch.object(apply, "run", side_effect=fail_target), \
-                     mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
-                    self.assertEqual(self.reconcile(), "failed", self.output.getvalue())
-                    self.assertEqual(len(self.installs()), 1)
-                    self.assertIn(worker if blocked == "service" else "deadline",
-                                  self.output.getvalue())
-                    engine = host.engine(host.load(), "local")
-                    self.assertEqual(engine["paused_timers"], ["factory-widgets.timer"])
-                    self.assertTrue(engine["install_pending"]["rollback_blocked"])
-                    self.assertEqual(self.active, set())
-
-                    self.service_states[worker] = "inactive"
-                    clock[0] = 10.0
-                    self.data = host.load()
-                    self.assertIn(self.reconcile(), ("applied", "unchanged"),
-                                  self.output.getvalue())
-
-                engine = host.engine(host.load(), "local")
-                self.assertEqual(engine["sha"], TARGET)
-                self.assertFalse(engine.get("install_pending"))
-                self.assertFalse(engine.get("paused_timers"))
-                self.assertEqual(self.active, {"factory-widgets.timer"})
 
     def test_registered_launchd_plist_bytes_reconcile_full_repo_drift(self):
         for remote in (False, True):
@@ -1860,6 +1421,324 @@ class OneInstallTest(unittest.TestCase):
                             self.assertEqual((agents / filename).read_bytes(), raw)
                         if drift.startswith("malformed"):
                             self.assertIn(filename, self.output.getvalue())
+
+    def test_already_current_upgrade_keeps_operator_disabled_timer_inactive(self):
+        self.install_receipt(TARGET)
+        self.data["defaults"]["engine"] = {"sha": TARGET, "ref": "main"}
+        self.backend.definitions_changed.return_value = False
+        self.active = set()  # the timer is inactive before apply
+        # An existing operator-disabled timer, not a first install (unit_file_state present).
+        self.backend.status.return_value = service.ServiceStatus("loaded", "inactive", "disabled", 0)
+        self.backend.stop.side_effect = lambda name, **kwargs: self.enable(name, False, **kwargs)
+        self.apply(upgrade="main")
+        self.assertNotIn("factory-widgets.timer", self.active)
+        self.backend.stop.assert_called_once_with("factory-widgets.timer", timeout=apply.DRAIN_TIMEOUT)
+
+    def test_double_install_failure_with_missing_cli_has_no_path_fallback_and_restores_timers(self):
+        def broken_install(argv, **kwargs):
+            if argv[:3] == ["uv", "tool", "install"]:
+                self.calls.append((list(argv), kwargs))
+                self.events.append(("install", argv[argv.index("--from") + 1]))
+                self.cli.unlink(missing_ok=True)
+                return subprocess.CompletedProcess(argv, 1, "", "install and rollback unavailable")
+            if argv[0] in ("factory", str(self.cli)):
+                raise FileNotFoundError(str(self.cli))  # never fall back to another factory on PATH
+            return self.run_cmd(argv, **kwargs)
+
+        with mock.patch.object(apply, "run", side_effect=broken_install):
+            self.assertEqual(self.apply(upgrade="main"), 1)
+        self.assertEqual(len(self.installs()), 2)  # TARGET then OLD rollback, no PATH fallback
+        self.assertIn(TARGET, self.output.getvalue())
+        self.assertIn(OLD, self.output.getvalue())
+        self.assertEqual(self.active, {"factory-widgets.timer"})  # timers restored on exit
+        self.assertFalse(host.load()["defaults"]["engine"].get("paused_timers"))
+
+    def _fleet_backend(self, active_set, units):
+        backend = mock.Mock()
+        backend.factory_units.return_value = set(units)
+        backend.is_active.side_effect = lambda name, **_: "active" if name in active_set else "inactive"
+        backend.pause_timer.side_effect = lambda name, **_: (
+            active_set.discard(name) or subprocess.CompletedProcess([], 0, "", ""))
+        backend.resume_timer.side_effect = lambda name, **_: (
+            active_set.add(name) or subprocess.CompletedProcess([], 0, "", ""))
+        backend.status.return_value = service.ServiceStatus("loaded", "inactive", "enabled")
+        backend.configuration.return_value = {"platform": "linux", "unit_dir": str(host.unit_dir())}
+        backend.definitions_changed.return_value = False
+        return backend
+
+    def test_fleet_busy_worker_blocks_every_install_and_restores_timers(self):
+        worker = "factory-unregistered-worker.service"
+        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
+        self.active = {"factory-widgets.timer"}
+        self.backend.factory_units.return_value = {worker, "factory-widgets.timer"}
+        remote_active = {"factory-other.timer"}
+        remote = self._fleet_backend(remote_active, {"factory-other.timer"})
+        remote_repos = {"acme/other": {"path": str(self.other_repo)}}
+        contexts = {
+            "local": (self.run_cmd, self.backend, self.data["repo"]),
+            "remote": (self.run_cmd, remote, remote_repos),
+        }
+        self.service_states[worker] = "active"  # the discovered worker never drains
+        clock = [0.0]
+        self.sleep.side_effect = lambda s: clock.__setitem__(0, clock[0] + s)
+        record = install_state.ApplyRun("", "", OLD, drain_timeout=2)
+        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(apply.reconcile_fleet_engine(self.data, record, contexts),
+                             "failed", self.output.getvalue())
+        self.assertIn(worker, self.output.getvalue())
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(host.engine(self.data, "local")["sha"], OLD)
+        self.assertEqual(host.engine(self.data, "remote")["sha"], OLD)
+        self.assertEqual(self.active, {"factory-widgets.timer"})  # paused then restored
+        self.assertEqual(remote_active, {"factory-other.timer"})
+        self.backend.stop.assert_not_called()
+        remote.stop.assert_not_called()
+
+    def test_fleet_rechecks_factory_service_before_each_host_install(self):
+        worker = "factory-unregistered-worker.service"
+        self.data["hosts"] = {"remote": {"engine": {"sha": OLD}}}
+        self.backend.factory_units.return_value = {worker, "factory-widgets.timer"}
+        clock = [0.0]
+        self.sleep.side_effect = lambda s: clock.__setitem__(0, clock[0] + s)
+
+        def install_then_activate(argv, **kwargs):
+            result = self.run_cmd(argv, **kwargs)
+            if argv[:3] == ["uv", "tool", "install"] and f"@{TARGET}" in argv[5]:
+                self.service_states[worker] = "active"  # a pass starts after the first install
+            return result
+
+        context = (install_then_activate, self.backend, self.data["repo"])
+        record = install_state.ApplyRun("", "", OLD, drain_timeout=2)
+        with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assertEqual(apply.reconcile_fleet_engine(
+                self.data, record, {"local": context, "remote": context}), "failed", self.output.getvalue())
+        self.assertEqual(len(self.installs()), 1)
+        self.assertIn(worker, record.deferred.get("engine:remote", {}).get("reason", ""))
+        self.assertIn("could not roll back local", self.output.getvalue())
+        self.assertEqual(host.engine(self.data, "local")["sha"], TARGET)
+        self.assertEqual(host.engine(self.data, "remote")["sha"], OLD)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+
+    def test_macos_engine_mixed_fleet_skips_darwin_and_upgrades_linux(self):
+        # Mixed fleet: the Linux host (local) upgrades normally — engine installed, its
+        # active timer paused then restored — while the darwin host (remote Ultron) is
+        # skipped per host with an unsupported_platform row and NO mutation at all; the
+        # run ends with a partial summary and a non-zero exit.
+        self.data["hosts"] = {"ultron": {"ssh": "factory@ultron", "platform": "macos",
+                                         "engine": {"sha": OLD, "ref": "main"}}}
+        self.data["repo"]["acme/ios"] = {"path": str(self.other_repo), "host": "ultron"}
+        with mock.patch.object(host, "remote_runner") as remote_runner:
+            self.assertEqual(self.apply(upgrade=TARGET), 1, self.output.getvalue())
+            remote_runner.assert_not_called()  # darwin host never contacted => untouched
+        output = self.output.getvalue()
+        self.assertIn("unsupported_platform", output)
+        self.assertIn("ultron", output)
+        self.assertIn("https://github.com/mikeroySoft/district/issues/199", output)
+        self.assertIn("partial:", output)
+        self.assertRegex(output, r"acme/ios\b.*unsupported_platform")  # per-host skip row
+        self.assertTrue(self.installs())  # Linux host upgraded
+        self.assertEqual(host.engine(host.load(), "local")["sha"], TARGET)
+        self.backend.pause_timer.assert_called()
+        self.backend.resume_timer.assert_called()
+        self.assertEqual(self.active, {"factory-widgets.timer"})  # paused then restored
+        self.assertEqual(host.engine(host.load(), "ultron")["sha"], OLD)  # darwin unchanged
+
+    def test_macos_engine_darwin_only_fleet_skips_everything(self):
+        # Darwin-only fleet: nothing is mutated, a partial summary is printed, exit is
+        # non-zero.
+        self.data["hosts"] = {"ultron": {"ssh": "factory@ultron", "platform": "macos",
+                                         "engine": {"sha": OLD, "ref": "main"}}}
+        self.data["repo"] = {"acme/ios": {"path": str(self.other_repo), "host": "ultron"}}
+        with mock.patch.object(host, "remote_runner") as remote_runner:
+            self.assertEqual(self.apply(upgrade=TARGET), 1, self.output.getvalue())
+            remote_runner.assert_not_called()
+        output = self.output.getvalue()
+        self.assertIn("unsupported_platform", output)
+        self.assertIn("ultron", output)
+        self.assertIn("partial:", output)
+        self.assertEqual(self.installs(), [])
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
+        self.backend.stop.assert_not_called()
+        self.backend.start.assert_not_called()
+        self.assertEqual(host.engine(host.load(), "ultron")["sha"], OLD)
+
+    def test_macos_local_darwin_skipped_alone(self):
+        # A darwin local (patched sys.platform) is the only host: skipped per host with
+        # ZERO mutation (byte-identical config, unchanged mtime, no local-claim sync), a
+        # partial summary, and a non-zero exit.
+        host.save(self.data)
+        config = host.path()
+        before = hashlib.sha256(config.read_bytes()).hexdigest()
+        before_mtime = config.stat().st_mtime_ns
+        synced = mock.Mock()
+        args = argparse.Namespace(slug=None, reset=None, upgrade=TARGET, allow_downgrade=False)
+        with mock.patch.object(apply.sys, "platform", "darwin"), \
+                mock.patch.object(host, "sync_remote_config", synced), \
+                mock.patch.object(host, "sync_local_claims") as local_sync:
+            self.assertEqual(apply._run(args, install_state.ApplyRun("", "", OLD)), 1,
+                             self.output.getvalue())
+        output = self.output.getvalue()
+        self.assertIn("unsupported_platform", output)
+        self.assertIn("local", output)
+        self.assertIn("https://github.com/mikeroySoft/district/issues/199", output)
+        self.assertIn("partial:", output)
+        self.backend.pause_timer.assert_not_called()
+        self.backend.resume_timer.assert_not_called()
+        self.backend.stop.assert_not_called()
+        self.backend.start.assert_not_called()
+        self.assertEqual(self.installs(), [])
+        self.assertEqual(host.engine(host.load(), "local")["sha"], OLD)
+        self.assertEqual(hashlib.sha256(config.read_bytes()).hexdigest(), before)
+        self.assertEqual(config.stat().st_mtime_ns, before_mtime)
+        synced.assert_not_called()
+        local_sync.assert_not_called()
+
+    def test_macos_local_darwin_skipped_with_remote_linux_host(self):
+        # A darwin local is skipped per host; a remote Linux host is NOT skipped and is
+        # reached (the old fleet-wide refusal would have blocked it).
+        self.install_receipt(TARGET)
+        self.data["defaults"]["engine"]["sha"] = TARGET
+        other = self.root / "remote-repo"
+        other.mkdir()
+        self.data["hosts"] = {"remote": {"ssh": "unused", "platform": "linux",
+                                         "engine": {"sha": TARGET, "ref": "main"}}}
+        self.data["repo"]["acme/other"] = {"path": str(other), "host": "remote"}
+        self.backend.definitions_changed.return_value = False
+        runner, _, _ = self.timeout_remote("none")
+        with mock.patch.object(apply.sys, "platform", "darwin"), \
+                mock.patch.object(host, "remote_runner", return_value=runner) as remote_runner:
+            self.assertEqual(self.apply(upgrade=TARGET), 1, self.output.getvalue())
+            remote_runner.assert_called()  # the Linux host is reached, not blocked
+        output = self.output.getvalue()
+        self.assertIn("unsupported_platform", output)
+        self.assertIn("local", output)
+        self.assertIn("partial:", output)
+        self.assertIn("factory-widgets.timer", self.active)  # local darwin timer untouched
+        self.assertEqual(host.engine(host.load(), "local")["sha"], TARGET)
+
+    def test_crash_recovery_restores_only_saved_timers_and_leaves_inactive_untouched(self):
+        # SIGKILL between stop and resume leaves the durable paused set with no readable
+        # receipt, target, or recorded SHA. A new apply restores exactly the saved
+        # active-before timers and never starts a timer that was inactive before.
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"] = {"paused_timers": ["factory-widgets.timer"]}
+        self.active.clear()  # widgets stopped by the crash; factory-dormant.timer inactive before
+        (self.tool / "uv-receipt.toml").unlink()
+        self.assertEqual(self.apply(), 1)
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        resumed = [call.args[0] for call in self.backend.resume_timer.call_args_list]
+        self.assertEqual(resumed, ["factory-widgets.timer"])
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+
+    def test_recovery_without_readable_receipt_or_recorded_revision_names_paused_timers(self):
+        # Restored from origin/main, adapted: recovery with no receipt/target/SHA now
+        # restores the named paused timers (instead of leaving them stopped) and fails.
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"] = {"paused_timers": ["factory-widgets.timer"]}
+        self.active.clear()
+        (self.tool / "uv-receipt.toml").unlink()
+        self.assertEqual(self.apply(), 1)
+        self.assertRegex(self.output.getvalue(),
+                         r"engine:local restart factory-widgets\.timer ActiveState=active")
+        self.assertEqual(self.active, {"factory-widgets.timer"})
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+        self.assertEqual(self.installs(), [])
+        # A second apply has nothing to recover and does not restore again.
+        self.data = host.load()
+        self.install_receipt(TARGET)
+        self.backend.resume_timer.reset_mock()
+        self.assertEqual(self.apply(), 0)
+        self.backend.resume_timer.assert_not_called()
+        self.assertEqual(host.engine(host.load(), "local")["paused_timers"], [])
+
+    def test_fleet_engine_change_skips_darwin_before_any_write(self):
+        # F2: a factory_ref-driven fleet change skips a darwin host before writing or
+        # syncing its engine target; the Linux host still moves. The remote-config sync is
+        # never called and no engine target is recorded for the darwin host.
+        self.data["hosts"] = {"ultron": {"ssh": "factory@ultron", "platform": "macos",
+                                         "engine": {"sha": OLD, "ref": "main"}}}
+        host.save(self.data)
+        local_ctx = (self.run_cmd, self.backend, self.data["repo"])
+        ultron_ctx = (self.run_cmd, self.backend, {})
+        synced = mock.Mock()
+        skipped: dict[str, bool] = {}
+        with mock.patch.object(host, "sync_remote_config", synced):
+            result = apply.reconcile_fleet_engine(
+                self.data, None, {"local": local_ctx, "ultron": ultron_ctx}, skipped=skipped)
+        self.assertEqual(result, "applied", self.output.getvalue())
+        self.assertEqual(set(skipped), {"ultron"})
+        self.assertTrue(self.installs())  # Linux host moved
+        self.assertEqual(host.engine(self.data, "local")["sha"], TARGET)
+        ultron = host.engine(self.data, "ultron")
+        self.assertEqual(ultron["sha"], OLD)  # darwin unchanged
+        self.assertNotIn("target", ultron)  # no engine target written/synced
+        synced.assert_not_called()
+
+    def test_recovery_interrupt_during_verification_still_restores_saved_timers(self):
+        # F3: a signal during the receipt/verify checks must still restore the durable
+        # saved set before honoring the interrupt (restore runs before the checks escape).
+        self.data["defaults"].pop("factory_ref")
+        self.data["defaults"]["engine"] = {"sha": OLD, "paused_timers": ["factory-widgets.timer"]}
+        self.active.clear()  # widgets stopped by the crash, pending restore
+        with mock.patch.object(apply, "_verify_engine", side_effect=SystemExit(143)):
+            with self.assertRaises(SystemExit) as raised:
+                self.apply()
+        self.assertEqual(raised.exception.code, 143)
+        self.assertEqual(self.active, {"factory-widgets.timer"})  # restored before honoring
+        resumed = [call.args[0] for call in self.backend.resume_timer.call_args_list]
+        self.assertEqual(resumed, ["factory-widgets.timer"])
+        self.assertEqual(host.engine(host.load(), "local").get("paused_timers"), [])
+
+    def test_restoration_recheck_remote_error_does_not_abandon_later_timers(self):
+        # F4: host.RemoteHostError from the post-interrupt is_active recheck subclasses
+        # RuntimeError, not OSError; it must not escape the sweep and abandon later timers.
+        self.data["defaults"]["engine"] = {
+            "sha": OLD, "paused_timers": ["factory-a.timer", "factory-b.timer"]}
+        resumes, rechecked = [], []
+
+        def resume(name, **kwargs):
+            resumes.append(name)
+            if len(resumes) == 1:
+                raise SystemExit(143)  # the signal lands during the first resume
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        def is_active(name, **kwargs):
+            if not rechecked:
+                rechecked.append(name)
+                raise host.RemoteHostError("ultron", "ssh query failed")
+            return "active"
+
+        self.backend.resume_timer.side_effect = resume
+        self.backend.is_active.side_effect = is_active
+        with self.assertRaises(SystemExit) as raised:
+            apply._restore_engine_timers(self.data, "local", self.run_cmd, self.backend,
+                                         install_state.ApplyRun("", "", OLD))
+        self.assertEqual(raised.exception.code, 143)
+        self.assertEqual(set(resumes), {"factory-a.timer", "factory-b.timer"})  # none abandoned
+        self.assertEqual(host.engine(host.load(), "local").get("paused_timers"), [])
+
+    def test_linux_failure_still_shows_darwin_skip_row_and_partial(self):
+        # F5: a propagated DistrictError on the Linux host must not swallow the per-host
+        # darwin skip row (emitted when decided) or the partial summary.
+        self.data["hosts"] = {"ultron": {"ssh": "factory@ultron", "platform": "macos",
+                                         "engine": {"sha": OLD, "ref": "main"}}}
+        self.data["repo"]["acme/ios"] = {"path": str(self.other_repo), "host": "ultron"}
+        real_apply_host = apply._apply_host
+
+        def failing(data, host_name, *args, **kwargs):
+            if host_name == "local":
+                raise host.DistrictError("drain timed out on local")
+            return real_apply_host(data, host_name, *args, **kwargs)
+
+        with mock.patch.object(host, "remote_runner"), \
+                mock.patch.object(apply, "_apply_host", side_effect=failing):
+            with self.assertRaises(host.DistrictError):
+                self.apply(upgrade=TARGET)
+        output = self.output.getvalue()
+        self.assertRegex(output, r"acme/ios\b.*unsupported_platform")  # skip row before failure
+        self.assertIn("partial:", output)
+        self.assertIn("ultron", output)
 
 if __name__ == "__main__":
     unittest.main()

@@ -287,6 +287,16 @@ class SystemdUserBackend(ServiceBackend):
         units.update(line.split()[0] for line in proc.stdout.splitlines() if line.split())
         return {name for name in units if name.endswith((".service", ".timer"))}
 
+    def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired([self.executable, "stop", name], timeout)
+        return self.stop(name, timeout=timeout)
+
+    def resume_timer(self, name: str, *, timeout: float = 10) -> subprocess.CompletedProcess:
+        if timeout <= 0:
+            raise subprocess.TimeoutExpired([self.executable, "start", name], timeout)
+        return self.start(name, check=False, timeout=timeout)
+
 
     def _run(self, *args: str, check: bool = True,
              timeout: float | None = None) -> subprocess.CompletedProcess:
@@ -504,11 +514,18 @@ class LaunchdBackend(ServiceBackend):
         return units
 
     def pause_timer(self, name: str, *, timeout: float) -> subprocess.CompletedProcess:
-        # Disable scheduling without bootout, which would kill the in-flight pass.
-        return self._run("disable", f"{self.domain}/{self._label(name)}", timeout=timeout)
+        # macOS engine pause-and-drain is unsupported pending issue #199. The engine
+        # upgrade path refuses before reaching here (district.apply fails closed on a
+        # darwin host); override the disable-based default so no `launchctl`
+        # disable/enable/bootout is ever reachable from the engine pause/resume path.
+        raise NotImplementedError(
+            "unsupported_platform: launchd engine pause-and-drain is Linux/systemd only; "
+            "see https://github.com/mikeroySoft/district/issues/199")
 
     def resume_timer(self, name: str, *, timeout: float = 10) -> subprocess.CompletedProcess:
-        return self._run("enable", f"{self.domain}/{self._label(name)}", check=False, timeout=timeout)
+        raise NotImplementedError(
+            "unsupported_platform: launchd engine pause-and-drain is Linux/systemd only; "
+            "see https://github.com/mikeroySoft/district/issues/199")
 
 
     @property

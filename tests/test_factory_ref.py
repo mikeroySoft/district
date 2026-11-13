@@ -46,10 +46,12 @@ class FactoryRefTest(unittest.TestCase):
               active_timers: list[str] | None = None, backend: mock.Mock | None = None,
               record: install_state.ApplyRun | None = None):
         calls: list[list[str]] = []
+        installed_version = "0.4.7"
         if backend is None:
             # Never let the default backend reach the real systemctl/launchctl.
             backend = mock.Mock()
             backend.status.return_value.loaded = False
+            backend.enable.return_value = self.proc([])
 
         backend.configuration.return_value = {"platform": "linux"}
         def run(argv, **kwargs):
@@ -72,15 +74,30 @@ class FactoryRefTest(unittest.TestCase):
                 return self.proc(argv, checks)
             if argv[:3] == ["uv", "tool", "install"]:
                 source = argv[argv.index("--from") + 1]
-                receipt(source.rsplit("@", 1)[1].split("[", 1)[0])
+                target_ref = (host.engine(document, "local") or {}).get("target_ref", "")
+                version = target_ref.removeprefix("v") if target_ref.startswith("v") else "0.4.7"
+                receipt(source.rsplit("@", 1)[1].split("[", 1)[0], version)
+            if argv == [str(cli), "--version"]:
+                return self.proc(argv, f"factory {installed_version}\n")
             return self.proc(argv)
 
         document = data or self.data()
         active = set(active_timers or [])
         backend.is_active.side_effect = lambda unit, **kwargs: "active" if unit in active else "inactive"
         backend.factory_units.return_value = set()
-        backend.pause_timer.side_effect = backend.enable
-        backend.resume_timer.return_value = self.proc([])
+
+        def pause_timer(unit, **kwargs):
+            proc = backend.enable(unit, False, **kwargs)
+            if proc.returncode == 0:
+                active.discard(unit)
+            return proc
+
+        def resume_timer(unit, **kwargs):
+            active.add(unit)
+            return self.proc([])
+
+        backend.pause_timer.side_effect = pause_timer
+        backend.resume_timer.side_effect = resume_timer
         backend.start.return_value = self.proc([])
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -100,13 +117,21 @@ class FactoryRefTest(unittest.TestCase):
             cli.parent.mkdir(parents=True)
             cli.symlink_to(tool / "bin/factory")
 
-            def receipt(sha):
+            def receipt(sha, version="0.4.7"):
+                nonlocal installed_version
+                installed_version = version
                 (tool / "uv-receipt.toml").write_text(
                     f'[tool]\nrequirements = [{{name = "factory", git = "{ORIGIN}?rev={sha}"}}]\n')
+                for metadata in tool.glob("lib/python*/site-packages/factory-*.dist-info/METADATA"):
+                    metadata.unlink()
+                metadata = tool / f"lib/python3.12/site-packages/factory-{version}.dist-info/METADATA"
+                metadata.parent.mkdir(parents=True, exist_ok=True)
+                metadata.write_text(f"Name: factory\nVersion: {version}\n")
 
             receipt(document.get("defaults", {}).get("engine", {}).get("sha", OLD))
             with mock.patch.dict("os.environ", env), \
                     mock.patch.object(apply, "run", side_effect=run), \
+                    mock.patch.object(apply.syslog, "syslog"), \
                     mock.patch.object(host, "save"):
                 self.assertTrue(host.path().is_relative_to(root), host.path())
                 result = apply.reconcile_engine(document, record, backend=backend)

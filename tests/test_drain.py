@@ -1,4 +1,4 @@
-"""Issue #149: flags admit an idle engine swap without pausing timers."""
+"""Explicit drain flag lifecycle and failure handling."""
 from __future__ import annotations
 
 import contextlib
@@ -9,8 +9,6 @@ import shlex
 import subprocess
 import sys
 import unittest
-from datetime import timedelta
-from pathlib import Path
 from unittest import mock
 
 from tests import test_one_install as fixtures
@@ -40,11 +38,6 @@ class DrainTest(unittest.TestCase):
     def record(self):
         return install_state.read_record()["last_apply"]
 
-    def assert_no_timer_changes(self, case):
-        for method in ("pause_timer", "resume_timer", "enable", "stop"):
-            getattr(case.backend, method).assert_not_called()
-        self.assertFalse(any(argv[0] in ("factory", str(case.cli)) and argv[1:] == ["install"]
-                             for argv, _ in case.calls))
 
     def test_drain_waits_for_running_pass_then_applies(self):
         with self.case() as case:
@@ -69,14 +62,7 @@ class DrainTest(unittest.TestCase):
             for key in ("requested_at", "idle_at", "applied_at", "cleared_at"):
                 self.assertIsInstance(entry[key], str)
             self.assertEqual(entry["folders_before"], entry["folders_after"])
-            self.assert_no_timer_changes(case)
 
-    def test_drain_never_touches_timers(self):
-        with self.case() as case:
-            case.backend.definitions_changed.return_value = True
-            self.assertEqual(self.run_apply(case), 0)
-            self.assert_no_timer_changes(case)
-            self.assertIn("unit changes deferred during district drain", self.record()["deferred"][0]["reason"])
 
     def test_drain_clears_flag_on_failure(self):
         with self.case() as case:
@@ -96,7 +82,6 @@ class DrainTest(unittest.TestCase):
             self.assertEqual(host.engine(host.load(), "local")["sha"], fixtures.OLD)
             self.assertFalse(drain.path().exists())
             self.assertIsNone(self.record()["drain"]["applied_at"])
-            self.assert_no_timer_changes(case)
 
     def timeout_case(self, case):
         clock = [0.0]
@@ -113,17 +98,7 @@ class DrainTest(unittest.TestCase):
             self.assertIsNotNone(self.record()["drain"]["cleared_at"])
             self.assertIsNone(self.record()["drain"]["idle_at"])
             self.assertEqual(self.record()["drain"]["waited_s"], 2)
-            self.assert_no_timer_changes(case)
 
-    def test_drain_timeout_applies_nothing(self):
-        with self.case() as case:
-            host.save(case.data)
-            before = host.path().read_bytes()
-            self.timeout_case(case)
-            self.assertFalse(case.installs())
-            self.assertEqual(host.path().read_bytes(), before)
-            self.assertIn("drain timeout (busy: factory-widgets.service)", self.record()["deferred"][0]["reason"])
-            self.assertEqual(self.record()["exit_status"], 1)
 
     def test_drain_clears_flag_on_signal(self):
         for signum in (signal.SIGTERM, signal.SIGINT):
@@ -159,15 +134,6 @@ class DrainTest(unittest.TestCase):
             self.assertTrue(case.installs())
             self.assertFalse(drain.path().exists())
 
-    def test_no_drain_flag_keeps_defer_behavior(self):
-        with self.case() as case:
-            case.busy = 100
-            self.assertEqual(self.run_apply(case, []), 0)
-            self.assertFalse(case.installs())
-            self.assertFalse(drain.path().exists())
-            self.assertNotIn("drain", self.record())
-            self.assertIn("engine deferred (busy: factory-widgets.service)", case.output.getvalue())
-            self.assert_no_timer_changes(case)
 
     def test_operator_stopped_timer_stays_stopped_through_drain(self):
         with self.case() as case:
@@ -175,7 +141,6 @@ class DrainTest(unittest.TestCase):
             self.assertEqual(self.run_apply(case), 1)
             self.assertEqual(case.backend.is_active("factory-widgets.timer"), "inactive")
             self.assertTrue(case.installs())
-            self.assert_no_timer_changes(case)
 
     def test_handland_units_do_not_count_busy_during_drain(self):
         with self.case() as case:
@@ -184,7 +149,6 @@ class DrainTest(unittest.TestCase):
             self.assertEqual(self.run_apply(case), 0)
             self.assertTrue(case.installs())
             self.assertNotIn(("state", handland), case.events)
-            self.assert_no_timer_changes(case)
 
     def test_drain_waits_for_discovered_active_service(self):
         with self.case() as case:
@@ -210,51 +174,6 @@ class DrainTest(unittest.TestCase):
             self.assertTrue(case.installs())
             self.assertGreaterEqual(case.sleep.call_count, 2)
 
-    def test_repeated_engine_deferral_automatically_drains(self):
-        with self.case() as case:
-            host.save(case.data)
-            case.busy = 100
-            for _ in range(3):
-                self.assertEqual(apply.main([]), 0)
-                self.assertFalse(drain.path().exists())
-                self.assertFalse(case.installs())
-            self.assertEqual(self.record()["engine_deferrals"]["engine"], 3)
-            case.busy = 2
-            self.assertEqual(apply.main([]), 0)
-            self.assertTrue(case.installs())
-            self.assertIsNotNone(self.record()["drain"]["applied_at"])
-            self.assertNotIn("engine_deferrals", self.record())
-            self.assert_no_timer_changes(case)
-
-    def test_day_old_pending_engine_automatically_drains(self):
-        with self.case() as case:
-            host.save(case.data)
-            record = install_state.ApplyRun.start()
-            record.defer("engine", "busy: factory-widgets.service")
-            record.deferred["engine"]["since"] = apply.iso(apply.now() - timedelta(hours=25))
-            record.finish(0)
-            previous = install_state.read_record()
-            previous["schema_version"] = 2
-            install_state.write_record(previous)
-            case.busy = 2
-            self.assertEqual(apply.main([]), 0)
-            self.assertTrue(case.installs())
-            self.assertFalse(drain.path().exists())
-            self.assertIn("drain", self.record())
-
-    def test_current_engine_does_not_trigger_automatic_drain(self):
-        with self.case() as case:
-            case.install_receipt(fixtures.TARGET)
-            case.data["defaults"]["engine"]["sha"] = fixtures.TARGET
-            host.save(case.data)
-            record = install_state.ApplyRun.start()
-            for _ in range(3):
-                record.defer("engine", "busy: factory-widgets.service")
-            record.finish(0)
-            self.assertEqual(apply.main([]), 0)
-            self.assertNotIn("drain", self.record())
-            self.assertFalse(case.installs())
-
     def test_explicit_drain_skips_current_engines_on_local_and_remote_hosts(self):
         for placement in ("local", "remote", "both"):
             with self.subTest(placement=placement), self.case() as case:
@@ -269,12 +188,22 @@ class DrainTest(unittest.TestCase):
                     if placement == "remote":
                         case.data["repo"]["acme/widgets"]["host"] = "remote"
                     else:
+                        remote_repo = case.root / "remote"
+                        remote_repo.mkdir()
                         case.data["repo"]["acme/remote"] = {
-                            "path": str(case.repo), "host": "remote",
+                            "path": str(remote_repo), "host": "remote",
                         }
                 runner, _, _ = case.timeout_remote("none")
                 with mock.patch.object(host, "remote_runner", return_value=runner):
-                    self.assertEqual(self.run_apply(case), 0)
+                    if placement == "local":
+                        self.assertEqual(self.run_apply(case), 0)
+                    else:
+                        # macOS pause-and-drain is unsupported pending #199: an explicit
+                        # --drain skips each darwin host per host with no mutation and a
+                        # non-zero (partial) exit, continuing on any Linux host.
+                        self.assertEqual(self.run_apply(case), 1, case.output.getvalue())
+                        self.assertIn("unsupported_platform", case.output.getvalue())
+                        self.assertIn("remote", case.output.getvalue())
                 self.assertNotIn("drain", self.record())
                 self.assertNotIn("drains", self.record())
                 apply.postcheck.check.assert_not_called()
@@ -292,9 +221,10 @@ class DrainTest(unittest.TestCase):
     def test_remote_drain_writes_and_removes_flag_over_ssh(self):
         with self.case() as case:
             case.data["hosts"] = {
-                "remote": {"ssh": "unused", "platform": "macos", "engine": {"sha": fixtures.OLD, "ref": "main"}}}
+                "remote": {"ssh": "unused", "platform": "linux", "engine": {"sha": fixtures.OLD, "ref": "main"}}}
             case.data["repo"]["acme/widgets"]["host"] = "remote"
-            case.backend.configuration.return_value = {"platform": "macos", "executable": "launchctl"}
+            case.backend.configuration.return_value = {"platform": "linux", "unit_dir": str(host.unit_dir()),
+                                                       "executable": "systemctl"}
             case.busy = 2
             runner, _, commands = case.timeout_remote("none")
             original = runner.transport
@@ -320,18 +250,10 @@ class DrainTest(unittest.TestCase):
                                 for command in commands if command[:2] == ["python3", "-c"]))
             self.assertTrue(any("unlink" in command[2] and command[-1].endswith("/drain")
                                 for command in commands if command[:2] == ["python3", "-c"]))
-            self.assert_no_timer_changes(case)
-            remote_config = Path(runner.facts()["config_home"]) / "factory/config.toml"
-            before = remote_config.read_bytes()
-            case.install_receipt(fixtures.OLD)
-            with mock.patch.object(host, "remote_runner", return_value=runner):
-                self.timeout_case(case)
-            self.assertEqual(remote_config.read_bytes(), before, "timeout must not sync or migrate remote config")
-            self.assertFalse(drain.path().exists())
 
     def test_failed_flag_write_does_not_register_a_live_drain(self):
         with self.case() as case:
-            record = install_state.ApplyRun("", "", fixtures.OLD, engine_deferrals={"engine": 3})
+            record = install_state.ApplyRun("", "", fixtures.OLD)
             with contextlib.ExitStack() as stack:
                 record.drain_stack = stack
                 with mock.patch.object(drain, "request", side_effect=OSError("state directory denied")):
@@ -368,23 +290,18 @@ class DrainTest(unittest.TestCase):
             self.assertFalse(drain.path().exists())
             self.assertIn("legacy engine cleanup incomplete", case.output.getvalue())
 
-    def test_automatic_drain_honors_drain_timeout_option(self):
+    def test_drained_recovery_completes_pending_install(self):
         with self.case() as case:
-            host.save(case.data)
-            record = install_state.ApplyRun.start()
-            for _ in range(3):
-                record.defer("engine", "busy: factory-widgets.service")
-            record.finish(0)
-            case.busy = 100
-            clock = [0.0]
-            case.sleep.side_effect = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
-            with mock.patch.object(apply.time, "monotonic", side_effect=lambda: clock[0]):
-                with self.assertRaisesRegex(host.DistrictError, "drain timeout.*factory-widgets.service"):
-                    apply.main(["--drain-timeout", "2s"])
-            self.assertFalse(case.installs())
+            case.install_receipt(fixtures.TARGET)
+            case.data["defaults"]["engine"] = {
+                "sha": fixtures.OLD, "ref": "main",
+                "install_pending": {"target": fixtures.TARGET, "ref": "v0.4.7"}}
+            self.assertEqual(self.run_apply(case), 0, case.output.getvalue())
+            engine = host.engine(host.load(), "local")
+            self.assertEqual(engine["sha"], fixtures.TARGET)
+            self.assertFalse(engine.get("install_pending"))
+            self.assertEqual(case.installs(), [])  # the TARGET receipt is verified, not reinstalled
             self.assertFalse(drain.path().exists())
-            self.assertEqual(self.record()["drain"]["waited_s"], 2)
-
 
 if __name__ == "__main__":
     unittest.main()

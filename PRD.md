@@ -163,27 +163,27 @@ Reconcile the host to the registry. Idempotent; safe to run any time.
   a selected tag commit must itself be green. District records one target under
   `[defaults.engine]` locally or `[hosts.NAME.engine]` remotely. Installing an
   ancestor is refused unless `--allow-downgrade` is supplied.
-- **Bounded upgrade window.** Defer with a named reason for outside hand work,
-  then pause only active Factory timers and wait within the configured limit for
-  non-dashboard services and uv-tool Factory processes to become idle. Only
-  semantic dashboard commands are exempt; dashboard-owned gate/dispatch is
-  outside work. Managed exemptions require stable owning-host PID/start-time
-  identities, including launchd parents/anchors. Install the one `factory` tool
-  with `uv tool install --force`; verify the receipt revision and CLI. On install
-  or verification failure, recheck outside work and the original idle deadline
-  before reinstalling and verifying the previous revision. Fleet replacement
-  and rollback use the same guards. Restore exactly the paused timers in
-  `finally`; an unverified tool or blocked automatic rollback retains named
-  paused/recovery intent for the next idle apply. Restart dashboards after a
-  verified change.
+- **Bounded upgrade window.** Every engine replacement snapshots Factory timer
+  state, stops only timers that were initially active, and waits up to
+  `--drain-timeout` (default 90 minutes) for existing Factory services to
+  finish. District logs progress through the wait and subsequent
+  replacement. While timers are paused it never stops, kills, or starts a
+  service. It writes printed Linux units and runs `daemon-reload` without
+  launching services; launchd drift is deferred rather than bootstrapping jobs.
+  Verify the receipt SHA and clean CLI version against distribution metadata
+  (and a release tag's version). On failure, reinstall and verify the previous revision. Restore
+  exactly the prior timer state on success, failure, timeout, SIGTERM, and
+  SIGINT. `--drain` remains accepted as an explicit flag but is not required for
+  this protocol; ordinary non-engine apply retains its existing behavior.
 - **Migration and cleanup.** Remove a legacy `factory_source` setting through
   the host config writer after making a timestamped backup. After a successful
   engine step and repo render, scan every managed systemd unit, Factory launchd
   plist, the host config, and uv receipt before deleting an unreferenced
   `factory-*` directory. Keep and report referenced folders and symlinks; an
   incomplete scan deletes nothing.
-- Per repo (all, or the one named): `factory install` (re-renders units with the
-  current `PATH` and `ExecStart`), ensure labels, `factory doctor --json`.
+- Per repo (all, or the one named): outside an engine-replacement window,
+  `factory install` re-renders units with the current `PATH` and `ExecStart`;
+  ensure labels and run `factory doctor --json`.
 - **Failure cap.** Count consecutive failed dispatcher passes from the journal.
   At `[defaults.max_failed_passes]` (default 10) in a row, `systemctl --user
   disable --now` the timer and report it. A pass that fails every ten minutes
