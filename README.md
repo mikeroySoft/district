@@ -44,7 +44,7 @@ only once.
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations and per-host engine release drift, including registered hosts without repositories. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. Exit 1 means operational attention, an engine not at the latest stable release, or failed controller `gh auth status`; exit 2 means unknown observation or release identity when no row needs attention. Exit 0 means every observation is normal. `--json` adds a top-level `engines` map beside classifications and metrics keyed by slug, plus `host` when gh auth fails. `--slug OWNER/REPO` (repeatable) limits repository collection and output; `--unhealthy` prints only non-normal repository rows. Both retain all-host engine status. |
 | `district doctor` | Check District's own host prerequisites, rerun each factory's scheduler toolchain preflight, and check declared toolchain profiles. `--json`. |
-| `district report` | Print a read-only Markdown fleet review across every host; each repository section names its host and unreachable last-seen state. The install section comes from the persisted install-state record. |
+| `district report` | Print a read-only Markdown fleet review across every host; each repository section names its host and unreachable last-seen state. Host-only findings (e.g. a configured host with no assigned repositories) appear under a separate Host findings section and are excluded from the registered-repository count, coverage, and aggregates. The install section comes from the persisted install-state record. |
 | `district metrics [slug]` | Per-factory `git`/`gh` metrics from the hourly cache. `--refresh`, `--max-age`. |
 | `district dashboard` | Serve the fleet console and host-badged Atlas on `127.0.0.1:8760`. `--install` enables the dashboard, metrics, and apply units; `--host` adds read-only LAN viewing. Remote collection is controller-initiated SSH and opens no listeners. |
 | `district update` | Update District itself from eligible official CI, then run the newly installed `district apply --drain` after releasing the update lock. Dry runs and failed updates never request a drain. `--dry-run`, `--to REF`, `--rollback` (offline), `--yes`, `--json`. |
@@ -74,42 +74,54 @@ even when District temporarily disabled them. Missing or failed timers and
 unrecorded disabled timers still fail convergence, as do failed repo checks and
 registry `disabled_at` holds. Deferred rows keep their existing handling.
 
-## Repeated pass failures
+## Job health
 
-`district status` raises operational attention (exit 1) when a factory's last
-N recorded service passes **on the same host** all failed. The evidence column
-names the host, repo, N, first failure time in that window, and the last error
-line when available. `district doctor` reports the same streak as `FAIL`.
-Every assigned host is checked, not just a multi-host repo's triage host.
+`district status` and `district report` raise operational attention (exit 1),
+and `district doctor` reports `FAIL`, when a factory's last N recorded service
+passes **on the same host and job** all failed. `[defaults].failed_pass_streak`
+overrides the threshold (default 3); remote `[hosts.NAME.defaults]` overrides
+apply.
 
-Configure N in the host registry; the default is 6:
+This is a read-only alert, separate from `max_failed_passes` and apply's timer
+failure cap. One success among the last N passes clears the streak; fewer than N
+completions does not alert. Nonzero service/dispatch exits count as failures even
+when triage or watch succeeded. A manager's latest exit is never expanded into
+multiple runs, and repeated status polls never create history.
 
-```toml
-[defaults]
-failed_pass_streak = 6 # positive integer; one hour at install.every = "10min"
-```
-
-Remote `[hosts.NAME.defaults]` overrides apply to this setting too. This is a
-read-only alert, separate from `max_failed_passes` and apply's timer failure cap.
-One success among the last N passes clears the streak; fewer than N completions
-does not alert. Unreachable hosts do not produce streaks and retain unknown
-exit 2 when there is no other operational attention.
+Every configured `[hosts.NAME]` entry is inspected, including hosts without
+assigned repositories. Status adds `host:NAME` rows for `host_without_repos`
+and `unrecognized_factory_job` findings. Recognized hand-made launchd labels
+are matched by the `factory-REPO` suffix or an unambiguous working directory.
+`--slug` limits repository output, not host discovery. Unreachable hosts retain
+unknown exit 2 when there is no other operational attention.
 
 Linux reads retained systemd user-journal unit completion results, including
 failures before Factory can import. macOS reads the launchd plist's stdout/stderr
 pass logs, or conventional `.factory/logs/factory-REPO.{stdout,stderr}.log` and
 `~/Library/Logs/factory-REPO.log` paths when no plist log paths are declared.
-Pass logs need `=== end rc=CODE` markers and an ISO-8601 timestamp with timezone
-on the pass's opening marker or end line. A single manager exit status is not
-treated as N passes; status polls never create pass history. Reads are bounded
-to the latest 10,000 journal records or 4 MiB per log; missing, rotated-away,
-or insufficient history cannot establish a streak.
+macOS needs no journalctl. A dashboard or history read that cannot launch
+journalctl produces `journalctl_unavailable` rather than a traceback escaping
+District.
 
-`status --json` includes a `failure_streaks` list per repo, with `host`, `repo`,
-`count`, `first_failed_at`, `last_failed_at`, and nullable `last_error`. It also
-adds the evidence to the existing operational findings. History read errors
-appear in `pass_history_errors` (host, repo, error, unreachable) and as doctor
-warnings; an observation failure is not a failed factory pass.
+Pass logs need `=== end rc=CODE` markers and an ISO-8601 timestamp with timezone
+on the pass's opening marker or end line. Streaks are computed only from UTC
+evidence: journal `__REALTIME_TIMESTAMP` and ISO-8601 pass-log stamps. Native
+pass-history parsing from human-zoned launchd/`systemctl show` timestamps
+(local-timezone abbreviations, plain `date` output, timer activation) and the
+failure-rate and stall checks built on it are **not supported here**; they are
+tracked in [district#204](https://github.com/mikeroySoft/district/issues/204)
+and rebuilt on UTC-only inputs. Until then, launchd runs District can observe
+only through such local-zone stamps surface as a `launchd_history_unsupported`
+gap, never a streak and never healthy evidence. Reads are bounded to the latest
+10,000 journal records or 4 MiB per log; rotated-away history is not evidence.
+
+`status --json` includes the per-repo `failure_streaks` list. Each alert
+includes `host`, `repo` (null for an unregistered job), `label`, `rule`
+(`failure_streak`), `count`, `first_failed_at`, `last_failed_at`, and nullable
+`first_error`/`last_error`. The table names the host, label, failure count, and
+first real error line; benign `0 failed`/`triage OK` summaries never displace an
+actual error. `pass_history_errors` includes host, repo, label, code, error, and
+unreachable state; read errors are not failed job runs.
 
 ## Ownership
 
@@ -483,12 +495,20 @@ README.
 ## Development
 
 ```sh
-uv run python -m unittest discover -s tests
+uv run --frozen python -m unittest discover -s tests
 ```
 
 Standalone filesystem/CLI fixtures must isolate `HOME`, XDG config/state/data/cache,
 and uv tool/bin directories under temporary roots and replace external runners.
-The suite does not require the invoking shell to sandbox the developer's home.
+Fixtures that can reach native job discovery must also isolate `XDG_RUNTIME_DIR`
+and `DBUS_SESSION_BUS_ADDRESS`: systemd can reach the live user manager through
+either endpoint even with a temporary home. Projection fixtures isolate both;
+service integration fixtures use their stubbed `systemctl` on `PATH`.
+The suite and Factory gate do not require a shell-level environment sandbox:
+
+```sh
+factory gate
+```
 
 District shells out to the `factory` CLI and never imports `agent_factory`
 internals. If District needs a per-repo fact or action, the fix is a flag on

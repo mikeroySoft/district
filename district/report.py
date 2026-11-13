@@ -201,18 +201,41 @@ def _install_lines(record: dict | None) -> list[str]:
     ]
 
 
+def _host_findings(host_slugs: list[str], entries: dict[str, dict]) -> list[str]:
+    if not host_slugs:
+        return []
+    lines = ["## Host findings", "",
+             "Host-level findings are not registered repositories; they are excluded from the counts, "
+             "coverage and aggregates above.", ""]
+    for slug in host_slugs:
+        name = str(slug).split(":", 1)[1]
+        lines += [f"### {name}", ""]
+        findings = entries[slug].get("findings") or []
+        rows = []
+        for item in findings:
+            evidence = item.get("evidence") or []
+            detail = next((ev.get("detail") for ev in evidence if ev.get("detail")), None)
+            rows.append(f"- {item.get('condition_code', 'finding')} ({item.get('resource', 'host')}): "
+                        f"{detail or item.get('impact', 'unavailable')}")
+        lines += rows or ["- No host findings recorded"]
+        lines.append("")
+    return lines
+
+
 def render(entries: dict[str, dict], generated_at: datetime | None = None,
            install: dict | None = None) -> str:
     """Render supplied observations without collecting or mutating anything."""
     at = generated_at or _now()
-    registered = len(entries)
+    repo_slugs = sorted(slug for slug in entries if not str(slug).startswith("host:"))
+    host_slugs = sorted(slug for slug in entries if str(slug).startswith("host:"))
+    registered = len(repo_slugs)
     lines = ["# District fleet review", "", f"Generated: {_stamp(at)}",
              f"Registered repositories: {registered}",
              "Observation: one bounded, non-atomic fleet round; per-source times are retained.",
              f"Coverage: every registered repository is listed; unavailable fields are not zero. {GITHUB_LIMIT_NOTE}", "",
              *_install_lines(install)]
     summaries = []
-    for slug in sorted(entries):
+    for slug in repo_slugs:
         section, summary = _repository(slug, entries[slug], at)
         lines += section
         summaries.append(summary)
@@ -237,13 +260,16 @@ def render(entries: dict[str, dict], generated_at: datetime | None = None,
               f"- {_aggregate_rate(summaries, 'first_pass', 'First-gate pass', registered)}",
               f"- {_aggregate_rate(summaries, 'bounce_rate', 'Review-bounce', registered)}",
               f"- {GITHUB_LIMIT_NOTE}", ""]
+    lines += _host_findings(host_slugs, entries)
     return "\n".join(lines)
 
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="district report", description=__doc__.split("\n", 1)[0])
     parser.parse_args(argv)
-    entries = status.fleet(host.load())
+    data = host.load()
+    entries = status.fleet(data)
+    status.add_job_health(data, entries, status.COLLECTION_TIMEOUT)
     print(render(entries, _now(), install_state.read_record()))
     if any(entry.get("assessment") == "attention" for entry in entries.values()):
         return 1

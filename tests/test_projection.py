@@ -60,6 +60,8 @@ class ProjectionTest(unittest.TestCase):
             "XDG_STATE_HOME": str(self.root / "state"),
             "XDG_CACHE_HOME": str(self.root / "cache"),
             "XDG_DATA_HOME": str(self.root / "data"),
+            "XDG_RUNTIME_DIR": str(self.root / "runtime"),
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={self.root / 'session-bus'}",
             "UV_TOOL_DIR": str(self.root / "tools"),
             "UV_TOOL_BIN_DIR": str(self.root / "bin"),
         }))

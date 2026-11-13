@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from unittest import mock
 
 from district import report
-from district import host, metrics
+from district import health, host, metrics
 from tests.test_collector import runtime
 from tests.test_district import DistrictCase, dashboard
 
@@ -48,11 +48,29 @@ def entry(*, assessment="normal", observed="2026-09-17T11:59:00Z", cache=True,
         }
     failure = error if snapshot else "factory dashboard unavailable"
     return {
+        "host": "local", "host_state": "reachable",
         "assessment": assessment, "observation": quality, "snap": snap, "metrics": metrics,
         "error": failure,
         "sources": [{"id": "factory.snapshot", "observed_at": observed if snapshot else None,
                      "observation": quality if snapshot else "unavailable", "error": failure}],
     }
+
+
+def host_finding(name="spare"):
+    sources = [{
+        "id": f"district.pass-history/{name}/registry/host_without_repos",
+        "observed_at": "2026-09-17T11:59:00Z", "cadence_seconds": 60.0, "error": None,
+        "data": {"checks": [{
+            "condition": "host_without_repos", "resource": f"{name}/registry", "status": "failed",
+            "detail": f"host_without_repos: {name}: configured host has no assigned repositories",
+            "impact": "Fleet job coverage is incomplete or does not match the host registry.",
+            "reference": "native service job history",
+        }]},
+    }]
+    classified = health.classify(f"host:{name}", sources, {})
+    return {"host": name, "host_state": "reachable", "snap": None, "metrics": None,
+            "error": None, "assessment": "attention", "failure_streaks": [],
+            "pass_history_errors": [], **classified}
 
 
 class ReportTest(unittest.TestCase):
@@ -130,6 +148,18 @@ class ReportTest(unittest.TestCase):
         self.assertIn("Comparable count coverage: 1/1 repositories", clean)
         self.assertIn("- Current escalated tickets: 0 (from 1/1 repositories)", clean)
 
+    def test_host_findings_are_not_counted_as_repositories(self) -> None:
+        entries = {"acme/widgets": entry(), "host:spare": host_finding("spare")}
+        output = report.render(entries, AT)
+        self.assertIn("Registered repositories: 1", output)
+        self.assertNotIn("## host:spare", output)
+        self.assertIn("Comparable count coverage: 1/1 repositories", output)
+        self.assertIn("First-gate pass aggregate: 75% (3/4)", output)
+        self.assertIn("## Host findings", output)
+        self.assertIn("### spare", output)
+        self.assertIn("host_without_repos", output)
+        self.assertIn("configured host has no assigned repositories", output)
+
     def test_empty_fleet_and_operational_exit_semantics(self) -> None:
         self.assertIn("Registered repositories: 0", report.render({}, AT))
         cases = [({}, 0), ({"a/repo": entry(assessment="unknown")}, 2),
@@ -140,6 +170,7 @@ class ReportTest(unittest.TestCase):
             with self.subTest(expected=expected), \
                  mock.patch.object(report.host, "load", return_value={"repo": {}}), \
                  mock.patch.object(report.status, "fleet", return_value=fleet), \
+                 mock.patch.object(report.status.streak, "collect", return_value=([], [])), \
                  mock.patch.object(report, "_now", return_value=AT), \
                  contextlib.redirect_stdout(out):
                 self.assertEqual(report.main([]), expected)
@@ -152,6 +183,11 @@ class ReportTest(unittest.TestCase):
 
 
 class ReportCLITest(DistrictCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.stub("systemctl")
+        self.stub("journalctl")
+
     def _cache(self, snap: dict) -> None:
         cache = metrics.cache_path("acme/widgets")
         cache.parent.mkdir(parents=True, exist_ok=True)
@@ -172,7 +208,7 @@ class ReportCLITest(DistrictCase):
                       "acme/widgets", stamp=snap["generated_at"]))),
                   ("dashboard --json", json.dumps(snap), 1),
                   ("*", "unexpected Factory command", 99))
-        for name in ("gh", "systemctl", "uv"):
+        for name in ("gh", "uv"):
             self.stub(name, ("*", "unexpected management/collector command", 99))
         for log in self.bin.glob("*.log"):
             log.unlink()
@@ -192,7 +228,7 @@ class ReportCLITest(DistrictCase):
         self.assertIn("Totals below are partial", out)
         self.assertCountEqual(self.calls("factory"),
                               ["dashboard --runtime-json", "dashboard --json"])
-        for name in ("gh", "systemctl", "uv"):
+        for name in ("gh", "uv"):
             self.assertEqual(self.calls(name), [])
         self.assertEqual(host.load(), registry)
         self.assertEqual({p: p.read_bytes() for root in roots
@@ -217,7 +253,7 @@ class ReportCLITest(DistrictCase):
                           ("dashboard --json", "{not json" if case == "partial"
                            else json.dumps(snap), 1 if case == "partial" else 0),
                           ("*", "unexpected Factory command", 99))
-                for name in ("gh", "systemctl", "uv"):
+                for name in ("gh", "uv"):
                     self.stub(name, ("*", "unexpected management/collector command", 99))
                 for log in self.bin.glob("*.log"):
                     log.unlink()
@@ -236,7 +272,7 @@ class ReportCLITest(DistrictCase):
                         "unavailable" if case == "partial" else "available"), out)
                 self.assertCountEqual(self.calls("factory"), [] if case == "empty" else [
                     "dashboard --runtime-json", "dashboard --json"])
-                for name in ("gh", "systemctl", "uv"):
+                for name in ("gh", "uv"):
                     self.assertEqual(self.calls(name), [])
                 self.assertEqual(host.load(), registry)
                 self.assertEqual({p: p.read_bytes() for root in roots

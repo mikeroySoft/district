@@ -75,6 +75,7 @@ class StatusReleaseTest(unittest.TestCase):
         self.enterContext(mock.patch.object(
             doctor, "gh_auth", return_value=doctor.row("PASS", "gh auth", "authenticated")))
         self.enterContext(mock.patch.object(status, "fleet", return_value={}))
+        self.enterContext(mock.patch.object(status, "add_job_health", return_value=None))
         self.enterContext(mock.patch.object(doctor, "parity_by_slug", return_value={}))
         self.runners: dict[str, ReleaseRunner] = {}
         self.enterContext(mock.patch.object(
