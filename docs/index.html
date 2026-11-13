@@ -138,7 +138,7 @@
         <a class="btn primary" href="#install">Install</a>
         <a class="btn" href="https://github.com/mikeroySoft/district">Source on GitHub</a>
       </div>
-      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.10 (November 12, 2026)</a></p>
+      <p class="sources">Current milestone: graphical Overview and on-demand fleet reporting; operator acceptance and console cutover remain pending.<br><a href="#changelog">Latest release: v0.1.11 (November 13, 2026)</a></p>
     </div>
     <div class="term">
       <div class="bar"><span>district status</span><span>exit 1 · operational attention</span></div>
@@ -299,8 +299,21 @@ rocm-app   capped             <span class="att">attention</span>
   <section id="changelog">
     <div class="kicker">Changelog</div>
     <h2>From fleet registry to operational evidence.</h2>
-    <p class="lede">Selected milestones through November 12, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
+    <p class="lede">Selected milestones through November 13, 2026. Dates below use UTC merge history for PRs. Entries marked as a release are tagged versions; the rest are source milestones, not a claim about every installed host.</p>
     <ol class="timeline">
+      <li>
+        <div><time datetime="2026-11-13">November 13, 2026</time><span class="status shipped">Release · v0.1.11</span></div>
+        <div>
+          <h3>Host-claims keys are valid without a hosts list, and metrics exits nonzero only if every repo fails.</h3>
+          <ul>
+            <li><strong>Accept factory host-claims keys:</strong> <code>repo_hosts</code> accepts factory's host-claims 1 schema (<code>host_name</code>, <code>triage_host</code>, <code>land_host</code>, <code>release_host</code>, <code>claim_ttl</code>) when District has no <code>hosts</code> list, and still treats that table as the local host. Existing hosts-list and <code>host=...</code> rules are unchanged.</li>
+            <li><strong>Apply does not strip those keys:</strong> <code>sync_local_claims</code> leaves host-claims keys on a single local host so the next <code>district apply</code> cannot delete <code>host_name</code> or <code>release_host</code>.</li>
+            <li><strong>Metrics keeps going:</strong> a per-repo error is recorded and later repos are still refreshed. The process exits nonzero only when every non-skipped repo failed, so a total failure stays visible in the unit result.</li>
+          </ul>
+          <p class="decision"><strong>Why:</strong> after Tank's factory table gained host-claims keys with no District <code>hosts</code> list, <code>district-metrics.service</code> failed hourly with <code>triage_host applies only when hosts lists several hosts</code>, even though other repos were still refreshed.</p>
+          <p class="sources"><a href="https://github.com/mikeroySoft/district/releases/tag/v0.1.11">Release v0.1.11</a> · <a href="https://github.com/mikeroySoft/district/pull/192">Host-claims #192</a></p>
+        </div>
+      </li>
       <li>
         <div><time datetime="2026-11-12">November 12, 2026</time><span class="status shipped">Release · v0.1.10</span></div>
         <div>
@@ -555,7 +568,7 @@ rocm-app   capped             <span class="att">attention</span>
 <span class="p">$</span> district status
 <span class="p">$</span> district report                       <span class="c"># on-demand read-only Markdown review on stdout</span>
 <span class="p">$</span> district update --dry-run             <span class="c"># exact SHA, CI eligibility, service plan; no mutation</span>
-<span class="p">$</span> district update --to v0.1.10 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
+<span class="p">$</span> district update --to v0.1.11 --yes     <span class="c"># existing hosts: move to the latest release</span></pre>
     </div>
     <p style="color:var(--text-muted);margin-top:20px">The host config file at <code>~/.config/factory/config.toml</code> is the registry. No second store. A repo is managed iff it has a <code>[repo."owner/name"]</code> table with a <code>path</code>.</p>
     <p style="color:var(--text-muted)">Factories are local unless their repo table names a <code>host</code> defined under <code>[hosts.NAME]</code> (<code>ssh</code>, <code>platform</code>, optional <code>root</code>); <code>local</code> is reserved for this machine. The single controller keeps the registry and operation lock, reaches remote hosts through BatchMode SSH with a bounded connection attempt, and writes each host's filtered Factory config there. Status, report, health, and Atlas retain every factory, label it by host, and show an unreachable host as unknown/unreachable with its last-seen time while other hosts continue.</p>
