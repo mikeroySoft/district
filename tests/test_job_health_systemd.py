@@ -84,3 +84,46 @@ class TestSystemdJobHealth(DistrictCase):
 
         stalled = next(item for item in entry["failure_streaks"] if item["rule"] == "stalled")
         self.assertIsNone(stalled["last_run_at"])
+
+    def test_local_timezone_abbreviations_still_alert(self):
+        repo = self.repo(toml="")
+        host.save({"repo": {"acme/widgets": {"path": str(repo)}}})
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        ran = now - timedelta(hours=3)
+        def instant(ts):
+            return datetime.fromisoformat(ts).astimezone(timezone.utc)
+        results = {}
+        for abbr, offset in (("UTC", 0), ("CET", 1), ("JST", 9)):
+            wall = (ran + timedelta(hours=offset)).strftime("%Y-%m-%d %H:%M:%S")
+            self.stub("journalctl", ("*", ""))
+            self.stub(
+                "systemctl",
+                ("list-units *", "factory-widgets.service loaded inactive dead\n"),
+                ("list-unit-files *", "factory-widgets.service enabled\n"),
+                ("show factory-widgets.service *",
+                 f"ExecMainStatus=1\nResult=exit-code\nExecMainStartTimestamp=Fri {wall} {abbr}\n"
+                 f"ExecMainExitTimestamp=Fri {wall} {abbr}\nActiveState=inactive\n"),
+                ("show factory-widgets.timer *",
+                 f"UnitFileState=enabled\nActiveState=active\nLastTriggerUSec=Fri {wall} {abbr}\n"),
+            )
+            _, output = self.district("status", "--json")
+            streaks = json.loads(output)["acme/widgets"]["failure_streaks"]
+            rate = next(a for a in streaks if a["rule"] == "failure_rate")
+            stalled = next(a for a in streaks if a["rule"] == "stalled")
+            results[abbr] = (rate["count"], rate["total"], instant(rate["last_run_at"]))
+            self.assertEqual(instant(stalled["last_run_at"]), ran)
+        self.assertEqual(results["CET"], results["UTC"])
+        self.assertEqual(results["JST"], results["UTC"])
+        self.assertEqual(results["UTC"], (1, 1, ran))
+
+    def test_unknown_timezone_abbreviation_surfaces_gap(self):
+        ran = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+        wall = ran.strftime("%Y-%m-%d %H:%M:%S")
+        entry = self.configure(
+            [],
+            f"ExecMainStatus=1\nResult=exit-code\nExecMainStartTimestamp=Fri {wall} XYZ\n"
+            f"ExecMainExitTimestamp=Fri {wall} XYZ\nActiveState=inactive\n",
+            f"UnitFileState=enabled\nActiveState=active\nLastTriggerUSec=Fri {wall} XYZ\n",
+        )
+        self.assertTrue(any(g["code"] == "timestamp_unparseable"
+                            for g in entry["pass_history_errors"]))

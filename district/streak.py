@@ -19,6 +19,19 @@ UNIT_FAILED = "be02cf6855d2428ba40df7e9d022f03d"
 STAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})")
 END = re.compile(r"===\s*end\s+rc=(-?\d+)\b")
 
+# Zone abbreviations email.utils cannot resolve, as fixed minutes east of UTC. Ambiguous
+# abbreviations (IST, CST, BST, ...) are omitted so a genuinely unresolvable stamp surfaces as a
+# gap instead of a guessed instant.
+TZ_OFFSETS = {
+    "UTC": 0, "GMT": 0, "WET": 0, "WEST": 60, "CET": 60, "CEST": 120, "EET": 120, "EEST": 180,
+    "MSK": 180, "GST": 240, "PKT": 300, "ICT": 420, "WIB": 420, "HKT": 480, "SGT": 480,
+    "AWST": 480, "JST": 540, "KST": 540, "ACST": 570, "AEST": 600, "ACDT": 630, "AEDT": 660,
+    "NZST": 720, "NZDT": 780,
+}
+# A real error worth surfacing over benign "0 failed"/"triage OK" pass summaries.
+HARD_ERROR = re.compile(r"\w*(?:error|exception)\b|traceback|\bfatal\b|\bpanic\b", re.I)
+BENIGN = re.compile(r"\b(?:0|no)\s+(?:failed|failures?|errors?)\b|\btriage ok\b", re.I)
+
 # Read paths and launchctl on the owning host, never on the controller.
 # ponytail: inspect the last 4 MiB per log; rotated/older history is not evidence.
 LAUNCHD_LOGS = """\
@@ -100,6 +113,15 @@ class PassResult:
     error: str | None = None
 
 
+def _zoned(parsed: datetime, zone: str | None) -> str | None:
+    if parsed.tzinfo:
+        return parsed.isoformat()
+    minutes = TZ_OFFSETS.get(zone.upper()) if zone else None
+    if minutes is None:
+        return None
+    return parsed.replace(tzinfo=timezone(timedelta(minutes=minutes))).isoformat()
+
+
 def _stamp(line: str) -> str | None:
     match = STAMP.search(line)
     if match:
@@ -112,20 +134,30 @@ def _stamp(line: str) -> str | None:
         try:
             day = datetime.fromisoformat(native[1]).strftime("%d %b %Y")
             parsed = parsedate_to_datetime(f"{day} {native[2]} {native[3]}")
-            return parsed.isoformat() if parsed.tzinfo else None
         except (ValueError, TypeError):
             return None
-    # launchd shell jobs commonly use `date`, including PST/PDT rather than ISO.
-    plain = re.search(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\S+\s+\d{4}", line)
+        return _zoned(parsed, native[3])
+    # launchd shell jobs commonly use `date`, including CET/JST/PST rather than ISO.
+    plain = re.search(r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+(\S+)\s+\d{4}", line)
     try:
         parsed = parsedate_to_datetime(plain[0] if plain else line)
-        return parsed.isoformat() if parsed.tzinfo else None
     except (ValueError, TypeError):
         return None
+    return _zoned(parsed, plain[1] if plain else None)
 
 
 def _error(line: str) -> bool:
     return bool(re.search(r"error|exception|failed|fatal", line, re.I))
+
+
+def _rank(line: str | None) -> int:
+    if not line:
+        return -1
+    if HARD_ERROR.search(line):
+        return 2
+    if BENIGN.search(line):
+        return -1
+    return 1
 
 
 def journal_passes(text: str, unit: str) -> tuple[list[PassResult], str | None]:
@@ -144,7 +176,7 @@ def journal_passes(text: str, unit: str) -> tuple[list[PassResult], str | None]:
             error = None
         elif isinstance(message, str) and message.strip() and item.get("MESSAGE_ID") is None:
             for detail in message.strip().splitlines():
-                if detail.strip() and (error is None or (_error(detail) and not _error(error))):
+                if detail.strip() and _rank(detail.strip()) > _rank(error):
                     error = detail.strip()
     return passes, error
 
@@ -160,7 +192,7 @@ def launchd_passes(text: str) -> list[PassResult]:
             started, error = None, None
         elif "===" in line:
             started, error = _stamp(line), None
-        elif line.strip() and (error is None or (_error(line) and not _error(error))):
+        elif line.strip() and _rank(line.strip()) > _rank(error):
             error = line.strip()
     return passes
 
@@ -233,8 +265,18 @@ def _systemd_job(runner, label: str, root: str, timeout: float) -> dict:
         code = "journalctl_unavailable" if isinstance(exc, FileNotFoundError) or "not found" in str(exc) else "pass_history_unavailable"
         gaps.append({"code": code, "error": str(exc)})
         passes, pending_error = [], None
-    last_run = _stamp(service.get("ExecMainStartTimestamp", "")) or _stamp(timer.get("LastTriggerUSec", ""))
-    completed = _stamp(service.get("ExecMainExitTimestamp", "")) or last_run
+    service_start = service.get("ExecMainStartTimestamp", "")
+    service_exit = service.get("ExecMainExitTimestamp", "")
+    trigger = timer.get("LastTriggerUSec", "")
+    last_run = _stamp(service_start) or _stamp(trigger)
+    completed = _stamp(service_exit) or last_run
+    # A present but unresolvable timestamp (unknown local-zone abbreviation) must surface as a gap,
+    # never be silently dropped into "no evidence".
+    for raw in (service_start, service_exit, trigger):
+        if re.search(r"\d{4}-\d{2}-\d{2}", raw) and _stamp(raw) is None:
+            gaps.append({"code": "timestamp_unparseable",
+                         "error": f"{label}: unparseable service timestamp {raw.strip()!r}"})
+            break
     if (completed and "ExecMainStatus" in service and service.get("ActiveState") not in ("active", "activating")
             and (not passes or not passes[-1].at or datetime.fromisoformat(completed) > datetime.fromisoformat(passes[-1].at))):
         failed = service["ExecMainStatus"] != "0" or service.get("Result", "success") != "success"

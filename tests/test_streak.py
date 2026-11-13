@@ -2,10 +2,11 @@
 
 import json
 import plistlib
+import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from district import host
+from district import host, streak
 from tests.test_district import DistrictCase
 
 
@@ -251,3 +252,33 @@ class TestFailureStreak(DistrictCase):
         code, out = self.district("status", "--json")
         self.assertEqual(code, 1, out)
         self.assertEqual(json.loads(out)["acme/widgets"]["failure_streaks"][0]["last_error"], ERROR)
+
+
+class TestErrorHeuristic(unittest.TestCase):
+    def test_launchd_prefers_real_error_over_benign(self):
+        log = ("=== 2026-11-02T12:00:00+00:00 start ===\n"
+               "0 failed checks\n"
+               "AttributeError: dispatch crashed\n"
+               "=== end rc=1 2026-11-02T12:00:01+00:00 ===\n")
+        passes = streak.launchd_passes(log)
+        self.assertEqual([p.error for p in passes], ["AttributeError: dispatch crashed"])
+
+    def test_launchd_benign_only_is_not_reported_as_error(self):
+        log = ("=== 2026-11-02T12:00:00+00:00 start ===\n"
+               "triage OK\n"
+               "=== end rc=1 2026-11-02T12:00:01+00:00 ===\n")
+        self.assertIsNone(streak.launchd_passes(log)[0].error)
+
+    def test_journal_prefers_real_error_over_benign(self):
+        records = [
+            {"__REALTIME_TIMESTAMP": "1793620799000000",
+             "_SYSTEMD_UNIT": "factory-widgets.service",
+             "MESSAGE": "0 failed checks\nAttributeError: dispatch crashed"},
+            {"__REALTIME_TIMESTAMP": "1793620800000000",
+             "USER_UNIT": "factory-widgets.service",
+             "MESSAGE_ID": streak.UNIT_FAILED, "ExecMainStatus": "1",
+             "RESULT": "exit-code", "MESSAGE": "Failed"},
+        ]
+        text = "\n".join(map(json.dumps, records))
+        passes, _ = streak.journal_passes(text, "factory-widgets.service")
+        self.assertEqual(passes[0].error, "AttributeError: dispatch crashed")

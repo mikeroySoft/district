@@ -44,7 +44,7 @@ only once.
 | `district install-state` | Read fast local District/Factory versions, configured engine/ref policy, systemd timer/service state, durable holds, and the last apply record, including deferred work with its reason and original `since` timestamp. `--json` follows `district/install-state.schema.json`; release fields are `unknown` when the bounded cached lookup is unavailable. |
 | `district status` | Fleet operations and per-host engine release drift, including registered hosts without repositories. Hosts are collected in parallel with bounded SSH; every row and JSON entry names its host. Exit 1 means operational attention, an engine not at the latest stable release, or failed controller `gh auth status`; exit 2 means unknown observation or release identity when no row needs attention. Exit 0 means every observation is normal. `--json` adds a top-level `engines` map beside classifications and metrics keyed by slug, plus `host` when gh auth fails. `--slug OWNER/REPO` (repeatable) limits repository collection and output; `--unhealthy` prints only non-normal repository rows. Both retain all-host engine status. |
 | `district doctor` | Check District's own host prerequisites, rerun each factory's scheduler toolchain preflight, and check declared toolchain profiles. `--json`. |
-| `district report` | Print a read-only Markdown fleet review across every host; each repository section names its host and unreachable last-seen state. The install section comes from the persisted install-state record. |
+| `district report` | Print a read-only Markdown fleet review across every host; each repository section names its host and unreachable last-seen state. Host-only findings (e.g. a configured host with no assigned repositories) appear under a separate Host findings section and are excluded from the registered-repository count, coverage, and aggregates. The install section comes from the persisted install-state record. |
 | `district metrics [slug]` | Per-factory `git`/`gh` metrics from the hourly cache. `--refresh`, `--max-age`. |
 | `district dashboard` | Serve the fleet console and host-badged Atlas on `127.0.0.1:8760`. `--install` enables the dashboard, metrics, and apply units; `--host` adds read-only LAN viewing. Remote collection is controller-initiated SSH and opens no listeners. |
 | `district update` | Update District itself from eligible official CI, then run the newly installed `district apply --drain` after releasing the update lock. Dry runs and failed updates never request a drain. `--dry-run`, `--to REF`, `--rollback` (offline), `--yes`, `--json`. |
@@ -110,7 +110,10 @@ or history read that cannot launch journalctl produces `journalctl_unavailable`
 rather than a traceback escaping District.
 
 Pass logs use `=== end rc=CODE` markers. Opening/end markers may carry ISO-8601
-timestamps or the shell's plain `date` format, including PST/PDT. Undated
+timestamps or the shell's plain `date` format. Local-timezone abbreviations in
+`date` output and `systemctl show` timestamps (UTC, CET, JST, and similar) are
+resolved to fixed UTC offsets; a present but unresolvable timestamp becomes a
+`timestamp_unparseable` gap rather than silently dropping the run. Undated
 completions still count toward streaks and the failure-rate sample; the rate
 explicitly marks its window uncertain and reports the undated count rather
 than silently discarding runs. Log mtime supplies last-run timing only for an
@@ -126,7 +129,8 @@ alerts. Each alert includes `host`, `repo` (null for an unregistered job),
 (failures), `total`, `window_hours`, `first_failed_at`, `last_failed_at`,
 `last_run_at`, and nullable `first_error`/`last_error`. Rate alerts also include
 `undated_count`. The table names the host, label, failure count, window, and
-first error line. `pass_history_errors` includes host, repo, label, code,
+first real error line; benign `0 failed`/`triage OK` summaries never displace an
+actual error. `pass_history_errors` includes host, repo, label, code,
 error, and unreachable state; read errors are not failed job runs.
 
 ## Ownership
