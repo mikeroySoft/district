@@ -108,10 +108,6 @@ def _stamp(line: str) -> str | None:
     return None
 
 
-def _error(line: str) -> bool:
-    return bool(re.search(r"error|exception|failed|fatal", line, re.I))
-
-
 def _rank(line: str | None) -> int:
     if not line:
         return -1
@@ -122,7 +118,7 @@ def _rank(line: str | None) -> int:
     return 1
 
 
-def journal_passes(text: str, unit: str) -> tuple[list[PassResult], str | None]:
+def journal_passes(text: str, unit: str) -> list[PassResult]:
     passes = []
     error = None
     for line in text.splitlines():
@@ -140,7 +136,7 @@ def journal_passes(text: str, unit: str) -> tuple[list[PassResult], str | None]:
             for detail in message.strip().splitlines():
                 if detail.strip() and _rank(detail.strip()) > _rank(error):
                     error = detail.strip()
-    return passes, error
+    return passes
 
 
 def launchd_passes(text: str) -> list[PassResult]:
@@ -197,8 +193,11 @@ def _launchd_history(payload: dict) -> list[PassResult]:
     # stdout/stderr may be the same file; never count a pass twice.
     passes = max((launchd_passes(value) for value in logs.values()), key=_latest_pass_at, default=[])
     if passes and stderr.strip() and not END.search(stderr):
-        lines = stderr.strip().splitlines()
-        passes[-1] = replace(passes[-1], error=next((line for line in lines if _error(line) and "Traceback" not in line), lines[-1]))
+        best = passes[-1].error
+        for line in (candidate.strip() for candidate in stderr.strip().splitlines()):
+            if line and "Traceback" not in line and _rank(line) > _rank(best):
+                best = line
+        passes[-1] = replace(passes[-1], error=best)
     return passes
 
 
@@ -207,7 +206,7 @@ def _systemd_job(runner, label: str, root: str, timeout: float) -> dict:
     try:
         text = _output(runner, ["journalctl", "--user", "-u", f"{label}.service", "--output=json",
                                "--no-pager", "-n", "10000"], timeout)
-        passes, _ = journal_passes(text, f"{label}.service")
+        passes = journal_passes(text, f"{label}.service")
     except OSError as exc:
         code = "journalctl_unavailable" if isinstance(exc, FileNotFoundError) or "not found" in str(exc) else "pass_history_unavailable"
         gaps.append({"code": code, "error": str(exc)})
@@ -225,7 +224,12 @@ def _jobs(runner, platform: str, expected: dict[str, str], timeout: float) -> tu
         return jobs, [{"code": "pass_history_unavailable", "error": error} for error in payload["errors"]]
     labels = set(expected)
     for command in ("list-units", "list-unit-files"):
-        text = _output(runner, ["systemctl", "--user", command, "factory-*.service", "--no-legend", "--no-pager"], timeout)
+        # A discovery failure (e.g. no D-Bus session) must not suppress journal reads for known labels.
+        try:
+            text = _output(runner, ["systemctl", "--user", command, "factory-*.service",
+                                    "--no-legend", "--no-pager"], timeout)
+        except OSError:
+            continue
         labels.update(line.split()[0].removesuffix(".service") for line in text.splitlines()
                       if line.split() and line.split()[0].endswith(".service"))
     jobs = []
