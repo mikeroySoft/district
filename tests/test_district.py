@@ -33,7 +33,7 @@ sys.path.insert(0, str(ROOT))
 
 from district import add, apply, atlas, cli, doctor, health, host, install_state, metrics, status  # noqa: E402
 from district import dashboard as dash  # noqa: E402  (dashboard() below is the snapshot fixture)
-from tests.remote_transport import remote_command  # noqa: E402
+from tests.remote_transport import remote_command, with_remote_python  # noqa: E402
 
 STUB = '''#!/usr/bin/env python3
 import fnmatch, json, os, pathlib, sys
@@ -218,7 +218,8 @@ class HostRunTest(unittest.TestCase):
 
     def test_remote_runner_uses_noninteractive_bounded_ssh_and_logs_the_command(self) -> None:
         transport = mock.Mock(return_value=subprocess.CompletedProcess([], 0, "ok\n", ""))
-        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
+        runner = host.RemoteRunner(
+            "ultron", "factory@ultron.example", transport=with_remote_python(transport))
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
@@ -234,7 +235,8 @@ class HostRunTest(unittest.TestCase):
 
     def test_remote_runner_preserves_command_timeout(self) -> None:
         transport = mock.Mock(side_effect=subprocess.TimeoutExpired(["ssh"], 120))
-        runner = host.RemoteRunner("ultron", "factory@ultron.example", transport=transport)
+        runner = host.RemoteRunner(
+            "ultron", "factory@ultron.example", transport=with_remote_python(transport))
 
         with self.assertRaises(subprocess.TimeoutExpired):
             runner(["factory", "install"], timeout=120)
@@ -342,7 +344,7 @@ class DistrictCase(unittest.TestCase):
                 argv, proc.returncode, proc.stdout.replace(str(actual_home), logical_home), proc.stderr,
             )
 
-        return transport, actual_home, commands
+        return with_remote_python(transport), actual_home, commands
 
     def fake_ssh(self, *targets: str, unreachable: tuple[str, ...] = ()) -> dict[str, Path]:
         homes = {target: self.tmp / f"remote-{index}" for index, target in enumerate(targets)}
@@ -2411,7 +2413,7 @@ class ApplyTest(DistrictCase):
             def transport(argv, **_kwargs):
                 command = remote_command(argv)
                 parts = shlex.split(command)
-                if parts[:1] == ["python3"] and host.REMOTE_DEADLINE in parts:
+                if parts[1:3] == ["-c", host.REMOTE_DEADLINE]:
                     command = parts[-1]
                 log.append(command)
                 if drop and drop in command:
@@ -2446,7 +2448,8 @@ class ApplyTest(DistrictCase):
                         return subprocess.CompletedProcess(argv, install_rc, "", "install broke")
                     installed[0] = new if f"@{new}" in command else old
                 return subprocess.CompletedProcess(argv, 0, "", "")
-            return host.RemoteRunner(name, f"factory@{name}.example", transport=transport)
+            return host.RemoteRunner(
+                name, f"factory@{name}.example", transport=with_remote_python(transport))
 
         def run_fleet(ultron: tuple, benito: tuple):
             host.save({

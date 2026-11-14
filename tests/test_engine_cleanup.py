@@ -249,7 +249,8 @@ class EngineCleanupTest(unittest.TestCase):
                     transport = runner.transport
 
                     def capture(argv, **kwargs):
-                        received.append(json.loads(kwargs["input"])["data"]["extensions"])
+                        if kwargs.get("input") is not None:
+                            received.append(json.loads(kwargs["input"])["data"]["extensions"])
                         return transport(argv, **kwargs)
 
                     runner.transport = capture

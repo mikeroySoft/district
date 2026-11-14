@@ -63,8 +63,14 @@ def executable(name: str) -> Path:
 
 def external_python(tool: Path) -> Path:
     candidates = (Path("/usr/bin/python3"), Path("/bin/python3"))
+    if sys.platform == "darwin":
+        candidates += (Path("/opt/homebrew/bin/python3"), Path("/usr/local/bin/python3"))
     for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK) and tool not in candidate.resolve().parents:
+        if not candidate.is_file() or not os.access(candidate, os.X_OK) or tool in candidate.parents:
+            continue
+        try:
+            if tool in candidate.resolve().parents:
+                continue
             proc = subprocess.run(
                 [str(candidate), "-c", "import sys; raise SystemExit(sys.version_info < (3, 11))"],
                 stdin=subprocess.DEVNULL,
@@ -73,8 +79,10 @@ def external_python(tool: Path) -> Path:
                 timeout=10,
                 check=False,
             )
-            if proc.returncode == 0:
-                return candidate
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if proc.returncode == 0:
+            return candidate
     raise UpdateError("an external Python 3.11+ interpreter is required for safe recovery")
 
 
@@ -534,10 +542,12 @@ def recover_pending(args: argparse.Namespace) -> int | None:
     if not journal.exists():
         return None
     if args.dry_run:
-        raise UpdateError(
-            f"an interrupted update requires recovery; run `district update --yes` or "
-            f"`/usr/bin/python3 {root / 'transaction.py'} recover {root}`"
-        )
+        try:
+            python = external_python(Path("/__district_unmanaged__"))
+            manual = f" or `{python} {root / 'transaction.py'} recover {root}`"
+        except UpdateError:
+            manual = ""
+        raise UpdateError(f"an interrupted update requires recovery; run `district update --yes`{manual}")
     if not args.yes:
         if not sys.stdin.isatty():
             raise UpdateError("interrupted update recovery requires confirmation; pass --yes")

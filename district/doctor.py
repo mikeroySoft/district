@@ -247,7 +247,12 @@ def _controller_path_rows(name: str, table: dict, defaults: dict) -> list[dict[s
         "import json,os,sys; "
         "print(json.dumps([path for path in sys.argv[1:] if not os.path.exists(path)]))"
     )
-    proc = _host_run(name, table, ["python3", "-c", script, *paths])
+    try:
+        proc = host.remote_runner(name, table)(
+            ["python3", "-c", script, *paths], quiet=True, timeout=HOST_COMMAND_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired, host.RemoteHostError, host.DistrictError):
+        return []
     if proc.returncode:
         return []
     try:

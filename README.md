@@ -193,6 +193,8 @@ receive version probes (`xcodebuild -version`, for example); failed probes are
 WARN, not activation blockers. Unknown commands and relative gate scripts are
 resolved without executing them for version discovery. `district doctor` reruns
 the same read-only preflight for already-registered factories.
+Remote preflight also reports the absolute helper Python path and version, and
+fails if no Python >=3.11 is available for District's remote scripts.
 
 `toolchain = "macos-xcode"` additionally requires `cargo`, `xcodegen`, `swift`,
 and `xcodebuild` during onboarding and apply. Doctor's supplemental profile
@@ -225,12 +227,23 @@ The complete POSIX command script (including environment, working directory, and
 deadline wrapper) is base64-encoded and executed by `/bin/sh` through Python.
 The SSH login shell sees only a fixed launcher and encoded data, so fish and
 POSIX login shells preserve argument quotes, backslashes, and stdin identically.
-Remote hosts need Python >=3.11 as `python3`, plus Factory, `uv`, git, and authenticated `gh`
-on their noninteractive PATH. Commands with execution deadlines also run a
-remote Python watchdog that kills the command's process group on timeout.
+Before sending helpers, District uses a fixed `/bin/sh` bootstrap to verify and
+pin Python >=3.11, preferring the Factory uv tool's `bin/python`, then
+`/usr/bin/python3`, `/bin/python3`, `/opt/homebrew/bin/python3`, and
+`/usr/local/bin/python3`. The selected absolute path runs every helper (including
+doctor's controller-path checks), launcher, and deadline watchdog; login-shell
+PATH order never selects their interpreter.
+The watchdog kills the command's process group on timeout. Factory, `uv`, git,
+and authenticated `gh` must still be on the host's noninteractive PATH.
 District keeps the authoritative registry and operation lock on the controller,
 writes a host-filtered Factory config remotely, and continues with other hosts
 when one cannot be reached or a remote host operation fails.
+
+For self-update recovery, District checks `/usr/bin/python3` and `/bin/python3`
+first, and on macOS also checks `/opt/homebrew/bin/python3` and
+`/usr/local/bin/python3`. Recovery requires a verified Python >=3.11 outside
+District's tool environment, including both lexical and resolved symlink paths.
+
 `district update` updates this controller; registered
 remote factories do not require District installations of their own.
 

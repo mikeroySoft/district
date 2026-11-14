@@ -43,6 +43,29 @@ DEFAULTS = {
     "failed_pass_streak": 6,
 }
 SSH_CONNECT_TIMEOUT = 10
+# Fixed shell syntax only: discovery cannot depend on Python or login-shell PATH.
+# No single quotes in this script, so its shell-quoted form also survives fish.
+REMOTE_PYTHON = """\
+tool=${UV_TOOL_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/uv/tools}
+case "$tool" in
+    "~/"*) tool="$HOME/${tool#??}";;
+    /*) ;;
+    *) tool="$PWD/$tool";;
+esac
+for candidate in "$tool/factory/bin/python" /usr/bin/python3 /bin/python3 /opt/homebrew/bin/python3 /usr/local/bin/python3
+do
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    "$candidate" -c "import json,sys; sys.exit(1) if sys.version_info < (3,11) else print(json.dumps([sys.argv[1],list(sys.version_info[:3])]))" "$candidate" </dev/null 2>/dev/null && exit 0
+done
+echo "Python 3.11+ required for remote helpers; checked Factory tool, /usr/bin/python3, /bin/python3, /opt/homebrew/bin/python3, /usr/local/bin/python3" >&2
+exit 1
+"""
+
+REMOTE_EXEC = (
+    "import base64,os,sys;"
+    "os.execv(sys.argv[1],[sys.argv[1],sys.argv[2],base64.b64decode(sys.argv[3])])"
+)
+
 # The supervisor lives on the remote host, outside the command's process group.
 # It kills descendants even if the controller loses its SSH client.
 REMOTE_DEADLINE = """\
@@ -544,13 +567,53 @@ class RemoteRunner:
         self.target = target
         self.transport = transport
         self._facts: dict | None = None
+        self._python: str | None = None
+        self.python_version: str | None = None
+
+    def _ssh(self, command: str, *, timeout: float | None, input: str | None = None) -> subprocess.CompletedProcess:
+        ssh = [
+            "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
+            self.target, "--", command,
+        ]
+        try:
+            proc = self.transport(ssh, timeout=timeout, input=input)
+        except OSError as exc:
+            raise RemoteHostError(self.name, str(exc)) from exc
+        if proc.returncode == 255:
+            detail = (proc.stderr or proc.stdout).strip().splitlines()
+            raise RemoteHostError(self.name, detail[-1] if detail else f"ssh exited {proc.returncode}")
+        return proc
+
+    def python(self, *, timeout: float = 10) -> str:
+        """Resolve and verify an absolute helper interpreter once per host runner."""
+        if self._python is None:
+            proc = self._ssh(shlex.join(["/bin/sh", "-c", REMOTE_PYTHON]), timeout=timeout)
+            if proc.returncode:
+                raise DistrictError(f"{self.name}: {(proc.stderr or proc.stdout).strip() or 'Python 3.11+ required'}")
+            try:
+                candidate, version = json.loads(proc.stdout)
+                if (not PurePosixPath(candidate).is_absolute() or len(version) != 3
+                        or any(type(part) is not int for part in version) or version < [3, 11, 0]):
+                    raise ValueError("invalid interpreter")
+            except (TypeError, ValueError) as exc:
+                raise DistrictError(f"{self.name}: invalid remote Python 3.11+ interpreter details") from exc
+            self._python = candidate
+            self.python_version = ".".join(map(str, version))
+        return self._python
 
     def __call__(self, argv: list[str], cwd: Path | RemotePath | None = None,
                  check: bool = False, quiet: bool = False, timeout: float | None = None,
                  env: dict[str, str] | None = None, input: str | None = None) -> subprocess.CompletedProcess:
         if not quiet:
             print(f"{self.name}: $ {shlex.join(argv)}")
-        command = shlex.join(argv)
+        requested_timeout = timeout
+        started = time.monotonic()
+        python = self.python(timeout=timeout if timeout is not None else 10)
+        if timeout is not None:
+            timeout -= time.monotonic() - started
+            if timeout <= 0:
+                raise subprocess.TimeoutExpired(argv, requested_timeout)
+        command = shlex.join([python, *argv[1:]] if argv[0] == "python3" else argv)
         if env:
             assignments = " ".join(f"{key}={shlex.quote(value)}" for key, value in env.items())
             command = f"env {assignments} {command}"
@@ -562,28 +625,18 @@ class RemoteRunner:
             # Reserve time for connecting and returning the cleanup result within
             # the controller's deadline. The remote watchdog must expire first.
             limit = max(0, timeout - min(SSH_CONNECT_TIMEOUT, timeout / 2))
-            command = shlex.join(["python3", "-c", REMOTE_DEADLINE, str(limit), marker, command])
+            command = shlex.join([python, "-c", REMOTE_DEADLINE, str(limit), marker, command])
         # Only fixed syntax and base64 reach the login shell; even fish preserves
         # them. Exec keeps stdin available to the command (including config writes).
         payload = base64.b64encode(command.encode()).decode("ascii")
-        command = (
-            'python3 -c "import base64,os,sys;'
-            'os.execv(sys.argv[1],[sys.argv[1],sys.argv[2],base64.b64decode(sys.argv[3])])" '
-            f"/bin/sh -c {payload}"
-        )
-        ssh = [
-            "ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={SSH_CONNECT_TIMEOUT}",
-            self.target, "--", command,
-        ]
-        try:
-            proc = self.transport(ssh, timeout=timeout, input=input)
-        except OSError as exc:
-            raise RemoteHostError(self.name, str(exc)) from exc
+        # Fish unescapes backslashes inside single quotes; double quotes agree
+        # with POSIX except for backticks, which stay in their own literal quotes.
+        launcher = '"' + (python.replace("\\", "\\\\").replace('"', '\\"')
+                          .replace("$", "\\$").replace("`", "\"'`'\"")) + '"'
+        command = f'{launcher} -c "{REMOTE_EXEC}" /bin/sh -c {payload}'
+        proc = self._ssh(command, timeout=timeout, input=input)
         if marker and proc.returncode == 124 and marker in proc.stderr.splitlines():
-            raise subprocess.TimeoutExpired(argv, timeout, output=proc.stdout, stderr=proc.stderr)
-        if proc.returncode == 255:
-            detail = (proc.stderr or proc.stdout).strip().splitlines()
-            raise RemoteHostError(self.name, detail[-1] if detail else f"ssh exited {proc.returncode}")
+            raise subprocess.TimeoutExpired(argv, requested_timeout, output=proc.stdout, stderr=proc.stderr)
         result = subprocess.CompletedProcess(argv, proc.returncode, proc.stdout, proc.stderr)
         if check and result.returncode:
             if not quiet:
