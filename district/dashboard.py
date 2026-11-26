@@ -295,7 +295,7 @@ def install(host_arg: str | None, port: int) -> int:
 
 class DashboardServer(ThreadingHTTPServer):
     def __init__(self, address: tuple[str, int], data: dict):
-        self.collector = status.FleetCollector(data)
+        self.collector = status.FleetCollector(data, full_interval=status.snapshot_ttl(data))
         super().__init__(address, Handler)
 
 
