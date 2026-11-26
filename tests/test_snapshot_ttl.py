@@ -54,7 +54,7 @@ class SnapshotTTLTest(unittest.TestCase):
     def test_repeated_and_concurrent_page_api_and_direct_hits_poll_once_per_root_per_ttl(self):
         server = dashboard.DashboardServer(("127.0.0.1", 0), self.data)
         collector = server.collector
-        self.assertEqual(collector.full_interval, 60)
+        self.assertEqual(collector.full_interval, 300)
         threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -67,8 +67,8 @@ class SnapshotTTLTest(unittest.TestCase):
             connection.getresponse().read()
             connection.close()
 
-        span = 180
-        for step in range(0, span + 1, 5):
+        span = 600
+        for step in range(0, span + 1, 10):
             self.clock[0] = 1000.0 + step
             hits = [threading.Thread(target=get, args=(path,)) for path in ("/api/fleet", "/legacy") * 3]
             hits += [threading.Thread(target=collector.collect_full, args=(slug,))
@@ -78,9 +78,9 @@ class SnapshotTTLTest(unittest.TestCase):
             for hit in hits:
                 hit.join(5)
             time.sleep(0.05)  # let the background loop observe this tick
-        self.assert_bounded(60, span)
+        self.assert_bounded(300, span)
         for root, stamps in self.calls.items():
-            self.assertEqual(len(stamps), 4, f"{root} should still refresh every TTL: {stamps}")
+            self.assertEqual(len(stamps), 3, f"{root} should still refresh every TTL: {stamps}")
 
     def test_concurrent_callers_coalesce_onto_one_inflight_call(self):
         collector = status.FleetCollector(self.data, full_interval=60)
@@ -108,16 +108,22 @@ class SnapshotTTLTest(unittest.TestCase):
         self.assertEqual(len(self.calls["/a"]), 2)
 
     def test_ttl_is_configurable_with_a_60s_floor(self):
-        self.assertEqual(status.snapshot_ttl({}), 60)
-        self.assertEqual(status.snapshot_ttl({"defaults": {"dashboard_snapshot_ttl": 300}}), 300)
+        self.assertEqual(status.snapshot_ttl({"defaults": {"dashboard_snapshot_ttl": 120}}), 120)
         self.assertEqual(status.snapshot_ttl({"defaults": {"dashboard_snapshot_ttl": 5}}), 60)
         for bad in ("60", True, None):
             with self.assertRaises(host.DistrictError):
                 status.snapshot_ttl({"defaults": {"dashboard_snapshot_ttl": bad}})
-        data = {**self.data, "defaults": {"dashboard_snapshot_ttl": 300}}
+        data = {**self.data, "defaults": {"dashboard_snapshot_ttl": 120}}
         server = dashboard.DashboardServer(("127.0.0.1", 0), data)
         self.addCleanup(server.server_close)
-        self.assertEqual(server.collector.full_interval, 300)
+        self.assertEqual(server.collector.full_interval, 120)
+
+    def test_default_ttl_is_300s_and_floor_is_60s(self):
+        self.assertEqual(status.snapshot_ttl({}), 300)
+        self.assertEqual(status.snapshot_ttl({"defaults": {}}), 300)
+        self.assertEqual(status.snapshot_ttl({"defaults": {"dashboard_snapshot_ttl": 0}}), 60)
+        self.assertEqual(status.snapshot_ttl({"defaults": {"dashboard_snapshot_ttl": 59.9}}), 60)
+        self.assertEqual(status.snapshot_ttl({"defaults": {"dashboard_snapshot_ttl": 60}}), 60)
 
 
 if __name__ == "__main__":

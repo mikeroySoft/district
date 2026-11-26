@@ -87,7 +87,8 @@ def entry(result: dict, table: dict) -> dict:
     }
 
 RUNTIME_INTERVAL = 5.0
-FULL_INTERVAL = 60.0  # floor and default for the GitHub-bound full snapshot TTL
+FULL_INTERVAL = 60.0  # floor for the GitHub-bound full snapshot TTL
+DASHBOARD_SNAPSHOT_TTL = 300.0  # dashboard default: ~16 gh calls/min across 5 roots (#210)
 COLLECTION_TIMEOUT = 4.0
 FULL_TIMEOUT = 30.0  # `factory dashboard --json` is GitHub-bound: ~2s typical, spikes past 4s
 COLLECTION_CONCURRENCY = 8
@@ -95,8 +96,8 @@ EVENT_LIMIT = 512
 
 
 def snapshot_ttl(data: dict) -> float:
-    """`[defaults] dashboard_snapshot_ttl` seconds (default and floor FULL_INTERVAL)."""
-    value = data.get("defaults", {}).get("dashboard_snapshot_ttl", FULL_INTERVAL)
+    """`[defaults] dashboard_snapshot_ttl` seconds (default DASHBOARD_SNAPSHOT_TTL, floor FULL_INTERVAL)."""
+    value = data.get("defaults", {}).get("dashboard_snapshot_ttl", DASHBOARD_SNAPSHOT_TTL)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise host.DistrictError("[defaults].dashboard_snapshot_ttl must be a number of seconds")
     return max(FULL_INTERVAL, float(value))
