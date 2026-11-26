@@ -87,11 +87,20 @@ def entry(result: dict, table: dict) -> dict:
     }
 
 RUNTIME_INTERVAL = 5.0
-FULL_INTERVAL = 60.0
+FULL_INTERVAL = 60.0  # floor for the GitHub-bound full snapshot TTL
+DASHBOARD_SNAPSHOT_TTL = 300.0  # dashboard default: ~16 gh calls/min across 5 roots (#210)
 COLLECTION_TIMEOUT = 4.0
 FULL_TIMEOUT = 30.0  # `factory dashboard --json` is GitHub-bound: ~2s typical, spikes past 4s
 COLLECTION_CONCURRENCY = 8
 EVENT_LIMIT = 512
+
+
+def snapshot_ttl(data: dict) -> float:
+    """`[defaults] dashboard_snapshot_ttl` seconds (default DASHBOARD_SNAPSHOT_TTL, floor FULL_INTERVAL)."""
+    value = data.get("defaults", {}).get("dashboard_snapshot_ttl", DASHBOARD_SNAPSHOT_TTL)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise host.DistrictError("[defaults].dashboard_snapshot_ttl must be a number of seconds")
+    return max(FULL_INTERVAL, float(value))
 
 
 def _utcnow() -> str:
@@ -317,6 +326,7 @@ class FleetCollector:
         self._thread: threading.Thread | None = None
         self._pool: ThreadPoolExecutor | None = None
         self._running: dict[str, Future] = {}
+        self._full_inflight: dict[str, threading.Event] = {}
 
 
     @staticmethod
@@ -494,12 +504,36 @@ class FleetCollector:
             self.revision += 1
 
     def collect_full(self, slug: str) -> None:
+        """At most one GitHub-bound `factory dashboard --json` per root per full_interval.
+
+        A fresher cached snapshot is kept; concurrent callers wait on the one in-flight call.
+        """
         with self._lock:
             record = self._records.get(slug)
             if record is None:
                 return
+            inflight = self._full_inflight.get(slug)
+            if inflight is None:
+                if time.monotonic() - record["full_at"] < self.full_interval:
+                    return
+                inflight = self._full_inflight[slug] = threading.Event()
+                owner = True
+            else:
+                owner = False
             table = self.repos[slug]
             name = host.primary_host(table)
+        if not owner:
+            inflight.wait(self.full_timeout + 1)
+            return
+        try:
+            self._collect_full(slug, record, table, name)
+        finally:
+            with self._lock:
+                if self._full_inflight.get(slug) is inflight:
+                    del self._full_inflight[slug]
+            inflight.set()
+
+    def _collect_full(self, slug: str, record: dict, table: dict, name: str) -> None:
         result = (
             snapshot(slug, table, timeout=self.full_timeout)
             if name == "local"
